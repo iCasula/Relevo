@@ -291,6 +291,20 @@ enum SelfTest {
         await waitIdle(90)
         out("avisos: \(thread.items.filter { $0.kind == .notice }.map(\.text)) · errores: \(thread.items.filter { $0.kind == .error }.count)")
         out("última respuesta: \(thread.items.last { $0.kind == .assistant }?.text.prefix(40) ?? "-")")
+
+        // The redirected turn outlives the stop's 6 s fallback: it must not be killed by it.
+        out("== 3: Enviar ya con un turno redirigido largo ==")
+        rt.setMode(.full)
+        rt.send("Ejecuta con Bash `sleep 30` y después responde solo: dormido")
+        try? await Task.sleep(nanoseconds: 4_000_000_000)
+        let noticesBefore = thread.items.filter { $0.kind == .notice }.count
+        rt.sendNow("Olvida lo anterior. Ejecuta con Bash `sleep 10; echo listo` y después responde solo con la palabra: despierto")
+        await waitIdle(120)
+        try? await Task.sleep(nanoseconds: 800_000_000)
+        await waitIdle(120)
+        let newNotices = thread.items.filter { $0.kind == .notice }.dropFirst(noticesBefore).map(\.text)
+        out("avisos nuevos: \(newNotices) · errores: \(thread.items.filter { $0.kind == .error }.count)")
+        out("última respuesta: \(thread.items.last { $0.kind == .assistant }?.text.prefix(40) ?? "-") · sesión viva: \(newNotices.filter { $0.hasPrefix("Detenido") }.count == 1)")
         rt.closeSession()
     }
 

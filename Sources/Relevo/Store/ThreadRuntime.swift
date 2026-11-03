@@ -65,7 +65,10 @@ final class ThreadRuntime {
     @ObservationIgnored private var watchdog: Task<Void, Never>?
     @ObservationIgnored private var agentStatus: String?
     @ObservationIgnored private var stopSource: StopSource?
-    @ObservationIgnored private var redirectText: String?
+    /// Bumped by every dispatched turn, so a delayed action aimed at one turn never hits the next one.
+    @ObservationIgnored private var turnSerial = 0
+    /// What to do once the running turn has stopped (a redirected message, a relay).
+    @ObservationIgnored private var afterStop: (() -> Void)?
 
     init(thread: ThreadModel, store: AppStore) {
         self.thread = thread
@@ -123,7 +126,7 @@ final class ThreadRuntime {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         guard isRunning else { send(text); return }
-        redirectText = text
+        afterStop = { [weak self] in self?.send(text) }
         stop(from: .redirect)
     }
 
@@ -132,11 +135,11 @@ final class ThreadRuntime {
         sendNow(queue.remove(at: index).text)
     }
 
-    /// After a stop (by the CLI's answer or the fallback), the redirected message goes out at once.
-    private func sendRedirectIfNeeded() -> Bool {
-        guard let text = redirectText else { return false }
-        redirectText = nil
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.send(text) }
+    /// After a stop (by the CLI's answer or the fallback), whatever was waiting for it goes out at once.
+    private func runAfterStop() -> Bool {
+        guard let action = afterStop else { return false }
+        afterStop = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { action() }
         return true
     }
 
@@ -157,7 +160,13 @@ final class ThreadRuntime {
 
     /// Re-sends the last user request to another subscription, carrying the whole context and the trace.
     func relay(to account: Account, model: String) {
-        if isRunning { stop(from: .relay) }
+        if isRunning {
+            // Wait for the stop: with the same subscription the session is reused, and the stopped turn's
+            // late end would otherwise be taken for the end of the relayed one.
+            afterStop = { [weak self] in self?.relay(to: account, model: model) }
+            stop(from: .relay)
+            return
+        }
         queuePaused = false   // the queue continues once the new agent finishes this request
         thread.selectedAccountId = account.id
         thread.selectedModel = model
@@ -224,6 +233,7 @@ final class ThreadRuntime {
         limit = nil
         lastDispatch = (text, account.id, model)
         isRunning = true
+        turnSerial += 1
         turnStartIndex = thread.items.count
         turnFailed = false
         turnFailureKind = nil
@@ -289,15 +299,24 @@ final class ThreadRuntime {
         stopSource = source
         session?.interrupt()
         statusLine = "Deteniendo…"
-        let current = session
+        let current = session, serial = turnSerial
+        // Fallback if the agent doesn't confirm the stop. Only for this same turn: by now the CLI may have
+        // confirmed it and a redirected message started a new turn in the same session, which must live on.
         DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
-            guard let self, self.isRunning, self.session === current else { return }
+            guard let self, self.isRunning, self.stoppedByUser, self.turnSerial == serial, self.session === current else { return }
+            let accountId = self.sessionAccountId ?? self.thread.selectedAccountId
             self.closeSession()
             self.isRunning = false
             self.statusLine = nil
-            self.finishTraceTurn(accountId: self.sessionAccountId ?? self.thread.selectedAccountId)
+            self.watchdog?.cancel()
+            for i in self.thread.items.indices where self.thread.items[i].kind == .tool && self.thread.items[i].status == .running {
+                self.thread.items[i].status = .failed
+            }
+            self.finishTraceTurn(accountId: accountId)
             self.append(ChatItem(id: UUID().uuidString, kind: .notice, text: "Detenido \(source.label)"))
-            _ = self.sendRedirectIfNeeded()
+            self.thread.updatedAt = Date()
+            self.store.save(self.thread)
+            if !self.runAfterStop(), !self.queue.isEmpty { self.queuePaused = true }
         }
     }
 
@@ -346,6 +365,7 @@ final class ThreadRuntime {
         session?.close()
         session = nil
         sessionAccountId = nil
+        sessionNonce = ""   // late events from the closed CLI are ignored
         for (key, respond) in approvals {
             respond("deny")
             if let idx = thread.items.lastIndex(where: { $0.id == "a:" + key }) { thread.items[idx].resolution = "Cancelado" }
@@ -356,6 +376,8 @@ final class ThreadRuntime {
     // MARK: - Agent events
 
     private func handle(_ event: AgentEvent, accountId: UUID, nonce: String) {
+        // Only the current session speaks for this thread (a closed one may still flush its last lines).
+        guard nonce == sessionNonce else { return }
         let model = thread.segments.last?.model
         lastActivity = Date()
         if case .status(let s) = event { agentStatus = s }
@@ -454,8 +476,8 @@ final class ThreadRuntime {
             store.refreshUsageSoon(accountId)
             store.notifyTurnFinished(thread: thread)
             suggester.draftChanged()   // the next message may have been written while the agent worked
-            if sendRedirectIfNeeded() {
-                // Redirected on purpose: the remaining queue continues after this message.
+            if runAfterStop() {
+                // Redirected or relayed on purpose: the remaining queue continues after this message.
             } else if !queue.isEmpty {
                 if interrupted {
                     queuePaused = true
