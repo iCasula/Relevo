@@ -71,6 +71,18 @@ struct ApprovalOption: Codable, Hashable, Identifiable {
     var isAllow: Bool
 }
 
+/// A question the agent asks (Claude Code's AskUserQuestion): options to pick, or a free answer.
+struct AgentQuestion: Codable, Hashable {
+    struct Option: Codable, Hashable {
+        var label: String
+        var description: String?
+    }
+    var question: String
+    var header: String?
+    var options: [Option]
+    var multiSelect: Bool
+}
+
 struct ChatItem: Codable, Identifiable, Equatable {
     enum Kind: String, Codable { case user, assistant, reasoning, tool, notice, error, approval }
 
@@ -86,6 +98,9 @@ struct ChatItem: Codable, Identifiable, Equatable {
     var date = Date()
     var options: [ApprovalOption]? = nil
     var resolution: String? = nil
+    /// For questions: what the agent asks, and what you answered (question → answer).
+    var questions: [AgentQuestion]? = nil
+    var answers: [String: String]? = nil
 }
 
 struct Segment: Codable, Identifiable, Equatable {
@@ -227,6 +242,15 @@ struct AppSettings: Codable, Equatable {
     var suggestMode: SuggestMode = .suggest
     /// Classify the task with the cheap utility model (otherwise an offline heuristic).
     var suggestWithAI: Bool = true
+    /// Let a paired iPhone (Relevo Companion) control the app over the network. Off by default.
+    var companionEnabled: Bool = false
+    var companionPort: Int = 47820
+    /// Optional address put in the pairing link for use outside the local network (e.g. a Tailscale IP).
+    var companionHost: String? = nil
+    /// APNs credentials for the iPhone Live Activity (the .p8 key itself lives in the Keychain).
+    var apnsTeamId: String? = nil
+    var apnsKeyId: String? = nil
+    var companionBundleId: String = "app.relevo.companion"
 
     init() {}
 
@@ -244,6 +268,12 @@ struct AppSettings: Codable, Equatable {
         knownProviders = try? c.decodeIfPresent([String].self, forKey: .knownProviders)
         suggestMode = (try? c.decodeIfPresent(SuggestMode.self, forKey: .suggestMode)) ?? d.suggestMode
         suggestWithAI = (try? c.decodeIfPresent(Bool.self, forKey: .suggestWithAI)) ?? d.suggestWithAI
+        companionEnabled = (try? c.decodeIfPresent(Bool.self, forKey: .companionEnabled)) ?? d.companionEnabled
+        companionPort = (try? c.decodeIfPresent(Int.self, forKey: .companionPort)) ?? d.companionPort
+        companionHost = try? c.decodeIfPresent(String.self, forKey: .companionHost)
+        apnsTeamId = try? c.decodeIfPresent(String.self, forKey: .apnsTeamId)
+        apnsKeyId = try? c.decodeIfPresent(String.self, forKey: .apnsKeyId)
+        companionBundleId = (try? c.decodeIfPresent(String.self, forKey: .companionBundleId)) ?? d.companionBundleId
     }
 }
 

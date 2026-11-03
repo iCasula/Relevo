@@ -185,6 +185,8 @@ final class ACPAgent: AgentSession {
         }
     }
 
+    var isAlive: Bool { rpc != nil && !closed }
+
     func send(_ text: String) {
         turnActive = true
         onEvent?(.status("\(account.kind.agentName) está trabajando…"))

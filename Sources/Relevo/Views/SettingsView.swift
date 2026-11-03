@@ -8,6 +8,8 @@ struct SettingsView: View {
                 .tabItem { Label("Suscripciones", systemImage: "person.2.crop.square.stack") }
             GeneralSettings()
                 .tabItem { Label("General", systemImage: "gearshape") }
+            CompanionSettings()
+                .tabItem { Label("iPhone", systemImage: "iphone.gen3") }
         }
         .frame(width: 680, height: 500)
     }

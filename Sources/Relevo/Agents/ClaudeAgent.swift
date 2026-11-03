@@ -52,7 +52,9 @@ final class ClaudeAgent: AgentSession {
             "--include-partial-messages", "--permission-prompt-tool", "stdio",
             "--permission-mode", Self.cliMode(mode),
         ]
-        if mode == .full { args.append("--allow-dangerously-skip-permissions") }
+        // Only makes bypassPermissions *available*: without it, switching to full access mid-session is
+        // rejected ("session was not launched with --dangerously-skip-permissions"). The active mode is --permission-mode.
+        args.append("--allow-dangerously-skip-permissions")
         if !model.isEmpty && model != "default" { args += ["--model", model] }
         if let effort, !effort.isEmpty { args += ["--effort", effort] }
         if let resumeId { args += ["--resume", resumeId] }
@@ -69,6 +71,8 @@ final class ClaudeAgent: AgentSession {
         proc = p
         control(["subtype": "initialize"]) { _, _ in }
     }
+
+    var isAlive: Bool { proc != nil && !closed }
 
     func send(_ text: String) {
         turnActive = true
@@ -87,7 +91,16 @@ final class ClaudeAgent: AgentSession {
 
     func setMode(_ mode: PermissionMode) {
         self.mode = mode
-        control(["subtype": "set_permission_mode", "mode": Self.cliMode(mode)]) { _, _ in }
+        control(["subtype": "set_permission_mode", "mode": Self.cliMode(mode)]) { [weak self] _, error in
+            guard let self, error != nil, self.proc != nil, self.sessionId != nil else { return }
+            // The CLI refused the live switch: relaunch resuming the same session with the new mode.
+            if self.turnActive {
+                self.restartAfterTurn = true
+                self.onEvent?(.notice("El modo «\(mode.label)» se aplicará al terminar este turno"))
+            } else {
+                self.restartResuming()
+            }
+        }
     }
 
     /// Effort is a launch flag: changing it restarts the CLI resuming the same session.
@@ -287,6 +300,33 @@ final class ClaudeAgent: AgentSession {
         }
     }
 
+    /// AskUserQuestion: show the questions and return the answers the way Claude Code expects
+    /// (`updatedInput.answers = { question: answer }`), or decline if you skip them.
+    private func askQuestions(requestId rid: String, input: JSONObject, key: String) {
+        let questions: [AgentQuestion] = input.objs("questions").map { q in
+            AgentQuestion(question: q.str("question") ?? "", header: q.str("header"),
+                          options: q.objs("options").map { AgentQuestion.Option(label: $0.str("label") ?? "", description: $0.str("description")) },
+                          multiSelect: q.bool("multiSelect") ?? false)
+        }
+        let request = ApprovalRequest(
+            key: key,
+            title: questions.count == 1 ? questions[0].question : "\(questions.count) preguntas del agente",
+            detail: "",
+            options: [ApprovalOption(id: "deny", label: "Omitir", isAllow: false)],
+            questions: questions
+        ) { [weak self] choice in
+            guard let self else { return }
+            if let answers = ApprovalRequest.decodeAnswers(choice) {
+                var updated = input
+                updated["answers"] = answers
+                self.respondControl(rid, ["behavior": "allow", "updatedInput": updated])
+            } else {
+                self.respondControl(rid, ["behavior": "deny", "message": "El usuario ha preferido no responder a las preguntas."])
+            }
+        }
+        onEvent?(.approval(request))
+    }
+
     private func emitTaskPlan() {
         let steps = taskOrder.compactMap { tasks[$0] }
         if !steps.isEmpty { onEvent?(.plan(steps)) }
@@ -301,6 +341,10 @@ final class ClaudeAgent: AgentSession {
         let toolName = req.str("tool_name") ?? "Herramienta"
         let display = req.str("display_name") ?? toolName
         let input = req.obj("input") ?? [:]
+        if toolName == "AskUserQuestion" {
+            askQuestions(requestId: rid, input: input, key: req.str("tool_use_id") ?? rid)
+            return
+        }
         let suggestions = req.objs("permission_suggestions")
         var detailParts: [String] = []
         if let d = req.str("description") { detailParts.append(d) }

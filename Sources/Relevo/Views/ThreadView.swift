@@ -1,4 +1,6 @@
 import SwiftUI
+import QuickLook
+import RelevoMarkdown
 import AppKit
 
 struct ThreadView: View {
@@ -6,6 +8,8 @@ struct ThreadView: View {
     @Bindable var thread: ThreadModel
     let runtime: ThreadRuntime
     @State private var showTrace = false
+    /// Show every tool call, or fold each run of them into one summary row.
+    @AppStorage("showTools") private var showTools = true
 
     var body: some View {
         let project = store.project(thread.projectId)
@@ -13,13 +17,17 @@ struct ThreadView: View {
             if thread.items.isEmpty {
                 EmptyThreadHero(project: project)
             } else {
-                TranscriptView(thread: thread, runtime: runtime)
+                TranscriptView(thread: thread, runtime: runtime, showTools: showTools)
             }
             VStack(spacing: 10) {
                 if let limit = runtime.limit {
                     LimitBanner(limit: limit, runtime: runtime)
                 } else if let suggestion = runtime.suggester.suggestion {
                     SuggestionBar(suggestion: suggestion, suggester: runtime.suggester)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+                if !runtime.queue.isEmpty {
+                    QueueBar(runtime: runtime)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
                 ComposerView(thread: thread, runtime: runtime)
@@ -29,7 +37,9 @@ struct ThreadView: View {
             .padding(.bottom, 18)
             .padding(.top, 6)
             .animation(.easeOut(duration: 0.18), value: runtime.suggester.suggestion)
+            .animation(.easeOut(duration: 0.18), value: runtime.queue)
         }
+        .quickLookPreview(Binding(get: { runtime.previewURL }, set: { runtime.previewURL = $0 }))
         .sheet(isPresented: $showTrace) {
             if let project {
                 WorkStateSheet(thread: thread, project: project)
@@ -46,6 +56,14 @@ struct ThreadView: View {
         .navigationSubtitle(project.map { abbreviateHome($0.path) } ?? "")
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
+                Button {
+                    withAnimation(.easeOut(duration: 0.15)) { showTools.toggle() }
+                } label: {
+                    Label(showTools ? "Ocultar herramientas" : "Mostrar herramientas",
+                          systemImage: showTools ? "wrench.and.screwdriver.fill" : "wrench.and.screwdriver")
+                }
+                .keyboardShortcut("t", modifiers: [.command, .option])
+                .help(showTools ? "Ocultar los comandos y herramientas del agente (⌥⌘T)" : "Mostrar los comandos y herramientas del agente (⌥⌘T)")
                 Button {
                     showTrace = true
                 } label: {
@@ -154,15 +172,56 @@ struct TranscriptView: View {
     @Environment(AppStore.self) private var store
     let thread: ThreadModel
     let runtime: ThreadRuntime
+    var showTools = true
+
+    private enum Row: Identifiable {
+        case item(ChatItem)
+        case group(id: String, items: [ChatItem])
+
+        var id: String {
+            switch self {
+            case .item(let item): item.id
+            case .group(let id, _): id
+            }
+        }
+    }
+
+    /// With tools hidden, each run of tool calls (and reasoning) becomes one expandable summary row.
+    private var rows: [Row] {
+        guard !showTools else { return thread.items.map(Row.item) }
+        var rows: [Row] = []
+        var run: [ChatItem] = []
+        func flush() {
+            defer { run = [] }
+            guard !run.isEmpty else { return }
+            guard run.contains(where: { $0.kind == .tool }) else { rows += run.map(Row.item); return }
+            let id = "group:" + run[0].id
+            rows.append(.group(id: id, items: run))
+            if runtime.expandedItems.contains(id) { rows += run.map(Row.item) }
+        }
+        for item in thread.items {
+            if item.kind == .tool || item.kind == .reasoning { run.append(item) } else { flush(); rows.append(.item(item)) }
+        }
+        flush()
+        return rows
+    }
 
     var body: some View {
         let headers = authorHeaders()
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
-                    ForEach(thread.items) { item in
-                        ItemView(item: item, runtime: runtime, showsAuthor: headers.contains(item.id))
-                            .id(item.id)
+                    ForEach(rows) { row in
+                        switch row {
+                        case .item(let item):
+                            ItemView(item: item, runtime: runtime, showsAuthor: headers.contains(item.id))
+                                .id(item.id)
+                        case .group(let id, let items):
+                            ToolGroupRow(items: items, isExpanded: runtime.expandedItems.contains(id)) {
+                                withAnimation(.easeOut(duration: 0.15)) { runtime.toggleExpanded(id) }
+                            }
+                            .id(id)
+                        }
                     }
                     if runtime.isRunning {
                         WorkingIndicator(text: runtime.statusLine)
@@ -176,6 +235,12 @@ struct TranscriptView: View {
                 .frame(maxWidth: .infinity)
             }
             .defaultScrollAnchor(.bottom)
+            // Paths and images in replies open in Quick Look (folders in Finder) instead of the browser.
+            .environment(\.openURL, OpenURLAction { url in
+                guard let path = FileReference.path(from: url) else { return .systemAction }
+                runtime.openReference(path)
+                return .handled
+            })
             .onChange(of: thread.items.count) {
                 withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
             }
@@ -223,6 +288,63 @@ struct WorkingIndicator: View {
         }
         .onAppear { phase = true }
         .padding(.vertical, 4)
+    }
+}
+
+/// Messages waiting for the current turn to finish.
+struct QueueBar: View {
+    let runtime: ThreadRuntime
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Label(runtime.queuePaused ? "Cola en pausa" : "En cola · se envían al terminar cada turno",
+                      systemImage: runtime.queuePaused ? "pause.circle" : "text.append")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(runtime.queuePaused ? Color.orange : Color.secondary)
+                Spacer()
+                if runtime.queuePaused {
+                    Button("Reanudar") { runtime.resumeQueue() }
+                        .controlSize(.small)
+                        .disabled(runtime.isRunning)
+                        .help("Enviar el siguiente mensaje de la cola")
+                }
+            }
+            ForEach(Array(runtime.queue.enumerated()), id: \.element.id) { index, message in
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text("\(index + 1)")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.tertiary)
+                    Text(message.text)
+                        .font(.callout)
+                        .lineLimit(2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Button {
+                        runtime.sendQueuedNow(message.id)
+                    } label: {
+                        Image(systemName: "bolt.fill").foregroundStyle(.orange)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Enviar ya: interrumpe al agente y le manda este mensaje ahora")
+                    Button {
+                        runtime.removeQueued(message.id)
+                    } label: {
+                        Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Quitar de la cola")
+                }
+            }
+            if runtime.queuePaused {
+                Text("El último turno no terminó bien (error, límite o detenido). Revisa y reanuda cuando quieras.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(Theme.subtleFill, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Theme.hairline))
     }
 }
 

@@ -30,7 +30,7 @@ struct RelevoApp: App {
                     .keyboardShortcut("r", modifiers: [.command, .shift])
                 Divider()
                 Button("Detener agente") {
-                    if let t = store.selectedThread { store.runtime(for: t).stop() }
+                    if let t = store.selectedThread { store.runtime(for: t).stop(from: .shortcut) }
                 }
                 .keyboardShortcut(".", modifiers: .command)
             }

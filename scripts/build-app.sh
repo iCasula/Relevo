@@ -38,7 +38,21 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
-codesign --force --deep --sign - "$APP" >/dev/null 2>&1 || true
+# Sign with a stable identity when one is configured (RELEVO_SIGN_IDENTITY or the untracked .signing-identity file):
+# the Keychain then recognises every rebuild as the same app, so "Always Allow" is asked only once.
+# Without one, ad-hoc signing works but each build looks like a new app to the Keychain.
+# The file holds the identity *name* ("Apple Development: Name (ID)"): it survives certificate renewals, and the
+# newest valid certificate with that name is used. The Keychain and privacy permissions are tied to that name.
+IDENTITY=${RELEVO_SIGN_IDENTITY:-$(head -1 "$ROOT/.signing-identity" 2>/dev/null || true)}
+if [[ -n "$IDENTITY" && ! "$IDENTITY" =~ ^[0-9A-F]{40}$ ]]; then
+  IDENTITY=$(security find-identity -v -p codesigning | grep -F "\"$IDENTITY\"" | tail -1 | awk '{print $2}')
+fi
+if [[ -n "$IDENTITY" ]] && codesign --force --deep --sign "$IDENTITY" "$APP" 2>/dev/null; then
+  echo "Firmado con una identidad estable"
+else
+  codesign --force --deep --sign - "$APP" >/dev/null 2>&1 || true
+  echo "AVISO: firmado ad hoc. El Llavero y macOS volverán a pedir permisos tras cada compilación (ver README › Mac signing)."
+fi
 mkdir -p "$HOME/Applications"
 rm -rf "$HOME/Applications/Relevo.app"
 cp -R "$APP" "$HOME/Applications/Relevo.app"

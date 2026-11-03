@@ -112,6 +112,8 @@ final class CodexAgent: AgentSession {
         }
     }
 
+    var isAlive: Bool { rpc != nil && !closed }
+
     func send(_ text: String) {
         turnActive = true
         turnFailureReported = false

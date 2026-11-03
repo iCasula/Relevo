@@ -71,6 +71,7 @@ final class AppStore {
         offerNewProviders()
         refreshAllUsage()
         scheduleTimer()
+        CompanionServer.shared.attach(self)
         if Self.canNotify {
             UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
         }
@@ -390,6 +391,7 @@ final class AppStore {
         mutate(&settings)
         if before != settings.refreshMinutes { scheduleTimer() }
         saveState()
+        if bootstrapped { CompanionServer.shared.settingsChanged() }
     }
 
     // MARK: - Projects & threads
@@ -412,14 +414,15 @@ final class AppStore {
     }
 
     @discardableResult
-    func newThread(in project: Project? = nil) -> ThreadModel? {
+    /// `select: false` creates it without changing what the Mac shows (used by the iPhone companion).
+    func newThread(in project: Project? = nil, select: Bool = true) -> ThreadModel? {
         let target = project ?? self.project(selectedThread?.projectId) ?? projects.first
         guard let target else {
-            showNewProject = true
+            if select { showNewProject = true }
             return nil
         }
         if let empty = threads.first(where: { $0.projectId == target.id && $0.items.isEmpty }) {
-            selectedThreadId = empty.id
+            if select { selectedThreadId = empty.id }
             return empty
         }
         let previous = selectedThread
@@ -428,7 +431,7 @@ final class AppStore {
         let t = ThreadModel(projectId: target.id, mode: settings.defaultMode, accountId: accountId, model: model)
         threads.insert(t, at: 0)
         expandedProjects.insert(target.id)
-        selectedThreadId = t.id
+        if select { selectedThreadId = t.id }
         save(t)
         saveState()
         return t

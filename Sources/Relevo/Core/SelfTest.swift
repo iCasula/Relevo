@@ -1,4 +1,10 @@
 import Foundation
+import RelevoMarkdown
+import AppKit
+import SwiftUI
+import Network
+import CryptoKit
+import RelevoProtocol
 
 /// Headless checks against the real CLIs:
 ///   Relevo --selftest usage
@@ -20,6 +26,15 @@ enum SelfTest {
             case "handoff" where rest.count >= 6: await handoffAfterStop(rest)
             case "topic" where rest.count >= 4: await topic(rest)
             case "suggest" where rest.count >= 4: await suggest(rest)
+            case "markdown" where rest.count >= 2: markdown(out: rest[1])
+            case "queue" where rest.count >= 2: await queue(cwd: rest[1])
+            case "interactive" where rest.count >= 2: await interactive(cwd: rest[1])
+            case "revive" where rest.count >= 2: await revive(cwd: rest[1])
+            case "images" where rest.count >= 2: images(threadTitle: rest[1])
+            case "apns": await apns()
+            case "serve": await serve(port: rest.count > 1 ? UInt16(rest[1]) ?? 47899 : 47899, seconds: rest.count > 2 ? Double(rest[2]) ?? 600 : 600)
+            case "companion": await companion(port: rest.count > 1 ? UInt16(rest[1]) ?? 47899 : 47899)
+            case "modeswitch" where rest.count >= 4: await modeSwitch(kind: rest[1], model: rest[2], cwd: rest[3], switchMode: rest.count < 5 || rest[4] != "noswitch")
             default: print("uso: --selftest usage | agent … | relay …")
             }
             finished = true
@@ -123,6 +138,341 @@ enum SelfTest {
             } else {
                 out("  ⇒ Sin sugerencia (la selección actual ya encaja)")
             }
+        }
+    }
+
+    /// Starts in "ask", switches to full access mid-session, then runs a shell command: it must not ask for permission.
+    ///   --selftest modeswitch <kind> <model> <cwd> [noswitch]   (noswitch = control run that stays in "ask")
+    static func modeSwitch(kind: String, model: String, cwd: String, switchMode: Bool = true) async {
+        guard let k = ProviderRegistry.find(kind)?.kind else { out("tipo desconocido"); return }
+        let account = Account(kind: k, name: k.shortName, configDir: ProcessInfo.processInfo.environment["RELEVO_TEST_CONFIG_DIR"])
+        let session = AgentFactory.make(account: account, cwd: cwd, model: model, effort: nil, mode: .ask, resumeId: nil)
+        var done = false
+        var approvals: [String] = []
+        session.onEvent = { event in
+            switch event {
+            case .approval(let r):
+                approvals.append(r.title)
+                out("APPROVAL \(r.title)")
+                r.respond(r.options.first(where: \.isAllow)?.id ?? r.options[0].id)
+            case .toolFinished(_, let st, let o): out("TOOL \(st.rawValue) \((o ?? "").prefix(80).replacingOccurrences(of: "\n", with: " "))")
+            case .notice(let n): out("NOTICE \(n)")
+            case .failure(let f): out("FAILURE \(f.kind) \(f.message.prefix(200))")
+            case .turnFinished: done = true
+            default: break
+            }
+        }
+        func turn(_ text: String) async {
+            done = false
+            session.send(text)
+            let deadline = Date().addingTimeInterval(120)
+            while !done && Date() < deadline { try? await Task.sleep(nanoseconds: 100_000_000) }
+        }
+        do { try session.start() } catch { out("START ERROR \(error.localizedDescription)"); return }
+        await turn("Responde solo con la palabra: listo")
+        out(switchMode ? "== cambio a Acceso total a mitad de sesión ==" : "== control: sigue en Pedir permiso ==")
+        if switchMode { session.setMode(.full) }
+        try? await Task.sleep(nanoseconds: 1_500_000_000)
+        let before = approvals.count
+        await turn("Usa la herramienta Bash para ejecutar exactamente: touch relevo-mode-probe.txt && echo hecho. Después responde 'ok'.")
+        let created = FileManager.default.fileExists(atPath: "\(cwd)/relevo-mode-probe.txt")
+        out("RESULTADO: peticiones de permiso tras el cambio = \(approvals.count - before) · fichero creado = \(created)")
+        try? FileManager.default.removeItem(atPath: "\(cwd)/relevo-mode-probe.txt")
+        session.close()
+    }
+
+    /// Renders sample Markdown (tables, lists, code…) to a PNG with the shared renderer, without opening a window:
+    ///   --selftest markdown <out.png>
+    static func markdown(out path: String) {
+        // A real (off-screen) window, so scroll views and controls draw exactly as in the app.
+        // With RELEVO_MD_THREAD=<title>, renders that thread's first reply with images, strip included.
+        var text = MarkdownSample.text
+        var images: [String] = []
+        if let title = ProcessInfo.processInfo.environment["RELEVO_MD_THREAD"],
+           let t = AppStore.shared.threads.first(where: { $0.title.hasPrefix(title) }),
+           let item = t.items.first(where: { $0.kind == .assistant && !FileReference.imageReferences(in: $0.text).isEmpty }) {
+            text = String(item.text.prefix(900))
+            images = FileReference.imageReferences(in: item.text)
+        }
+        let view = VStack(alignment: .leading, spacing: 8) {
+            MarkdownView(text)
+            if !images.isEmpty {
+                ImageStrip(paths: images, load: { path in ThumbnailMaker.image(url: URL(fileURLWithPath: path), maxPixel: 400) }, open: { _ in })
+            }
+        }
+            .frame(width: 720)
+            .padding(24)
+            .background(Color.white)
+            .environment(\.colorScheme, .light)
+        let hosting = NSHostingView(rootView: view)
+        let size = hosting.fittingSize
+        let window = NSWindow(contentRect: NSRect(x: -20_000, y: -20_000, width: size.width, height: size.height),
+                              styleMask: .borderless, backing: .buffered, defer: false)
+        window.contentView = hosting
+        window.orderFrontRegardless()
+        RunLoop.main.run(until: Date().addingTimeInterval(images.isEmpty ? 1 : 3))
+        hosting.layoutSubtreeIfNeeded()
+        guard let rep = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else { out("no se pudo renderizar"); return }
+        hosting.cacheDisplay(in: hosting.bounds, to: rep)
+        try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+        window.orderOut(nil)
+        out("PNG \(path) \(Int(size.width))×\(Int(size.height))")
+    }
+
+    /// The agent's CLI dies between turns (as after a Claude Code internal error); the next message must
+    /// reopen it resuming the conversation instead of hanging:  --selftest revive <cwd>
+    static func revive(cwd: String) async {
+        let store = AppStore.shared
+        let account = Account(kind: .claude, name: "Claude test", configDir: ProcessInfo.processInfo.environment["RELEVO_TEST_CONFIG_DIR"])
+        store.accounts = [account]
+        let project = Project(name: "revive-test", path: cwd)
+        store.projects = [project]
+        let thread = ThreadModel(projectId: project.id, mode: .ask, accountId: account.id, model: "haiku")
+        store.threads = [thread]
+        let rt = store.runtime(for: thread)
+        func waitIdle(_ seconds: Double) async -> Bool {
+            let deadline = Date().addingTimeInterval(seconds)
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            while rt.isRunning && Date() < deadline { try? await Task.sleep(nanoseconds: 200_000_000) }
+            return !rt.isRunning
+        }
+        rt.send("Recuerda la palabra clave: albaricoque. Responde solo: vale")
+        _ = await waitIdle(90)
+        out("1ª respuesta: \(thread.items.last { $0.kind == .assistant }?.text.prefix(40) ?? "-")")
+        let kill = Process()
+        kill.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        kill.arguments = ["-TERM", "-P", String(getpid())]
+        try? kill.run()
+        kill.waitUntilExit()
+        try? await Task.sleep(nanoseconds: 1_500_000_000)
+        out("== CLI de Claude matada entre turnos ==")
+        rt.send("¿Cuál era la palabra clave? Responde solo con ella")
+        let finished = await waitIdle(90)
+        out("terminó=\(finished) · avisos=\(thread.items.filter { $0.kind == .notice }.map(\.text)) · 2ª respuesta: \(thread.items.last { $0.kind == .assistant }?.text.prefix(40) ?? "-")")
+        rt.closeSession()
+    }
+
+    /// AskUserQuestion answered through the runtime, and "send now" redirecting a running agent:
+    ///   --selftest interactive <cwd>
+    static func interactive(cwd: String) async {
+        let store = AppStore.shared
+        let account = Account(kind: .claude, name: "Claude test", configDir: ProcessInfo.processInfo.environment["RELEVO_TEST_CONFIG_DIR"])
+        store.accounts = [account]
+        let project = Project(name: "interactive-test", path: cwd)
+        store.projects = [project]
+        let thread = ThreadModel(projectId: project.id, mode: .ask, accountId: account.id, model: "haiku")
+        store.threads = [thread]
+        let rt = store.runtime(for: thread)
+        func waitIdle(_ seconds: Double) async {
+            let deadline = Date().addingTimeInterval(seconds)
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            while rt.isRunning && Date() < deadline { try? await Task.sleep(nanoseconds: 200_000_000) }
+        }
+        out("== 1: AskUserQuestion ==")
+        rt.send("Usa la herramienta AskUserQuestion para preguntarme qué color prefiero (opciones Rojo y Azul). Después responde solo: elegiste <color>.")
+        let deadline = Date().addingTimeInterval(90)
+        var question: ChatItem?
+        while question == nil && Date() < deadline {
+            question = thread.items.last { $0.kind == .approval && $0.questions != nil && $0.resolution == nil }
+            try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+        guard let q = question, let first = q.questions?.first else { out("no llegó la pregunta"); rt.closeSession(); return }
+        out("pregunta: «\(first.question)» opciones=\(first.options.map(\.label)) multiple=\(first.multiSelect)")
+        rt.answerQuestions(itemId: q.id, answers: [first.question: "Azul"])
+        await waitIdle(90)
+        out("respuesta del agente: \(thread.items.last { $0.kind == .assistant }?.text.prefix(60) ?? "-")")
+
+        out("== 2: Enviar ya ==")
+        rt.send("Escribe los números del 1 al 400 separados por comas, sin nada más")
+        try? await Task.sleep(nanoseconds: 3_000_000_000)
+        rt.sendNow("Olvida lo anterior y responde solo con la palabra: redirigido")
+        await waitIdle(90)
+        try? await Task.sleep(nanoseconds: 800_000_000)
+        await waitIdle(90)
+        out("avisos: \(thread.items.filter { $0.kind == .notice }.map(\.text)) · errores: \(thread.items.filter { $0.kind == .error }.count)")
+        out("última respuesta: \(thread.items.last { $0.kind == .assistant }?.text.prefix(40) ?? "-")")
+        rt.closeSession()
+    }
+
+    /// Message queue against a real agent (Claude Haiku):
+    ///   --selftest queue <cwd>   (RELEVO_TEST_CONFIG_DIR = Claude config folder)
+    static func queue(cwd: String) async {
+        let store = AppStore.shared
+        let account = Account(kind: .claude, name: "Claude test", configDir: ProcessInfo.processInfo.environment["RELEVO_TEST_CONFIG_DIR"])
+        store.accounts = [account]
+        let project = Project(name: "queue-test", path: cwd)
+        store.projects = [project]
+        let thread = ThreadModel(projectId: project.id, mode: .ask, accountId: account.id, model: "haiku")
+        store.threads = [thread]
+        let rt = store.runtime(for: thread)
+        func waitIdle(_ seconds: Double) async {
+            let deadline = Date().addingTimeInterval(seconds)
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            while (rt.isRunning || (!rt.queue.isEmpty && !rt.queuePaused)) && Date() < deadline {
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+        }
+        out("== A: un mensaje y dos en cola ==")
+        rt.send("Responde solo con la palabra: uno")
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        rt.send("Responde solo con la palabra: dos")
+        rt.send("Responde solo con la palabra: tres")
+        out("en cola tras enviar: \(rt.queue.map(\.text))")
+        await waitIdle(150)
+        out("orden: " + thread.items.filter { $0.kind == .user || $0.kind == .assistant }
+            .map { "\($0.kind == .user ? "→" : "←") \($0.text.prefix(40))" }.joined(separator: " | "))
+
+        out("== B: detener con un mensaje en cola ==")
+        rt.send("Escribe los números del 1 al 300 separados por comas, sin nada más")
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        rt.send("Responde solo con la palabra: cuatro")
+        try? await Task.sleep(nanoseconds: 2_500_000_000)
+        rt.stop()
+        let stopDeadline = Date().addingTimeInterval(12)
+        while rt.isRunning && Date() < stopDeadline { try? await Task.sleep(nanoseconds: 200_000_000) }
+        try? await Task.sleep(nanoseconds: 800_000_000)
+        out("tras detener: pausada=\(rt.queuePaused) cola=\(rt.queue.map(\.text)) · últimos: \(thread.items.suffix(3).map { "\($0.kind.rawValue): \($0.text.prefix(30))" })")
+        rt.resumeQueue()
+        await waitIdle(90)
+        out("tras reanudar: pausada=\(rt.queuePaused) cola=\(rt.queue.count) última respuesta=\(thread.items.last { $0.kind == .assistant }?.text.prefix(40) ?? "-")")
+        rt.closeSession()
+    }
+
+    /// Images and paths a thread mentions: what resolves, and that unmentioned files are refused.
+    ///   --selftest images <thread title prefix>
+    static func images(threadTitle: String) {
+        let store = AppStore.shared
+        guard let t = store.threads.first(where: { $0.title.hasPrefix(threadTitle) }) else { out("hilo no encontrado"); return }
+        let project = store.project(t.projectId)?.path
+        out("hilo «\(t.title)» · proyecto \(project.map(abbreviateHome) ?? "-")")
+        var refs: [String] = []
+        for item in t.items where item.kind == .assistant { for r in FileReference.imageReferences(in: item.text) where !refs.contains(r) { refs.append(r) } }
+        for r in refs.prefix(5) {
+            let url = FilePaths.resolve(r, thread: t, projectPath: project)
+            let jpeg = url.flatMap { FilePaths.jpeg($0, maxPixel: 480) }
+            out("  imagen \((r as NSString).lastPathComponent): mencionada=\(FilePaths.isMentioned(r, in: t)) resuelta=\(url != nil) jpeg480=\(jpeg?.count ?? 0) bytes")
+        }
+        // Code-span paths in replies, resolved relative to the project or folders seen in the thread.
+        var paths: [String] = []
+        for item in t.items where item.kind == .assistant {
+            var a = MarkdownInline.attributed(item.text)
+            for run in a.runs { if let link = run.link, let p = FileReference.path(from: link), !paths.contains(p) { paths.append(p) } }
+            _ = a.characters.count; a = AttributedString()
+        }
+        let resolved = paths.filter { FilePaths.resolve($0, thread: t, projectPath: project) != nil }
+        out("  rutas enlazadas: \(paths.count) · resuelven: \(resolved.count) · ej. \(resolved.prefix(4))")
+        let secret = "\(NSHomeDirectory())/.ssh/id_ed25519"
+        out("  fichero no mencionado (\(abbreviateHome(secret))): mencionado=\(FilePaths.isMentioned(secret, in: t)) → el iPhone no puede pedirlo")
+    }
+
+    /// Checks the APNs provider token (JWT ES256) with a throwaway key and that APNs answers the request:
+    ///   --selftest apns   (expected answer: 403 InvalidProviderToken, since the key isn't registered with Apple)
+    static func apns() async {
+        let key = P256.Signing.PrivateKey()
+        guard let jwt = LiveActivityPusher.makeJWT(teamId: "ABCDE12345", keyId: "KEY1234567", key: key) else { out("JWT: fallo"); return }
+        let parts = jwt.split(separator: ".").map(String.init)
+        func data(_ s: String) -> Data? {
+            var b = s.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+            while b.count % 4 != 0 { b += "=" }
+            return Data(base64Encoded: b)
+        }
+        let header = data(parts[0]).flatMap { String(data: $0, encoding: .utf8) } ?? "?"
+        let claims = data(parts[1]).flatMap { String(data: $0, encoding: .utf8) } ?? "?"
+        let valid = data(parts[2]).flatMap { try? P256.Signing.ECDSASignature(rawRepresentation: $0) }
+            .map { key.publicKey.isValidSignature($0, for: Data((parts[0] + "." + parts[1]).utf8)) } ?? false
+        out("JWT header=\(header) claims=\(claims) firma válida=\(valid)")
+        var request = URLRequest(url: URL(string: "https://api.sandbox.push.apple.com/3/device/" + String(repeating: "ab", count: 32))!)
+        request.httpMethod = "POST"
+        request.httpBody = Data(#"{"aps":{"timestamp":0,"event":"update","content-state":{}}}"#.utf8)
+        request.setValue("bearer \(jwt)", forHTTPHeaderField: "authorization")
+        request.setValue("liveactivity", forHTTPHeaderField: "apns-push-type")
+        request.setValue("app.relevo.companion.push-type.liveactivity", forHTTPHeaderField: "apns-topic")
+        let result = await LiveActivityPusher.post(request)
+        out("APNs sandbox → \(result.status) \(result.reason ?? "-")")
+    }
+
+    /// Runs only the companion server (test credentials in memory) so a simulator can connect:
+    ///   --selftest serve [port] [seconds]
+    static func serve(port: UInt16, seconds: Double) async {
+        CompanionCredentials.testOverride = ("relevo-sim", Data((0..<32).map { _ in UInt8.random(in: 0...255) }))
+        let store = AppStore.shared
+        store.settings.companionEnabled = true
+        store.settings.companionPort = Int(port)
+        CompanionServer.shared.attach(store)
+        for _ in 0..<50 where !CompanionServer.shared.isListening { try? await Task.sleep(nanoseconds: 100_000_000) }
+        out("LISTENING \(CompanionServer.shared.port.map(String.init) ?? "-")")
+        if let url = CompanionServer.shared.pairing?.url { out("PAIR \(url.absoluteString)") }
+        let end = Date().addingTimeInterval(seconds)
+        var lastDevices: [String] = []
+        while Date() < end {
+            let devices = CompanionServer.shared.devices.map(\.name)
+            if devices != lastDevices { out("DEVICES \(devices)"); lastDevices = devices }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+    }
+
+    /// Starts the companion server on the current data and connects to it like the iPhone would (Bonjour + TLS-PSK):
+    ///   --selftest companion [port]
+    static func companion(port: UInt16) async {
+        CompanionCredentials.testOverride = ("relevo-selftest", Data((0..<32).map { _ in UInt8.random(in: 0...255) }))
+        let store = AppStore.shared
+        store.settings.companionEnabled = true
+        store.settings.companionPort = Int(port)
+        CompanionServer.shared.attach(store)
+        let server = CompanionServer.shared
+        for _ in 0..<50 where !server.isListening { try? await Task.sleep(nanoseconds: 100_000_000) }
+        out("SERVER listening=\(server.isListening) port=\(server.port.map(String.init) ?? "-") error=\(server.lastError ?? "-")")
+        guard let pairing = server.pairing else { out("sin pairing"); return }
+        out("PAIRING \(pairing.url.absoluteString.prefix(60))…")
+        guard let parsed = PairingInfo(url: pairing.url), parsed.secret == pairing.secret else { out("PAIRING URL no se puede leer"); return }
+
+        for (label, secret) in [("clave correcta", parsed.secret), ("clave incorrecta", Data(repeating: 7, count: 32))] {
+            let endpoint = NWEndpoint.service(name: parsed.serverId, type: CompanionTransport.serviceType, domain: "local.", interface: nil)
+            let channel = MessageChannel(connection: NWConnection(to: endpoint, using: CompanionTransport.parameters(secret: secret, identity: parsed.serverId)))
+            var got: [String] = []
+            var threadItems: Int?
+            var ready = false
+            var failed: String?
+            channel.onStateChange = { state in
+                switch state {
+                case .ready: ready = true
+                case .failed(let e): failed = "\(e)"
+                case .waiting(let e): failed = "waiting: \(e)"
+                default: break
+                }
+            }
+            channel.onMessage = { data in
+                guard let m = try? CompanionCoding.decode(ServerMessage.self, from: data) else { got.append("??"); return }
+                switch m {
+                case .welcome(let name, let v): got.append("welcome(\(name), v\(v))")
+                case .snapshot(let s):
+                    got.append("snapshot(\(s.accounts.count) cuentas, \(s.projects.count) proyectos, \(s.threads.count) hilos)")
+                    if let first = s.threads.first, threadItems == nil {
+                        threadItems = -1
+                        channel.send(ClientMessage.subscribe(threadId: first.id))
+                    }
+                case .thread(let t):
+                    threadItems = t.items.count
+                    got.append("thread(«\(t.title)», \(t.items.count) elementos, modo \(t.runtime.mode.rawValue), candidatos \(t.runtime.relayCandidates.count))")
+                    // Live update path: a command from the phone changes the Mac, which sends back only a patch.
+                    let next: RemoteMode = t.runtime.mode == .plan ? .ask : .plan
+                    channel.send(ClientMessage.setMode(threadId: t.id, mode: next))
+                case .threadPatch(let p): got.append("patch(\(p.upserts.count) elementos, modo \(p.runtime.mode.rawValue))")
+                case .activity(let a): got.append("activity(\(a.phase.rawValue))")
+                case .image(_, let data, let error): got.append("image(\(data?.count ?? 0) bytes, \(error ?? "-"))")
+                case .created: got.append("created")
+                case .toast(let t): got.append("toast(\(t))")
+                }
+            }
+            channel.start()
+            let deadline = Date().addingTimeInterval(10)
+            while !ready && failed == nil && Date() < deadline { try? await Task.sleep(nanoseconds: 50_000_000) }
+            if ready { channel.send(ClientMessage.hello(device: "Selftest", version: CompanionCoding.version)) }
+            let end = Date().addingTimeInterval(4)
+            while Date() < end { try? await Task.sleep(nanoseconds: 50_000_000) }
+            out("[\(label)] ready=\(ready) fallo=\(failed ?? "-") mensajes=\(got.isEmpty ? "ninguno" : got.joined(separator: " · ")) dispositivos=\(server.devices.map(\.name))")
+            channel.cancel()
+            try? await Task.sleep(nanoseconds: 500_000_000)
         }
     }
 

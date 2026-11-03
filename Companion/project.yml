@@ -1,0 +1,91 @@
+name: RelevoCompanion
+options:
+  bundleIdPrefix: app.relevo
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+  developmentLanguage: es
+packages:
+  RelevoProtocol:
+    path: ../Shared/RelevoProtocol
+configFiles:
+  Debug: Config/Base.xcconfig
+  Release: Config/Base.xcconfig
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_DEFAULT_ACTOR_ISOLATION: MainActor
+    SWIFT_APPROACHABLE_CONCURRENCY: YES
+    MARKETING_VERSION: "0.1"
+    CURRENT_PROJECT_VERSION: "1"
+    CODE_SIGN_STYLE: Automatic
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+targets:
+  RelevoCompanion:
+    type: application
+    platform: iOS
+    sources:
+      - path: RelevoCompanion
+        excludes: ["Info.plist", "RelevoCompanion.entitlements"]
+    dependencies:
+      - package: RelevoProtocol
+        product: RelevoProtocol
+      - package: RelevoProtocol
+        product: RelevoMarkdown
+      - target: RelevoCompanionWidgets
+    entitlements:
+      path: RelevoCompanion/RelevoCompanion.entitlements
+      properties:
+        aps-environment: development
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(RELEVO_BUNDLE_ID)
+        PRODUCT_NAME: RelevoCompanion
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        SUPPORTS_MACCATALYST: NO
+    info:
+      path: RelevoCompanion/Info.plist
+      properties:
+        CFBundleDisplayName: Relevo
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        NSLocalNetworkUsageDescription: Relevo busca tu Mac en la red local para que puedas seguir y controlar tus agentes desde el iPhone.
+        NSBonjourServices: [_relevo._tcp]
+        NSCameraUsageDescription: La cámara se usa solo para escanear el código de emparejamiento que muestra Relevo en tu Mac.
+        ITSAppUsesNonExemptEncryption: false
+        NSSupportsLiveActivities: true
+        NSSupportsLiveActivitiesFrequentUpdates: true
+        CFBundleURLTypes:
+          - CFBundleURLName: app.relevo.companion.pair
+            CFBundleURLSchemes: [relevocompanion]
+  RelevoCompanionWidgets:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: RelevoCompanionWidgets
+        excludes: ["Info.plist"]
+      - path: RelevoCompanion/LiveActivity
+      - path: RelevoCompanion/Services/PairingStore.swift
+      - path: RelevoCompanion/Support/Presentation.swift
+    dependencies:
+      - package: RelevoProtocol
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(RELEVO_BUNDLE_ID).widgets
+        PRODUCT_NAME: RelevoCompanionWidgets
+        TARGETED_DEVICE_FAMILY: "1"
+        SKIP_INSTALL: YES
+    info:
+      path: RelevoCompanionWidgets/Info.plist
+      properties:
+        CFBundleDisplayName: Relevo
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension

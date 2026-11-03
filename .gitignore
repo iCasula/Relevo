@@ -2,3 +2,5 @@
 build/
 .swiftpm/
 *.xcodeproj
+.signing-identity
+Companion/Config/Local.xcconfig

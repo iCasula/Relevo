@@ -7,7 +7,22 @@ struct ApprovalRequest {
     let options: [ApprovalOption]
     /// The agent already finished its turn; choosing an allow option starts a new one.
     var resumesTurn: Bool = false
+    /// Set when the agent asks questions instead of a permission: answer with `respond(ApprovalRequest.answers(…))`.
+    var questions: [AgentQuestion]? = nil
     let respond: (String) -> Void
+
+    static let answersPrefix = "answers:"
+
+    /// Encodes question → answer pairs for `respond`.
+    static func answers(_ answers: [String: String]) -> String {
+        let data = (try? JSONSerialization.data(withJSONObject: answers)) ?? Data("{}".utf8)
+        return answersPrefix + (String(data: data, encoding: .utf8) ?? "{}")
+    }
+
+    static func decodeAnswers(_ choice: String) -> [String: String]? {
+        guard choice.hasPrefix(answersPrefix) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: Data(choice.dropFirst(answersPrefix.count).utf8))) as? [String: String]
+    }
 }
 
 struct AgentFailure: LocalizedError {
@@ -48,6 +63,14 @@ protocol AgentSession: AnyObject {
     func setEffort(_ effort: String?)
     func interrupt()
     func close()
+    /// False once a long-running CLI has exited (e.g. after an internal error between turns): sending to it
+    /// would go nowhere, so the runtime starts a new session that resumes the conversation instead.
+    var isAlive: Bool { get }
+}
+
+extension AgentSession {
+    /// Adapters that launch one process per turn can always take the next message.
+    var isAlive: Bool { true }
 }
 
 enum AgentStartError: LocalizedError {

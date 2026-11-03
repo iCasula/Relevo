@@ -1,4 +1,6 @@
 import SwiftUI
+import QuickLook
+import RelevoMarkdown
 import AppKit
 
 struct ItemView: View {
@@ -15,6 +17,10 @@ struct ItemView: View {
             VStack(alignment: .leading, spacing: 6) {
                 if showsAuthor { AuthorLine(item: item) }
                 MarkdownText(text: item.text)
+                let images = FileReference.imageReferences(in: item.text)
+                if !images.isEmpty {
+                    ImageStrip(paths: images, load: { path in await thumbnail(path) }, open: { runtime.openReference($0, nearText: item.text) })
+                }
             }
         case .reasoning:
             ReasoningView(item: item, runtime: runtime)
@@ -25,8 +31,21 @@ struct ItemView: View {
         case .error:
             ErrorRow(text: item.text)
         case .approval:
-            ApprovalCard(item: item, runtime: runtime)
+            if let questions = item.questions, !questions.isEmpty {
+                QuestionCard(item: item, questions: questions, runtime: runtime)
+            } else {
+                ApprovalCard(item: item, runtime: runtime)
+            }
         }
+    }
+}
+
+extension ItemView {
+    /// Thumbnail of an image the reply mentions, read from disk off the main thread.
+    func thumbnail(_ path: String) async -> CGImage? {
+        guard let url = FilePaths.resolve(path, thread: runtime.thread, projectPath: store.project(runtime.thread.projectId)?.path,
+                                          nearText: item.text) else { return nil }
+        return await Task.detached(priority: .utility) { ThumbnailMaker.image(url: url, maxPixel: 400) }.value
     }
 }
 
@@ -91,6 +110,53 @@ struct ReasoningView: View {
                     .overlay(alignment: .leading) { Rectangle().fill(Theme.hairline).frame(width: 2) }
             }
         }
+    }
+}
+
+/// A folded run of tool calls: "4 acciones · Read, Edit, Bash". Click to show them.
+struct ToolGroupRow: View {
+    let items: [ChatItem]
+    let isExpanded: Bool
+    let toggle: () -> Void
+
+    private var tools: [ChatItem] { items.filter { $0.kind == .tool } }
+
+    private var summary: String {
+        var names: [String] = []
+        for tool in tools {
+            let name = tool.toolName ?? tool.title?.split(separator: " ").first.map(String.init) ?? "Herramienta"
+            if !names.contains(name) { names.append(name) }
+        }
+        let count = tools.count == 1 ? "1 acción" : "\(tools.count) acciones"
+        let list = names.prefix(4).joined(separator: ", ") + (names.count > 4 ? "…" : "")
+        return list.isEmpty ? count : "\(count) · \(list)"
+    }
+
+    var body: some View {
+        let failed = tools.filter { $0.status == .failed }.count
+        let running = tools.contains { $0.status == .running }
+        Button(action: toggle) {
+            HStack(spacing: 6) {
+                if running {
+                    ProgressView().controlSize(.mini)
+                } else {
+                    Image(systemName: "wrench.and.screwdriver")
+                }
+                Text(summary).lineLimit(1)
+                if failed > 0 {
+                    Label("\(failed)", systemImage: "xmark.circle.fill").foregroundStyle(.red)
+                }
+                Image(systemName: isExpanded ? "chevron.down" : "chevron.right").font(.caption2)
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(Theme.subtleFill, in: Capsule())
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .help(isExpanded ? "Ocultar estas acciones" : "Ver estas acciones")
     }
 }
 
@@ -204,6 +270,107 @@ struct ErrorRow: View {
     }
 }
 
+/// The agent asks you something (AskUserQuestion): pick options or write your own answer.
+struct QuestionCard: View {
+    let item: ChatItem
+    let questions: [AgentQuestion]
+    let runtime: ThreadRuntime
+    @State private var selected: [Int: Set<String>] = [:]
+    @State private var other: [Int: String] = [:]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label(questions.count == 1 ? "El agente te pregunta" : "El agente te hace \(questions.count) preguntas", systemImage: "questionmark.bubble.fill")
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(Color.accentColor)
+            ForEach(Array(questions.enumerated()), id: \.offset) { index, q in
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 6) {
+                        if let header = q.header, !header.isEmpty {
+                            Text(header.uppercased())
+                                .font(.caption2.weight(.bold))
+                                .padding(.horizontal, 6).padding(.vertical, 2)
+                                .background(Theme.subtleFill, in: Capsule())
+                        }
+                        if q.multiSelect { Text("varias opciones").font(.caption2).foregroundStyle(.secondary) }
+                    }
+                    Text(q.question).font(.callout.weight(.medium)).fixedSize(horizontal: false, vertical: true)
+                    if let answer = item.answers?[q.question] {
+                        Label(answer, systemImage: "checkmark.circle.fill").font(.callout).foregroundStyle(.green)
+                    } else if item.resolution == nil {
+                        ForEach(q.options, id: \.label) { option in
+                            optionRow(index: index, question: q, option: option)
+                        }
+                        TextField("Otra respuesta…", text: Binding(get: { other[index] ?? "" }, set: { other[index] = $0 }))
+                            .textFieldStyle(.roundedBorder)
+                    }
+                }
+            }
+            if item.resolution == nil {
+                HStack {
+                    Button("Responder", action: submit)
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!allAnswered)
+                    Button("Omitir") {
+                        if let skip = item.options?.first(where: { !$0.isAllow }) { runtime.resolveApproval(itemId: item.id, option: skip) }
+                    }
+                    .help("No responder: el agente seguirá por su cuenta")
+                }
+            } else if item.answers == nil {
+                Label(item.resolution ?? "", systemImage: "xmark.circle").font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.accentColor.opacity(item.resolution == nil ? 0.07 : 0.03), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Color.accentColor.opacity(0.2)))
+    }
+
+    private func optionRow(index: Int, question: AgentQuestion, option: AgentQuestion.Option) -> some View {
+        let isOn = selected[index]?.contains(option.label) ?? false
+        return Button {
+            var set = selected[index] ?? []
+            if question.multiSelect {
+                if set.remove(option.label) == nil { set.insert(option.label) }
+            } else {
+                set = isOn ? [] : [option.label]
+            }
+            selected[index] = set
+        } label: {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: question.multiSelect ? (isOn ? "checkmark.square.fill" : "square") : (isOn ? "largecircle.fill.circle" : "circle"))
+                    .foregroundStyle(isOn ? Color.accentColor : Color.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(option.label).font(.callout)
+                    if let d = option.description, !d.isEmpty {
+                        Text(d).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.vertical, 5).padding(.horizontal, 8)
+            .background(isOn ? Color.accentColor.opacity(0.10) : Color.clear, in: RoundedRectangle(cornerRadius: 8))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func answer(for index: Int) -> String? {
+        let text = (other[index] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !text.isEmpty { return text }
+        let picked = questions[index].options.map(\.label).filter { selected[index]?.contains($0) ?? false }
+        return picked.isEmpty ? nil : picked.joined(separator: ", ")
+    }
+
+    private var allAnswered: Bool { questions.indices.allSatisfy { answer(for: $0) != nil } }
+
+    private func submit() {
+        var answers: [String: String] = [:]
+        for (i, q) in questions.enumerated() { if let a = answer(for: i) { answers[q.question] = a } }
+        runtime.answerQuestions(itemId: item.id, answers: answers)
+    }
+}
+
 struct ApprovalCard: View {
     let item: ChatItem
     let runtime: ThreadRuntime
@@ -259,181 +426,11 @@ struct ApprovalCard: View {
 // MARK: - Markdown
 
 /// Lightweight block-level Markdown renderer (headings, lists, code fences, quotes) with inline styling.
+/// Agent replies and the trace: the shared renderer (same output as Relevo Companion on the iPhone).
 struct MarkdownText: View {
     let text: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ForEach(Array(MarkdownBlock.parse(text).enumerated()), id: \.offset) { _, block in
-                blockView(block)
-            }
-        }
-        .textSelection(.enabled)
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    @ViewBuilder
-    private func blockView(_ block: MarkdownBlock) -> some View {
-        switch block {
-        case .heading(let level, let content):
-            inline(content)
-                .font(level == 1 ? .title2.weight(.semibold) : level == 2 ? .title3.weight(.semibold) : .headline)
-                .padding(.top, 4)
-        case .paragraph(let content):
-            inline(content)
-                .lineSpacing(2)
-        case .bullet(let indent, let marker, let content):
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text(marker)
-                    .foregroundStyle(.secondary)
-                    .frame(minWidth: 14, alignment: .trailing)
-                inline(content)
-                    .lineSpacing(2)
-            }
-            .padding(.leading, CGFloat(indent) * 14)
-        case .quote(let content):
-            inline(content)
-                .foregroundStyle(.secondary)
-                .padding(.leading, 10)
-                .overlay(alignment: .leading) { Rectangle().fill(Theme.hairline).frame(width: 3) }
-        case .code(let language, let code):
-            CodeBlock(language: language, code: code)
-        case .rule:
-            Divider()
-        }
-    }
-
-    private func inline(_ s: String) -> Text {
-        if let attributed = try? AttributedString(markdown: s, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
-            return Text(attributed)
-        }
-        return Text(s)
-    }
-}
-
-struct CodeBlock: View {
-    let language: String
-    let code: String
-    @State private var copied = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text(language.isEmpty ? "código" : language)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Button {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(code, forType: .string)
-                    copied = true
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
-                } label: {
-                    Image(systemName: copied ? "checkmark" : "doc.on.doc").font(.caption)
-                }
-                .buttonStyle(.borderless)
-                .help("Copiar")
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            Divider()
-            ScrollView(.horizontal, showsIndicators: false) {
-                Text(code)
-                    .font(.system(.callout, design: .monospaced))
-                    .padding(10)
-                    .fixedSize(horizontal: true, vertical: false)
-            }
-        }
-        .background(Theme.subtleFill, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Theme.hairline))
-    }
-}
-
-enum MarkdownBlock {
-    case heading(Int, String)
-    case paragraph(String)
-    case bullet(indent: Int, marker: String, content: String)
-    case quote(String)
-    case code(language: String, code: String)
-    case rule
-
-    static func parse(_ text: String) -> [MarkdownBlock] {
-        var blocks: [MarkdownBlock] = []
-        var paragraph: [String] = []
-        var inCode = false
-        var codeLang = ""
-        var codeLines: [String] = []
-
-        func flushParagraph() {
-            if !paragraph.isEmpty {
-                blocks.append(.paragraph(paragraph.joined(separator: "\n")))
-                paragraph.removeAll()
-            }
-        }
-
-        for rawLine in text.components(separatedBy: "\n") {
-            let line = rawLine
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("```") {
-                if inCode {
-                    blocks.append(.code(language: codeLang, code: codeLines.joined(separator: "\n")))
-                    codeLines.removeAll()
-                    inCode = false
-                } else {
-                    flushParagraph()
-                    inCode = true
-                    codeLang = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespaces)
-                }
-                continue
-            }
-            if inCode {
-                codeLines.append(line)
-                continue
-            }
-            if trimmed.isEmpty {
-                flushParagraph()
-                continue
-            }
-            if trimmed == "---" || trimmed == "***" || trimmed == "___" {
-                flushParagraph()
-                blocks.append(.rule)
-                continue
-            }
-            if trimmed.hasPrefix("#") {
-                let level = trimmed.prefix(while: { $0 == "#" }).count
-                if level <= 6, trimmed.dropFirst(level).hasPrefix(" ") {
-                    flushParagraph()
-                    blocks.append(.heading(level, String(trimmed.dropFirst(level + 1))))
-                    continue
-                }
-            }
-            if trimmed.hasPrefix("> ") {
-                flushParagraph()
-                blocks.append(.quote(String(trimmed.dropFirst(2))))
-                continue
-            }
-            let indent = (line.prefix(while: { $0 == " " }).count) / 2
-            if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") || trimmed.hasPrefix("+ ") {
-                flushParagraph()
-                var content = String(trimmed.dropFirst(2))
-                var marker = "•"
-                if content.hasPrefix("[ ] ") { marker = "☐"; content = String(content.dropFirst(4)) }
-                else if content.lowercased().hasPrefix("[x] ") { marker = "☑︎"; content = String(content.dropFirst(4)) }
-                blocks.append(.bullet(indent: indent, marker: marker, content: content))
-                continue
-            }
-            if let match = trimmed.range(of: #"^\d{1,3}[.)] "#, options: .regularExpression) {
-                flushParagraph()
-                let marker = String(trimmed[match].dropLast())
-                blocks.append(.bullet(indent: indent, marker: marker, content: String(trimmed[match.upperBound...])))
-                continue
-            }
-            paragraph.append(line)
-        }
-        if inCode {
-            blocks.append(.code(language: codeLang, code: codeLines.joined(separator: "\n")))
-        }
-        flushParagraph()
-        return blocks
+        MarkdownView(text)
     }
 }

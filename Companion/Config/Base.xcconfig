@@ -1,0 +1,5 @@
+// Shared settings. Per-developer values (team, bundle id) go in Config/Local.xcconfig, which is not committed:
+//   DEVELOPMENT_TEAM = ABCDE12345
+//   RELEVO_BUNDLE_ID = com.example.relevo.companion
+RELEVO_BUNDLE_ID = app.relevo.companion
+#include? "Local.xcconfig"

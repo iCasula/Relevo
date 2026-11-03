@@ -5,8 +5,23 @@ import Security
 /// Relevo never stores or reads other apps' tokens here.
 enum Keychain {
     private static let service = "app.relevo.mac"
+    /// Values already read this session: each item is read from the Keychain (and authorised) at most once per launch.
+    private static var cache: [String: String] = [:]
+    private static let lock = NSLock()
 
     static func get(_ account: String) -> String? {
+        lock.lock()
+        let cached = cache[account]
+        lock.unlock()
+        if let cached { return cached }
+        guard let value = read(account) else { return nil }
+        lock.lock()
+        cache[account] = value
+        lock.unlock()
+        return value
+    }
+
+    private static func read(_ account: String) -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -21,6 +36,9 @@ enum Keychain {
 
     @discardableResult
     static func set(_ value: String, for account: String) -> Bool {
+        lock.lock()
+        cache[account] = value
+        lock.unlock()
         let base: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -37,6 +55,9 @@ enum Keychain {
     }
 
     static func delete(_ account: String) {
+        lock.lock()
+        cache.removeValue(forKey: account)
+        lock.unlock()
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,

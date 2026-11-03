@@ -48,6 +48,15 @@ Adding or removing a provider doesn't touch the rest of the app:
 
 When you send a message, a cheap model with no reasoning sets the thread's **topic** as its title in the list. By default it picks, in this order, a pay-per-use API (DeepSeek Flash), Claude Haiku 4.5 without reasoning, or Gemini Flash Low. If the first message gives no context ("hola"), it waits for the next one (up to 3 attempts). You can change the model or turn it off in Settings › General. Right-click a thread to rename it or regenerate its title with AI.
 
+## Working with a running agent
+
+- **Queue**: messages sent while the agent works wait and go out one per finished turn. After an error, a limit or a stop the queue pauses instead of firing at the wrong moment; a handoff resumes it.
+- **Send now** (⚡, ⌘↩ on the Mac, long-press on the iPhone): interrupts the agent and sends the message right away in the same conversation, to redirect it. The rest of the queue continues afterwards.
+- **Questions**: Claude Code's `AskUserQuestion` shows up as a card with the options (single or multiple choice) and a free answer; answers go back as `updatedInput.answers`.
+- **Stops** say where they came from in the thread and the trace ("desde el iPhone", "desde el Mac", "con ⌘.", "para relevar a otro agente", "para enviar tu mensaje ya").
+- **Images and paths** in replies: thumbnails under the message; paths in links, code spans or plain text open in Quick Look (folders in Finder). The iPhone fetches images from the Mac and can open other paths there — only files the thread mentions.
+- **Robustness**: if an agent's CLI exits between turns it is reopened resuming the same conversation; after 2 quiet minutes the status line says so (or which long command is running).
+
 ## Relevo suggests: the right model for each task
 
 While you type, a bar above the composer suggests **subscription · model · reasoning level** and explains why, for example: "Hard task (debugging) · Opus 5.5 is among the most capable · Claude personal has 77% of its weekly quota left, resetting Thu 1:00". Accept it with **Usar** (⇧⌘U). In Settings › General you can turn it off or have it applied automatically (with undo).
@@ -114,6 +123,42 @@ swift build
 ```
 
 Use `RELEVO_DATA_DIR=/tmp/x` to keep your real data untouched, and `RELEVO_SNAPSHOT=/tmp/snap` to make the app save screenshots of its own windows (debugging). With `RELEVO_SNAPSHOT` set, the app also accepts actions through the `app.relevo.snapshot` distributed notification (`new`, `select:<title>`, `draft:<text>`, `accept`, `toggle:<n>`…) and captures itself after each one.
+
+## Relevo Companion (iPhone)
+
+`Companion/` is a native iOS app (SwiftUI, iOS 26, MVVM) to follow and drive Relevo from your iPhone: threads by project with live transcripts, permission requests with big Allow/Deny buttons, the composer with subscription · model · reasoning · permission pickers, "Relevo suggests", one-tap handoffs when a limit is hit, and every subscription's limits.
+
+**How it connects.** Nothing goes through a server:
+
+- The Mac advertises a Bonjour service (`_relevo._tcp`, default port 47820) only when **Settings › iPhone › Allow controlling Relevo from the iPhone** is on (off by default: from the phone you can run agents with full access).
+- Pairing: the Mac generates a 256-bit secret (Keychain) and shows it as a QR code / `relevocompanion://pair?...` link. Scan it with the iPhone Camera (or inside the app) and the app stores it in the iPhone Keychain. **Desvincular iPhones…** on the Mac regenerates the secret and unpairs every phone.
+- Transport: TLS 1.2 with a pre-shared key derived from that secret (HMAC-SHA256), so only a paired device can complete the handshake and all traffic is encrypted, with WebSocket framing for JSON messages (Network.framework on both ends).
+- Outside your Wi-Fi, use a VPN such as Tailscale and set the Mac's address in Settings › iPhone (Mac) or Settings › Away from home (iPhone).
+
+**Code layout.**
+
+- `Shared/RelevoProtocol/`: Swift package used by both apps. `RelevoMarkdown` is the Markdown renderer both clients share (headings, nested/numbered/task lists, quotes, fenced code with copy, GFM tables with alignment), so replies look the same on Mac and iPhone. `RelevoProtocol` holds the transfer models (`RemoteAccount`, `RemoteThread`, `RemoteItem`…), messages (`ClientMessage` / `ServerMessage`), the pairing link and the transport (`CompanionTransport`, `MessageChannel`).
+- `Sources/Relevo/Companion/` (Mac): `CompanionServer` (listener + one `CompanionPeer` per phone), `CompanionMapper` (Mac models → transfer objects) and `CompanionCredentials`. Each peer observes the app state with `withObservationTracking` and sends the snapshot when it changes, plus the transcript of the thread the phone is viewing as **patches** (only new or changed items).
+- `Companion/RelevoCompanion/` (iPhone): `Services/CompanionClient` (connection, reconnection with backoff, state), `ViewModels/` (one `@Observable` view model per screen) and `Views/` (SwiftUI, Liquid Glass, SF Symbols, Dynamic Type).
+
+**Tools.** The toolbar button (⌥⌘T on the Mac) shows or hides the commands and tools the agent runs: hidden, each run of them folds into one row ("4 acciones · Read, Edit, Bash", with failures marked) that expands on tap. Hidden by default on the iPhone, shown on the Mac.
+
+**Live Activity.** The Lock Screen and Dynamic Island show the thread that matters most (needs you › hit a limit › working › just finished), with **Permitir / Denegar** buttons that answer a permission request without opening the app (a `LiveActivityIntent` that sends the answer to the Mac over a one-off connection). Tapping it opens the thread (`relevocompanion://thread/<id>`).
+
+- The Mac computes the state (`CompanionMapper.activity`) and sends it over the connection while the app is open.
+- With the app closed, iOS suspends it, so the Mac sends ActivityKit **push notifications itself** (`LiveActivityPusher`): provider token JWT (ES256, CryptoKit) signed with your own APNs key, HTTP/2 to APNs. It can also **start** the activity remotely (push-to-start) when an agent starts working or needs you. Minor updates are throttled; "needs you", limits and finished turns go out at once with an alert.
+- Setup: create an APNs key at developer.apple.com › Keys (Apple Push Notifications service), then in Relevo for Mac › Settings › iPhone › Live Activities enter the Team ID and Key ID and choose the `.p8` file (stored in the Keychain). The iPhone registers its push tokens and bundle id automatically.
+
+**Build.** The Xcode project is generated with [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`). Put your team (and, if you want, another bundle id) in `Companion/Config/Local.xcconfig`, which is not committed:
+
+```sh
+printf 'DEVELOPMENT_TEAM = ABCDE12345\n' > Companion/Config/Local.xcconfig
+cd Companion && xcodegen generate && open RelevoCompanion.xcodeproj   # run on your iPhone
+```
+
+**Mac signing.** `scripts/build-app.sh` signs with the identity in `RELEVO_SIGN_IDENTITY` or the untracked `.signing-identity` file (e.g. the SHA-1 of your "Apple Development" certificate from `security find-identity -v -p codesigning`). With a stable identity the Keychain recognises every rebuild as the same app, so "Always Allow" is asked only once; ad-hoc signing makes it ask again after each build.
+
+Headless checks of the Mac side: `--selftest companion` (pairs, connects over Bonjour + TLS-PSK, checks a wrong key is rejected and that a command comes back as a patch) and `--selftest serve [port] [seconds]` (only the server with in-memory credentials, prints a pairing link for the simulator). Debug builds of the iPhone app accept `-pairURL <link>`, `-tab limits|settings` and `-openThread <uuid>` launch arguments for simulator testing.
 
 ## Data
 

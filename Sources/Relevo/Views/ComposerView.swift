@@ -31,7 +31,7 @@ struct ComposerView: View {
                     .focused($focused)
                     .onKeyPress(.return, phases: .down) { press in
                         if press.modifiers.contains(.shift) || press.modifiers.contains(.option) { return .ignored }
-                        submit()
+                        if press.modifiers.contains(.command) { submitNow() } else { submit() }
                         return .handled
                     }
             }
@@ -44,6 +44,27 @@ struct ComposerView: View {
                 ModePicker(thread: thread, runtime: runtime)
                 Spacer(minLength: 4)
                 UsageHint(accountId: thread.selectedAccountId)
+                if runtime.isRunning && canSend {
+                    Button(action: submitNow) {
+                        Image(systemName: "bolt.fill")
+                            .font(.system(size: 12, weight: .bold))
+                            .frame(width: 28, height: 28)
+                            .background(Color.orange, in: Circle())
+                            .foregroundStyle(.white)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Enviar ya: interrumpe al agente y le manda esto ahora, sin perder el contexto (⌘↩)")
+                    // While the agent works, sending queues the message for when the turn ends.
+                    Button(action: submit) {
+                        Image(systemName: "text.append")
+                            .font(.system(size: 12, weight: .bold))
+                            .frame(width: 28, height: 28)
+                            .background(Color.primary, in: Circle())
+                            .foregroundStyle(Theme.canvas)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Añadir a la cola: se enviará al terminar el turno (↩︎)")
+                }
                 if runtime.isRunning {
                     Button {
                         runtime.stop()
@@ -86,15 +107,23 @@ struct ComposerView: View {
     }
 
     private var placeholder: String {
-        thread.items.isEmpty ? "Pide un cambio, haz una pregunta o arranca un proyecto…" : "Responde o pide algo más…"
+        if runtime.isRunning { return "Escribe el siguiente mensaje: se enviará cuando termine el turno…" }
+        return thread.items.isEmpty ? "Pide un cambio, haz una pregunta o arranca un proyecto…" : "Responde o pide algo más…"
     }
 
     private var canSend: Bool {
         !thread.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    private func submitNow() {
+        guard canSend else { return }
+        let text = thread.draft
+        thread.draft = ""
+        runtime.sendNow(text)
+    }
+
     private func submit() {
-        guard canSend, !runtime.isRunning else { return }
+        guard canSend else { return }
         let text = thread.draft
         thread.draft = ""
         runtime.send(text)

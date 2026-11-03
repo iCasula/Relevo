@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import Observation
 
 /// Live state of a thread: the running agent session, approvals, the limit banner —
@@ -16,6 +17,27 @@ final class ThreadRuntime {
     let suggester: Suggester
     /// Tool/reasoning rows the user opened, by item id (not view @State: lazy rows get recycled).
     var expandedItems = Set<String>()
+
+    struct QueuedMessage: Identifiable, Equatable {
+        let id = UUID()
+        var text: String
+    }
+    /// File shown in Quick Look (an image or path the agent mentioned).
+    var previewURL: URL?
+
+    /// Opens a path from a reply: files in Quick Look, folders in Finder.
+    func openReference(_ reference: String, nearText: String? = nil) {
+        guard let url = FilePaths.resolve(reference, thread: thread, projectPath: project?.path, nearText: nearText) else {
+            store.flash("No encuentro «\(reference)» en este Mac")
+            return
+        }
+        if FilePaths.isDirectory(url) { NSWorkspace.shared.open(url) } else { previewURL = url }
+    }
+
+    /// Messages sent while the agent works: one goes out each time a turn finishes normally.
+    var queue: [QueuedMessage] = []
+    /// After an error, a limit or a stop the queue waits for you instead of firing at the wrong moment.
+    var queuePaused = false
 
     func toggleExpanded(_ id: String) {
         if expandedItems.remove(id) == nil { expandedItems.insert(id) }
@@ -38,6 +60,12 @@ final class ThreadRuntime {
     // Outcome of the current request, so «Relevo sugiere» learns which models finish each kind of task.
     @ObservationIgnored private var turnProfile: TaskProfile?
     @ObservationIgnored private var turnFailureKind: AgentFailure.Kind?
+    // Watchdog: notices when a working agent goes quiet or its process disappears.
+    @ObservationIgnored private var lastActivity = Date()
+    @ObservationIgnored private var watchdog: Task<Void, Never>?
+    @ObservationIgnored private var agentStatus: String?
+    @ObservationIgnored private var stopSource: StopSource?
+    @ObservationIgnored private var redirectText: String?
 
     init(thread: ThreadModel, store: AppStore) {
         self.thread = thread
@@ -58,7 +86,11 @@ final class ThreadRuntime {
 
     func send(_ raw: String) {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !isRunning else { return }
+        guard !text.isEmpty else { return }
+        if isRunning {
+            queue.append(QueuedMessage(text: text))
+            return
+        }
         guard let account = store.account(thread.selectedAccountId) ?? store.preferredAccount() else {
             append(ChatItem(id: UUID().uuidString, kind: .error, text: "No hay ninguna suscripción activa. Añade una en Ajustes › Suscripciones."))
             return
@@ -85,9 +117,48 @@ final class ThreadRuntime {
         launch(plan, request: text, history: history, pending: false, account: account, model: model)
     }
 
+    /// Interrupts the agent and sends this right away in the same conversation (redirecting it).
+    /// The rest of the queue keeps going afterwards: this stop was on purpose.
+    func sendNow(_ raw: String) {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        guard isRunning else { send(text); return }
+        redirectText = text
+        stop(from: .redirect)
+    }
+
+    func sendQueuedNow(_ id: UUID) {
+        guard let index = queue.firstIndex(where: { $0.id == id }) else { return }
+        sendNow(queue.remove(at: index).text)
+    }
+
+    /// After a stop (by the CLI's answer or the fallback), the redirected message goes out at once.
+    private func sendRedirectIfNeeded() -> Bool {
+        guard let text = redirectText else { return false }
+        redirectText = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.send(text) }
+        return true
+    }
+
+    func removeQueued(_ id: UUID) {
+        queue.removeAll { $0.id == id }
+        if queue.isEmpty { queuePaused = false }
+    }
+
+    func resumeQueue() {
+        queuePaused = false
+        sendNextQueued()
+    }
+
+    private func sendNextQueued() {
+        guard !isRunning, !queuePaused, !queue.isEmpty else { return }
+        send(queue.removeFirst().text)
+    }
+
     /// Re-sends the last user request to another subscription, carrying the whole context and the trace.
     func relay(to account: Account, model: String) {
-        if isRunning { stop() }
+        if isRunning { stop(from: .relay) }
+        queuePaused = false   // the queue continues once the new agent finishes this request
         thread.selectedAccountId = account.id
         thread.selectedModel = model
         if let effort = thread.selectedEffort, !(store.efforts(for: account, model: model)?.contains(effort) ?? false) {
@@ -157,6 +228,8 @@ final class ThreadRuntime {
         turnFailed = false
         turnFailureKind = nil
         stoppedByUser = false
+        stopSource = nil
+        startWatchdog()
         statusLine = "Iniciando \(account.kind.agentName)…"
         do {
             let s = try ensureSession(account: account, model: model)
@@ -170,7 +243,11 @@ final class ThreadRuntime {
     }
 
     private func ensureSession(account: Account, model: String) throws -> AgentSession {
-        if let session, sessionAccountId == account.id { return session }
+        if let session, sessionAccountId == account.id {
+            if session.isAlive { return session }
+            // The CLI exited since the last turn: start again resuming the same conversation.
+            append(ChatItem(id: UUID().uuidString, kind: .notice, text: "\(account.kind.agentName) se había cerrado; lo reabro retomando la conversación", accountId: account.id))
+        }
         closeSession()
         guard let project else { throw AgentFailure(kind: .other, message: "Proyecto no encontrado") }
         let resume = thread.segments.last?.accountId == account.id ? thread.segments.last?.nativeSessionId : nil
@@ -191,8 +268,25 @@ final class ThreadRuntime {
         return effort
     }
 
-    func stop() {
+    /// Where a stop came from: shown in the thread and kept in the trace, so an unexpected stop can be traced.
+    enum StopSource {
+        case mac, shortcut, relay, redirect
+        case iphone(String)
+
+        var label: String {
+            switch self {
+            case .mac: "desde el Mac"
+            case .shortcut: "con ⌘."
+            case .relay: "para relevar a otro agente"
+            case .redirect: "para enviar tu mensaje ya"
+            case .iphone(let name): "desde el iPhone (\(name))"
+            }
+        }
+    }
+
+    func stop(from source: StopSource = .mac) {
         stoppedByUser = true
+        stopSource = source
         session?.interrupt()
         statusLine = "Deteniendo…"
         let current = session
@@ -202,7 +296,8 @@ final class ThreadRuntime {
             self.isRunning = false
             self.statusLine = nil
             self.finishTraceTurn(accountId: self.sessionAccountId ?? self.thread.selectedAccountId)
-            self.append(ChatItem(id: UUID().uuidString, kind: .notice, text: "Detenido"))
+            self.append(ChatItem(id: UUID().uuidString, kind: .notice, text: "Detenido \(source.label)"))
+            _ = self.sendRedirectIfNeeded()
         }
     }
 
@@ -234,6 +329,19 @@ final class ThreadRuntime {
         approvals.removeValue(forKey: key)?(option.id)
     }
 
+    /// Answers the agent's questions (question → chosen option(s) or free text).
+    func answerQuestions(itemId: String, answers: [String: String]) {
+        guard let idx = thread.items.lastIndex(where: { $0.id == itemId }), thread.items[idx].resolution == nil else { return }
+        let key = String(itemId.dropFirst(2))
+        thread.items[idx].resolution = "Respondido"
+        thread.items[idx].answers = answers
+        record(ref: "a:" + key, kind: "approval", title: "", detail: answers.map { "\($0.key) → \($0.value)" }.joined(separator: "\n"),
+               status: "Respondido", accountId: thread.items[idx].accountId, appendDetail: true)
+        statusLine = nil
+        approvals.removeValue(forKey: key)?(ApprovalRequest.answers(answers))
+        store.save(thread)
+    }
+
     func closeSession() {
         session?.close()
         session = nil
@@ -249,6 +357,9 @@ final class ThreadRuntime {
 
     private func handle(_ event: AgentEvent, accountId: UUID, nonce: String) {
         let model = thread.segments.last?.model
+        lastActivity = Date()
+        if case .status(let s) = event { agentStatus = s }
+        if let line = statusLine, line.hasPrefix("Lleva ") || line.hasPrefix("Sin actividad") { statusLine = nil }   // activity again
         let n = nonce + ":"
         switch event {
         case .sessionStarted(let id):
@@ -302,9 +413,10 @@ final class ThreadRuntime {
             record(ref: ref, kind: "tool", title: "", detail: summary, status: status == .failed ? "failed" : "done", accountId: accountId, appendDetail: true)
         case .approval(let request):
             approvals[request.key] = request.respond
-            if request.resumesTurn { resumingApprovals.insert(request.key) } else { statusLine = "Esperando tu aprobación…" }
+            if request.resumesTurn { resumingApprovals.insert(request.key) }
+            else { statusLine = request.questions == nil ? "Esperando tu aprobación…" : "Esperando tu respuesta…" }
             append(ChatItem(id: "a:" + request.key, kind: .approval, text: request.detail, title: request.title,
-                            accountId: accountId, model: model, options: request.options))
+                            accountId: accountId, model: model, options: request.options, questions: request.questions))
             record(ref: "a:" + request.key, kind: "approval", title: request.title, detail: request.detail, status: "pendiente", accountId: accountId)
             store.notifyApproval(thread: thread, title: request.title)
         case .usage(let windows, let plan):
@@ -324,6 +436,7 @@ final class ThreadRuntime {
         case .turnFinished:
             isRunning = false
             statusLine = nil
+            watchdog?.cancel()
             let interrupted = turnFailed || stoppedByUser
             for i in thread.items.indices where thread.items[i].kind == .tool && thread.items[i].status == .running {
                 thread.items[i].status = interrupted ? .failed : .done
@@ -335,15 +448,31 @@ final class ThreadRuntime {
             }
             finishTraceTurn(accountId: accountId)
             recordOutcome(accountId: accountId)
+            if stoppedByUser { append(ChatItem(id: UUID().uuidString, kind: .notice, text: "Detenido \((stopSource ?? .mac).label)")) }
             thread.updatedAt = Date()
             store.save(thread)
             store.refreshUsageSoon(accountId)
             store.notifyTurnFinished(thread: thread)
             suggester.draftChanged()   // the next message may have been written while the agent worked
+            if sendRedirectIfNeeded() {
+                // Redirected on purpose: the remaining queue continues after this message.
+            } else if !queue.isEmpty {
+                if interrupted {
+                    queuePaused = true
+                } else {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in self?.sendNextQueued() }
+                }
+            }
         }
     }
 
     private func handleFailure(_ failure: AgentFailure, accountId: UUID) {
+        // Stopping makes some CLIs end the turn with an "error" (Claude Code: "[ede_diagnostic] …"):
+        // that's the stop itself, already shown as "Detenido", not a failure of the agent.
+        if stoppedByUser, failure.kind == .other || failure.kind == .unavailable {
+            turnFailed = true
+            return
+        }
         if failure.kind == .sessionLost, !recoveringLostSession, let last = lastDispatch, let account = store.account(last.accountId), let project {
             // Native session could not be resumed: start fresh carrying transcript + trace instead.
             recoveringLostSession = true
@@ -453,11 +582,46 @@ final class ThreadRuntime {
         }
         runningToolRefs.removeAll()
         if stoppedByUser {
-            trace.checkpoint(thread: thread.id, reason: "Detenido por el usuario", context: store.account(accountId).map { context($0, model: thread.segments.last?.model) })
+            trace.checkpoint(thread: thread.id, reason: "Detenido por el usuario \((stopSource ?? .mac).label)", context: store.account(accountId).map { context($0, model: thread.segments.last?.model) })
         } else if !turnFailed {
             trace.checkpoint(thread: thread.id, reason: "Turno completado", context: store.account(accountId).map { context($0, model: thread.segments.last?.model) })
         }
         turnStartIndex = thread.items.count
+    }
+
+    /// While a turn runs: after 2 quiet minutes the status line says so (you may want to stop or hand off);
+    /// if the agent's process is gone, the turn is closed with an error instead of "working" forever.
+    private func startWatchdog() {
+        watchdog?.cancel()
+        lastActivity = Date()
+        watchdog = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 15_000_000_000)
+                guard let self, self.isRunning else { return }
+                if let session = self.session, !session.isAlive {
+                    self.handleFailure(AgentFailure(kind: .other, message: "El agente dejó de responder (su proceso terminó). Vuelve a enviar el mensaje o relévalo a otro agente."),
+                                       accountId: self.sessionAccountId ?? self.thread.selectedAccountId ?? UUID())
+                    self.closeSession()
+                    self.isRunning = false
+                    self.statusLine = nil
+                    self.finishTraceTurn(accountId: self.thread.selectedAccountId)
+                    if !self.queue.isEmpty { self.queuePaused = true }
+                    return
+                }
+                let quiet = Date().timeIntervalSince(self.lastActivity)
+                let waitingForYou = self.thread.items.suffix(5).contains { $0.kind == .approval && $0.resolution == nil }
+                if quiet >= 120, !waitingForYou {
+                    let minutes = Int(quiet / 60)
+                    // A long command (builds, tests) is work, not a hang: say which one is running.
+                    if let tool = self.thread.items.suffix(30).last(where: { $0.kind == .tool && $0.status == .running }) {
+                        let name = String((tool.title ?? tool.toolName ?? "un comando").prefix(60))
+                        self.statusLine = "Lleva \(minutes) min ejecutando: \(name)"
+                    } else {
+                        self.statusLine = "Sin actividad desde hace \(minutes) min · puedes detenerlo o relevarlo a otro agente"
+                    }
+                }
+            }
+        }
     }
 
     private func recordOutcome(accountId: UUID) {
