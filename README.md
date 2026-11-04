@@ -171,7 +171,7 @@ The 🧠 picker in the composer only appears when the model supports it:
 
 ## Build and install
 
-Requirements: macOS 14 or later and Xcode / Swift 5.10 or later.
+Requirements: macOS 15 or later and Xcode / Swift 5.10 or later.
 
 ```sh
 ./scripts/build-app.sh          # release build, generates the icon and installs ~/Applications/Relevo.app

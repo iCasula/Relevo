@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "Relevo",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS("15.0")],
     dependencies: [
         .package(path: "Shared/RelevoProtocol"),
     ],

@@ -110,6 +110,8 @@ final class ThreadViewModel {
 
     /// Transcript as displayed: with tools hidden, each run of tool calls becomes one expandable group.
     var rows: [Row] {
+        // A reply that has started but has no text yet would only be an empty gap at the bottom.
+        let items = self.items.filter { !($0.kind == .assistant && $0.usage == nil && $0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }
         guard !showTools else { return items.map(Row.item) }
         var rows: [Row] = []
         var run: [RemoteItem] = []
@@ -197,10 +199,14 @@ final class ThreadViewModel {
 
     // MARK: - Actions
 
+    /// Messages sent from this screen: the transcript goes back to the last line on each one.
+    private(set) var sentCount = 0
+
     func send() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard canSend else { return }
         draftTask?.cancel()
+        sentCount += 1
         client.send(.send(threadId: threadId, text: text))
         draft = ""
         draftTask?.cancel()   // the Mac clears its draft when it sends
@@ -216,6 +222,7 @@ final class ThreadViewModel {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard canSend else { return }
         draftTask?.cancel()
+        sentCount += 1
         client.send(.sendNow(threadId: threadId, text: text))
         draft = ""
         draftTask?.cancel()

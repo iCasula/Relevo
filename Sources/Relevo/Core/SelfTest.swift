@@ -36,6 +36,7 @@ enum SelfTest {
             case "mcp": await mcp()
             case "mcpserve" where rest.count >= 2: await mcpServe(seconds: Double(rest[1]) ?? 120, full: rest.count > 2 && rest[2] == "full")
             case "prwatch": prWatch()
+            case "followscroll": await followScroll()
             case "commitmsg" where rest.count >= 2: await commitMessage(dir: rest[1])
             case "turnchanges" where rest.count >= 2: await turnChanges(dir: rest[1])
             case "workspaceui" where rest.count >= 3: await workspaceUI(dir: rest[1], out: rest[2])
@@ -670,6 +671,74 @@ enum SelfTest {
         out("mensaje (\(String(format: "%.1f", Date().timeIntervalSince(start))) s):\n---\n\(message)\n---")
         let pr = CommitWriter.pullRequest(from: message, thread: thread, store: store)
         out("PR: \(pr.title)\n\(pr.body)\n---")
+    }
+
+    /// The transcript's follow-the-last-line behaviour in a real (offscreen) window:  --selftest followscroll
+    static func followScroll() async {
+        let store = AppStore.shared
+        let project = Project(name: "scroll-test", path: NSTemporaryDirectory())
+        store.projects = [project]
+        let thread = ThreadModel(projectId: project.id, mode: .ask, accountId: nil, model: nil)
+        thread.items = (0..<40).map { i in
+            ChatItem(id: "i\(i)", kind: i % 2 == 0 ? .user : .assistant, text: String(repeating: "Línea \(i) de la conversación de prueba. ", count: i % 2 == 0 ? 2 : 9))
+        }
+        store.threads = [thread]
+        let rt = store.runtime(for: thread)
+        let hosting = NSHostingView(rootView: TranscriptView(thread: thread, runtime: rt).environment(store).frame(width: 760, height: 520))
+        // On screen (animations only run there) but invisible and click-through.
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 520), styleMask: .borderless, backing: .buffered, defer: false)
+        window.alphaValue = 0.01
+        window.ignoresMouseEvents = true
+        window.level = .init(rawValue: NSWindow.Level.normal.rawValue - 1)
+        window.contentView = hosting
+        window.orderFrontRegardless()
+        func wait(_ s: Double) async { try? await Task.sleep(nanoseconds: UInt64(s * 1_000_000_000)) }
+        func scrollView(_ v: NSView) -> NSScrollView? {
+            if let s = v as? NSScrollView { return s }
+            for sub in v.subviews { if let s = scrollView(sub) { return s } }
+            return nil
+        }
+        await wait(1)
+        guard let sv = scrollView(hosting), let doc = sv.documentView else { out("sin NSScrollView"); return }
+        func distance() -> Int { Int(doc.frame.height - sv.contentView.bounds.height - sv.contentView.bounds.origin.y) }
+        func offset() -> Int { Int(sv.contentView.bounds.origin.y) }
+        out("1 al abrir: distancia al final=\(distance())")
+        thread.items.append(ChatItem(id: "s", kind: .assistant, text: ""))
+        for _ in 0..<12 { thread.items[thread.items.count - 1].text += "Texto que va llegando en streaming poco a poco. "; await wait(0.08) }
+        await wait(0.4)
+        out("2 tras streaming: distancia=\(distance())")
+        thread.items.append(ChatItem(id: "n1", kind: .user, text: "Mensaje nuevo"))
+        await wait(0.5)
+        out("3 tras mensaje nuevo: distancia=\(distance())")
+        // Scroll up like a mouse wheel (no scroll phases).
+        sv.contentView.scroll(to: NSPoint(x: 0, y: max(0, sv.contentView.bounds.origin.y - 400)))
+        sv.reflectScrolledClipView(sv.contentView)
+        await wait(0.4)
+        let readingAt = offset()
+        out("4 subo 400 pt: distancia=\(distance()) offset=\(readingAt)")
+        for i in 0..<3 {
+            thread.items.append(ChatItem(id: "r\(i)", kind: .assistant, text: String(repeating: "Respuesta que llega mientras lees. ", count: 10)))
+            await wait(0.3)
+        }
+        for _ in 0..<8 { thread.items[thread.items.count - 1].text += "Más texto en streaming. "; await wait(0.08) }
+        await wait(0.4)
+        out("5 llegan respuestas mientras leo: offset=\(offset()) (antes \(readingAt)) distancia=\(distance()) → \(abs(offset() - readingAt) <= 2 ? "no me mueve" : "¡ME HA MOVIDO!")")
+        rt.composerSends += 1
+        await wait(0.8)
+        out("6 envío desde el composer: distancia=\(distance())")
+        thread.items.append(ChatItem(id: "n2", kind: .assistant, text: String(repeating: "Y sigue siguiendo. ", count: 12)))
+        await wait(0.5)
+        out("7 nueva respuesta: distancia=\(distance())")
+        sv.contentView.scroll(to: NSPoint(x: 0, y: max(0, sv.contentView.bounds.origin.y - 300)))
+        sv.reflectScrolledClipView(sv.contentView)
+        await wait(0.3)
+        sv.contentView.scroll(to: NSPoint(x: 0, y: doc.frame.height - sv.contentView.bounds.height))
+        sv.reflectScrolledClipView(sv.contentView)
+        await wait(0.3)
+        thread.items.append(ChatItem(id: "n3", kind: .assistant, text: String(repeating: "Bajé yo solo hasta el final. ", count: 12)))
+        await wait(0.5)
+        out("8 subo y vuelvo a bajar a mano, llega otra: distancia=\(distance())")
+        window.orderOut(nil)
     }
 
     /// The PR watcher's decisions over a sequence of PR states (no network):  --selftest prwatch

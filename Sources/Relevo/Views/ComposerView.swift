@@ -119,6 +119,7 @@ struct ComposerView: View {
         guard canSend else { return }
         let text = thread.draft
         thread.draft = ""
+        runtime.composerSends += 1
         runtime.sendNow(text)
     }
 
@@ -126,6 +127,7 @@ struct ComposerView: View {
         guard canSend else { return }
         let text = thread.draft
         thread.draft = ""
+        runtime.composerSends += 1
         runtime.send(text)
     }
 }

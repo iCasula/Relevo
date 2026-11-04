@@ -17,6 +17,8 @@ final class ThreadRuntime {
     let suggester: Suggester
     /// Tool/reasoning rows the user opened, by item id (not view @State: lazy rows get recycled).
     var expandedItems = Set<String>()
+    /// Messages sent from this Mac's composer: the transcript goes back to the last line on each one.
+    var composerSends = 0
 
     struct QueuedMessage: Identifiable, Equatable {
         let id = UUID()

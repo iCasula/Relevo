@@ -197,6 +197,8 @@ struct TranscriptView: View {
     let runtime: ThreadRuntime
     var showTools = true
     @AppStorage("showTurnUsage") private var showTurnUsage = true
+    /// On the last line, moving with new output; off once you scroll up to read.
+    @State private var following = true
 
     private enum Row: Identifiable {
         case item(ChatItem)
@@ -212,7 +214,9 @@ struct TranscriptView: View {
 
     /// With tools hidden, each run of tool calls (and reasoning) becomes one expandable summary row.
     private var rows: [Row] {
-        guard !showTools else { return thread.items.map(Row.item) }
+        // A reply that has started but has no text yet would only be an empty gap at the bottom.
+        let items = thread.items.filter { !($0.kind == .assistant && $0.usage == nil && $0.changes == nil && $0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }
+        guard !showTools else { return items.map(Row.item) }
         var rows: [Row] = []
         var run: [ChatItem] = []
         func flush() {
@@ -223,7 +227,7 @@ struct TranscriptView: View {
             rows.append(.group(id: id, items: run))
             if runtime.expandedItems.contains(id) { rows += run.map(Row.item) }
         }
-        for item in thread.items {
+        for item in items {
             if item.kind == .tool || item.kind == .reasoning { run.append(item) } else { flush(); rows.append(.item(item)) }
         }
         flush()
@@ -232,55 +236,57 @@ struct TranscriptView: View {
 
     var body: some View {
         let headers = authorHeaders()
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 14) {
-                    ForEach(rows) { row in
-                        switch row {
-                        case .item(let item):
-                            VStack(alignment: .leading, spacing: 6) {
-                                ItemView(item: item, runtime: runtime, showsAuthor: headers.contains(item.id))
-                                TurnFooter(item: item, runtime: runtime, showUsage: showTurnUsage)
-                            }
-                            .id(item.id)
-                        case .group(let id, let items):
-                            VStack(alignment: .leading, spacing: 6) {
-                                ToolGroupRow(items: items, isExpanded: runtime.expandedItems.contains(id)) {
-                                    withAnimation(.easeOut(duration: 0.15)) { runtime.toggleExpanded(id) }
-                                }
-                                // A turn that ended on a tool: its usage and changes show under the folded group.
-                                if !runtime.expandedItems.contains(id), let last = items.last(where: { $0.usage != nil || $0.changes != nil }) {
-                                    TurnFooter(item: last, runtime: runtime, showUsage: showTurnUsage)
-                                }
-                            }
-                            .id(id)
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 14) {
+                ForEach(rows) { row in
+                    switch row {
+                    case .item(let item):
+                        VStack(alignment: .leading, spacing: 6) {
+                            ItemView(item: item, runtime: runtime, showsAuthor: headers.contains(item.id))
+                            TurnFooter(item: item, runtime: runtime, showUsage: showTurnUsage)
                         }
+                        .id(item.id)
+                    case .group(let id, let items):
+                        VStack(alignment: .leading, spacing: 6) {
+                            ToolGroupRow(items: items, isExpanded: runtime.expandedItems.contains(id)) {
+                                withAnimation(.easeOut(duration: 0.15)) { runtime.toggleExpanded(id) }
+                            }
+                            // A turn that ended on a tool: its usage and changes show under the folded group.
+                            if !runtime.expandedItems.contains(id), let last = items.last(where: { $0.usage != nil || $0.changes != nil }) {
+                                TurnFooter(item: last, runtime: runtime, showUsage: showTurnUsage)
+                            }
+                        }
+                        .id(id)
                     }
-                    if runtime.isRunning {
-                        WorkingIndicator(text: runtime.statusLine)
-                    }
-                    Color.clear.frame(height: 1).id("bottom")
                 }
-                .frame(maxWidth: Theme.contentWidth, alignment: .leading)
-                .padding(.horizontal, 28)
-                .padding(.top, 22)
-                .padding(.bottom, 8)
-                .frame(maxWidth: .infinity)
+                if runtime.isRunning {
+                    WorkingIndicator(text: runtime.statusLine)
+                }
             }
-            .defaultScrollAnchor(.bottom)
-            // Paths and images in replies open in Quick Look (folders in Finder) instead of the browser.
-            .environment(\.openURL, OpenURLAction { url in
-                guard let path = FileReference.path(from: url) else { return .systemAction }
-                runtime.openReference(path)
-                return .handled
-            })
-            .onChange(of: thread.items.count) {
-                withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
+            .frame(maxWidth: Theme.contentWidth, alignment: .leading)
+            .padding(.horizontal, 28)
+            .padding(.top, 22)
+            .padding(.bottom, 8)
+            .frame(maxWidth: .infinity)
+        }
+        .followsBottom($following)
+        // Paths and images in replies open in Quick Look (folders in Finder) instead of the browser.
+        .environment(\.openURL, OpenURLAction { url in
+            guard let path = FileReference.path(from: url) else { return .systemAction }
+            runtime.openReference(path)
+            return .handled
+        })
+        // Sending from the composer always brings you back to the last line.
+        .onChange(of: runtime.composerSends) { following = true }
+        .overlay(alignment: .bottomTrailing) {
+            ZStack {
+                if !following {
+                    JumpToBottomButton { following = true }
+                        .padding(.trailing, 22)
+                        .padding(.bottom, 12)
+                }
             }
-            .onChange(of: thread.items.last?.text.count ?? 0) {
-                proxy.scrollTo("bottom", anchor: .bottom)
-            }
-            .onAppear { proxy.scrollTo("bottom", anchor: .bottom) }
+            .animation(.snappy(duration: 0.2), value: following)
         }
     }
 

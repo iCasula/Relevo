@@ -5,9 +5,9 @@ import RelevoProtocol
 
 struct ThreadDetailView: View {
     @State private var viewModel: ThreadViewModel
-    @State private var isAtBottom = true
+    /// On the last line, moving with new output; off once you scroll up to read.
+    @State private var following = true
     @AppStorage("showTurnUsage") private var showTurnUsage = true
-    private static let bottomID = "transcript-bottom"
 
     init(client: CompanionClient, threadId: UUID) {
         _viewModel = State(initialValue: ThreadViewModel(client: client, threadId: threadId))
@@ -51,12 +51,6 @@ struct ThreadDetailView: View {
     }
 
     private var transcript: some View {
-        ScrollViewReader { proxy in
-            transcriptScroll(proxy)
-        }
-    }
-
-    private func transcriptScroll(_ proxy: ScrollViewProxy) -> some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 14) {
                 if viewModel.hiddenCount > 0 {
@@ -83,25 +77,28 @@ struct ThreadDetailView: View {
                 if viewModel.isRunning {
                     WorkingRow(text: viewModel.runtime?.statusLine)
                 }
-                Color.clear.frame(height: 1).id(Self.bottomID)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
         }
-        .defaultScrollAnchor(.bottom)
+        .followsBottom($following)
         .scrollDismissesKeyboard(.interactively)
         // A tap anywhere in the conversation puts the keyboard away (links and buttons still work).
         .simultaneousGesture(TapGesture().onEnded {
             UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
         })
-        // Follow new output only while you're at the bottom, so reading older messages isn't interrupted.
-        .onScrollGeometryChange(for: Bool.self) { geometry in
-            geometry.contentOffset.y + geometry.containerSize.height >= geometry.contentSize.height - 60
-        } action: { _, atBottom in
-            isAtBottom = atBottom
+        // Sending always brings you back to the last line.
+        .onChange(of: viewModel.sentCount) { following = true }
+        .overlay(alignment: .bottomTrailing) {
+            ZStack {
+                if !following {
+                    JumpToBottomButton { following = true }
+                        .padding(.trailing, 16)
+                        .padding(.bottom, 10)
+                }
+            }
+            .animation(.snappy(duration: 0.2), value: following)
         }
-        .onChange(of: viewModel.items.last?.id) { followIfNeeded(proxy) }
-        .onChange(of: viewModel.items.last?.text.count) { followIfNeeded(proxy, animated: false) }
         .overlay {
             if viewModel.isLoading {
                 ProgressView("Cargando conversación…")
@@ -109,15 +106,6 @@ struct ThreadDetailView: View {
                 ContentUnavailableView("Hilo nuevo", systemImage: "bubble.left.and.text.bubble.right",
                                        description: Text("Pide un cambio, haz una pregunta o arranca un proyecto."))
             }
-        }
-    }
-
-    private func followIfNeeded(_ proxy: ScrollViewProxy, animated: Bool = true) {
-        guard isAtBottom else { return }
-        if animated {
-            withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
-        } else {
-            proxy.scrollTo(Self.bottomID, anchor: .bottom)
         }
     }
 
