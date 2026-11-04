@@ -101,6 +101,8 @@ struct ChatItem: Codable, Identifiable, Equatable {
     /// For questions: what the agent asks, and what you answered (question → answer).
     var questions: [AgentQuestion]? = nil
     var answers: [String: String]? = nil
+    /// Tokens and cost of the turn this item closes.
+    var usage: TurnUsage? = nil
 }
 
 struct Segment: Codable, Identifiable, Equatable {
@@ -251,6 +253,8 @@ struct AppSettings: Codable, Equatable {
     var apnsTeamId: String? = nil
     var apnsKeyId: String? = nil
     var companionBundleId: String = "app.relevo.companion"
+    /// When Relevo started recording tokens per turn; earlier Claude turns are imported from its transcripts.
+    var usageTrackingSince: Date? = nil
 
     init() {}
 
@@ -274,6 +278,7 @@ struct AppSettings: Codable, Equatable {
         apnsTeamId = try? c.decodeIfPresent(String.self, forKey: .apnsTeamId)
         apnsKeyId = try? c.decodeIfPresent(String.self, forKey: .apnsKeyId)
         companionBundleId = (try? c.decodeIfPresent(String.self, forKey: .companionBundleId)) ?? d.companionBundleId
+        usageTrackingSince = try? c.decodeIfPresent(Date.self, forKey: .usageTrackingSince)
     }
 }
 

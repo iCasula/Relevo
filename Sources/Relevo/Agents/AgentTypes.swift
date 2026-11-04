@@ -45,6 +45,10 @@ enum AgentEvent {
     case toolFinished(key: String, status: ToolStatus, output: String?)
     case approval(ApprovalRequest)
     case usage(windows: [UsageWindow], plan: String?)
+    /// Tokens the turn used, one entry per model; sent once, right before `turnFinished`.
+    case tokens([TokenUsage])
+    /// Tokens in the conversation's context now (and the model's window, when known).
+    case context(used: Int, window: Int?)
     case models([ModelOption])
     case plan([PlanStep])
     case status(String?)

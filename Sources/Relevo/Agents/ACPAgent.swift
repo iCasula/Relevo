@@ -203,6 +203,14 @@ final class ACPAgent: AgentSession {
             switch result {
             case .success(let value):
                 let reason = (value as? JSONObject)?.str("stopReason") ?? "end_turn"
+                if let u = (value as? JSONObject)?.obj("usage") {
+                    // ACP prompt usage (unstable spec): inputTokens counts the whole prompt.
+                    let usage = TokenUsage.normalized(model: self.model.isEmpty ? nil : self.model, input: u.int("inputTokens") ?? 0,
+                                                      cacheRead: u.int("cachedReadTokens") ?? 0, cacheWrite: u.int("cachedWriteTokens") ?? 0,
+                                                      output: u.int("outputTokens") ?? 0, reasoning: u.int("thoughtTokens") ?? 0,
+                                                      total: u.int("totalTokens"), inputIncludesCache: true)
+                    if !usage.isEmpty { self.onEvent?(.tokens([usage])) }
+                }
                 if reason == "refusal" { self.onEvent?(.notice("\(self.account.kind.agentName) rechazó la petición")) }
                 if reason == "max_tokens" { self.onEvent?(.notice("Se alcanzó el máximo de tokens")) }
             case .failure(let e):
@@ -252,6 +260,9 @@ final class ACPAgent: AgentSession {
     private func handleNotification(_ method: String, _ params: JSONObject) {
         guard method == "session/update", !loadingHistory, let update = params.obj("update") else { return }
         switch update.str("sessionUpdate") ?? "" {
+        case "usage_update":
+            // Context fill after a turn (Kimi sends no per-turn token counts).
+            if let used = update.int("used") { onEvent?(.context(used: used, window: update.int("size"))) }
         case "agent_message_chunk":
             if lastChunkKind != "message" { messageCounter += 1 }
             lastChunkKind = "message"

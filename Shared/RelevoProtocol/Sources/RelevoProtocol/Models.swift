@@ -212,12 +212,15 @@ public struct RemoteItem: Codable, Hashable, Identifiable, Sendable {
     /// The agent's questions (kind approval) and your answers (question → answer).
     public var questions: [RemoteQuestion]?
     public var answers: [String: String]?
+    /// Tokens and cost of the turn this item closes.
+    public var usage: RemoteTurnUsage?
 
     public init(id: String, kind: Kind, text: String, title: String?, output: String?, toolName: String?, toolState: ToolState?,
                 accountId: UUID?, model: String?, date: Date, options: [RemoteOption]?, resolution: String?,
-                questions: [RemoteQuestion]? = nil, answers: [String: String]? = nil) {
+                questions: [RemoteQuestion]? = nil, answers: [String: String]? = nil, usage: RemoteTurnUsage? = nil) {
         self.questions = questions
         self.answers = answers
+        self.usage = usage
         self.id = id
         self.kind = kind
         self.text = text
@@ -230,6 +233,37 @@ public struct RemoteItem: Codable, Hashable, Identifiable, Sendable {
         self.date = date
         self.options = options
         self.resolution = resolution
+    }
+}
+
+/// What one turn consumed: tokens, share read from cache, cost (an API equivalent for subscriptions), and
+/// what a model or provider switch made it process again.
+public struct RemoteTurnUsage: Codable, Hashable, Sendable {
+    public var tokens: Int
+    public var cacheShare: Double?
+    public var cost: Double?
+    public var costEstimated: Bool
+    public var paid: Bool
+    public var switchLabel: String?
+    public var switchDetail: String?
+    public var overhead: Int?
+    public var overheadCost: Double?
+    public var context: Int?
+    public var contextWindow: Int?
+
+    public init(tokens: Int, cacheShare: Double?, cost: Double?, costEstimated: Bool, paid: Bool, switchLabel: String?, switchDetail: String?,
+                overhead: Int?, overheadCost: Double?, context: Int?, contextWindow: Int?) {
+        self.tokens = tokens
+        self.cacheShare = cacheShare
+        self.cost = cost
+        self.costEstimated = costEstimated
+        self.paid = paid
+        self.switchLabel = switchLabel
+        self.switchDetail = switchDetail
+        self.overhead = overhead
+        self.overheadCost = overheadCost
+        self.context = context
+        self.contextWindow = contextWindow
     }
 }
 

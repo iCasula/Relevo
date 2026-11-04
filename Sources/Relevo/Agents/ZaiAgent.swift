@@ -122,6 +122,7 @@ final class ZaiAgent: AgentSession {
             if !streamedThisTurn, let response = payload.str("response"), !response.isEmpty {
                 onEvent?(.textFinal(key: textKey, text: response))
             }
+            if let usage = ZaiUsage.parse(payload, model: model) { onEvent?(.tokens([usage])) }
             finishTurn()
         case "turn.failed":
             let err = payload.obj("error")
@@ -237,5 +238,27 @@ enum ZaiConfig {
             }
         }
         return ProviderKind.zai.fallbackModels
+    }
+}
+
+
+enum ZaiUsage {
+    /// `turn.completed` carries `usage` (camelCase or OpenAI-style keys) and, as a fallback, `tokenCount`.
+    static func parse(_ payload: JSONObject, model: String) -> TokenUsage? {
+        let id = model.isEmpty ? nil : model
+        if let u = payload.obj("usage") {
+            let details = u.obj("prompt_tokens_details")
+            let input = u.int("inputTokens") ?? u.int("prompt_tokens") ?? u.int("input_tokens") ?? 0
+            let cached = u.int("cacheReadTokens") ?? details?.int("cached_tokens") ?? u.int("cache_read_input_tokens")
+                ?? payload.obj("cacheStats")?.int("cacheReadTokens") ?? 0
+            let output = u.int("outputTokens") ?? u.int("completion_tokens") ?? u.int("output_tokens") ?? 0
+            let usage = TokenUsage.normalized(model: id, input: input, cacheRead: cached, cacheWrite: u.int("cacheWriteTokens") ?? 0,
+                                              output: output, reasoning: u.int("reasoningTokens") ?? 0,
+                                              total: u.int("totalTokens") ?? u.int("total_tokens"), inputIncludesCache: true)
+            if !usage.isEmpty { return usage }
+        }
+        // Only a total: count it as uncached input so it still shows up (cost is then an upper bound).
+        if let total = payload.int("tokenCount"), total > 0 { return TokenUsage(model: id, input: total) }
+        return nil
     }
 }

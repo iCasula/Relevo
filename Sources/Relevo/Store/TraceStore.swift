@@ -78,6 +78,16 @@ final class TraceStore {
               id INTEGER PRIMARY KEY AUTOINCREMENT, thread_id TEXT NOT NULL, ts REAL NOT NULL,
               level TEXT NOT NULL, task TEXT, provider TEXT NOT NULL, model TEXT NOT NULL, result TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS outcomes_key ON outcomes(provider, model, level);
+            CREATE TABLE IF NOT EXISTS token_usage(
+              id INTEGER PRIMARY KEY AUTOINCREMENT, thread_id TEXT NOT NULL, turn TEXT NOT NULL, ts REAL NOT NULL,
+              provider TEXT NOT NULL, account_id TEXT, model TEXT NOT NULL, model_name TEXT NOT NULL, main INTEGER NOT NULL,
+              input INTEGER NOT NULL, cache_read INTEGER NOT NULL, cache_write INTEGER NOT NULL, output INTEGER NOT NULL,
+              reasoning INTEGER NOT NULL, cost REAL, cost_estimated INTEGER NOT NULL DEFAULT 0, paid INTEGER NOT NULL DEFAULT 0,
+              switch TEXT, switch_detail TEXT, overhead INTEGER, overhead_cost REAL, level TEXT, task TEXT, result TEXT,
+              tools INTEGER NOT NULL DEFAULT 0, duration_ms INTEGER, request TEXT, source TEXT NOT NULL DEFAULT 'live', context INTEGER);
+            CREATE INDEX IF NOT EXISTS token_usage_ts ON token_usage(ts);
+            CREATE INDEX IF NOT EXISTS token_usage_thread ON token_usage(thread_id, ts);
+            CREATE TABLE IF NOT EXISTS usage_imports(session_id TEXT PRIMARY KEY, ts REAL NOT NULL, turns INTEGER NOT NULL);
             """)
             hasFTS = exec("""
             CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(title, detail, content='events', content_rowid='id', tokenize='unicode61 remove_diacritics 2');
@@ -182,12 +192,91 @@ final class TraceStore {
         }
     }
 
-    /// Outcomes are kept when a thread is deleted: they hold no content, only level/provider/model/result.
+    /// Outcomes and token counts are kept when a thread is deleted (the stats stay right); only content goes.
     func deleteThread(_ thread: UUID) {
         queue.async { [self] in
             for table in ["events", "files", "plans", "checkpoints"] {
                 run("DELETE FROM \(table) WHERE thread_id = ?", [thread.uuidString])
             }
+            run("UPDATE token_usage SET request = NULL WHERE thread_id = ?", [thread.uuidString])
+        }
+    }
+
+    // MARK: - Token usage (one row per turn and model)
+
+    func recordUsage(_ rows: [UsageRecord]) {
+        queue.async { [self] in
+            for r in rows { insertUsage(r) }
+        }
+    }
+
+    private func insertUsage(_ r: UsageRecord) {
+        let t = r.tokens
+        run("""
+        INSERT INTO token_usage(thread_id, turn, ts, provider, account_id, model, model_name, main, input, cache_read, cache_write,
+          output, reasoning, cost, cost_estimated, paid, switch, switch_detail, overhead, overhead_cost, level, task, result, tools,
+          duration_ms, request, source, context)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, [r.threadId.uuidString, r.turn, r.ts.timeIntervalSince1970, r.provider, r.accountId?.uuidString, r.model, r.modelName,
+              r.main ? 1 : 0, t.input, t.cacheRead, t.cacheWrite, t.output, t.reasoning, r.cost, r.costEstimated ? 1 : 0, r.paid ? 1 : 0,
+              r.switchKind?.rawValue, r.switchDetail, r.overhead, r.overheadCost, r.level, r.task, r.result, r.tools, r.durationMs,
+              r.request.map { String($0.prefix(300)) }, r.source, r.context])
+    }
+
+    /// Rows since a date (all when nil), oldest first.
+    func usageRecords(since: Date?, thread: UUID? = nil) -> [UsageRecord] {
+        queue.sync {
+            var sql = """
+            SELECT id, thread_id, turn, ts, provider, account_id, model, model_name, main, input, cache_read, cache_write, output, reasoning,
+              cost, cost_estimated, paid, switch, switch_detail, overhead, overhead_cost, level, task, result, tools, duration_ms, request, source, context
+            FROM token_usage WHERE ts >= ?
+            """
+            var params: [Any?] = [since?.timeIntervalSince1970 ?? 0]
+            if let thread { sql += " AND thread_id = ?"; params.append(thread.uuidString) }
+            sql += " ORDER BY ts, id"
+            return query(sql, params) { stmt in
+                func int(_ c: Int32) -> Int { Int(sqlite3_column_int64(stmt, c)) }
+                func optInt(_ c: Int32) -> Int? { sqlite3_column_type(stmt, c) == SQLITE_NULL ? nil : int(c) }
+                func optDouble(_ c: Int32) -> Double? { sqlite3_column_type(stmt, c) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, c) }
+                return UsageRecord(
+                    id: sqlite3_column_int64(stmt, 0), threadId: UUID(uuidString: Self.text(stmt, 1) ?? "") ?? UUID(), turn: Self.text(stmt, 2) ?? "",
+                    ts: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 3)), provider: Self.text(stmt, 4) ?? "",
+                    accountId: Self.text(stmt, 5).flatMap(UUID.init(uuidString:)), model: Self.text(stmt, 6) ?? "", modelName: Self.text(stmt, 7) ?? "",
+                    main: int(8) == 1,
+                    tokens: TokenUsage(input: int(9), cacheRead: int(10), cacheWrite: int(11), output: int(12), reasoning: int(13)),
+                    cost: optDouble(14), costEstimated: int(15) == 1, paid: int(16) == 1,
+                    switchKind: Self.text(stmt, 17).flatMap(SwitchKind.init(rawValue:)), switchDetail: Self.text(stmt, 18),
+                    overhead: optInt(19), overheadCost: optDouble(20), level: Self.text(stmt, 21), task: Self.text(stmt, 22),
+                    result: Self.text(stmt, 23), tools: int(24), durationMs: optInt(25), request: Self.text(stmt, 26), source: Self.text(stmt, 27) ?? "live",
+                    context: optInt(28))
+            }
+        }
+    }
+
+    /// Typical tokens a normal turn of this model processes without cache (median of recent non-switch turns):
+    /// the baseline a switch turn is compared against.
+    func typicalColdTokens(provider: String, model: String) -> Int? {
+        queue.sync {
+            let values = query("""
+            SELECT input + cache_write FROM token_usage
+            WHERE provider = ? AND model = ? AND main = 1 AND switch IS NULL AND source = 'live'
+            ORDER BY ts DESC LIMIT 25
+            """, [provider, model]) { Int(sqlite3_column_int64($0, 0)) }.sorted()
+            return values.isEmpty ? nil : values[values.count / 2]
+        }
+    }
+
+    func isImported(session: String) -> Bool {
+        queue.sync { !query("SELECT 1 FROM usage_imports WHERE session_id = ?", [session]) { _ in 1 }.isEmpty }
+    }
+
+    /// Adds the rows of an imported session and marks it, in one go.
+    func importUsage(session: String, rows: [UsageRecord]) {
+        queue.sync {
+            exec("BEGIN")
+            for r in rows { insertUsage(r) }
+            run("INSERT OR REPLACE INTO usage_imports(session_id, ts, turns) VALUES (?,?,?)", [session, Date().timeIntervalSince1970, rows.count])
+            exec("COMMIT")
         }
     }
 

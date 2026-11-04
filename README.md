@@ -64,7 +64,7 @@ While you type, a bar above the composer suggests **subscription · model · rea
 - **Classification:** an instant, free local heuristic as you type. After a pause, the same utility model used for titles (DeepSeek Flash, Haiku 4.5 or Gemini Flash Low) returns the level (`trivial`, `normal` or `dificil`) and the kind of task. The result is reused while the text doesn't change much.
 - **Catalog as data** (`Store/ModelCatalog.swift`): `pattern → power 1–10` rules matched against "provider id name", the ideal power per task level, preferred reasoning levels per task level, and models that are never suggested. Only the newest version of each family counts (Opus 5.5 hides Opus 5 and 4.8). Any field can be overridden in `~/Library/Application Support/Relevo/model-tiers.json` (the **Personalizar…** button).
 - **Scoring:** fit for the task (too strong wastes quota; too weak is penalized more) and free quota. Quota only matters when it's scarce, with a bonus for weekly quota that resets within 48 h and would otherwise be lost. Pay-per-use comes last. Each provider can declare which quota windows a model consumes (`usageWindows`): Antigravity separates Gemini from Claude/GPT, and Claude separates "Week · Opus".
-- **Mid-thread**, staying on the same agent weighs more, so the context isn't handed off and the cache isn't broken. It only suggests switching when it's worth it.
+- **Mid-thread**, staying on the same agent weighs more, so the context isn't handed off and the cache isn't broken. The penalty grows with the size of the context, and when it still suggests a switch it says how much context the new model would process again ("switching now re-processes up to 180k tokens of context (≈ $0.72)").
 - **Learns from the trace:** the `outcomes` table in `memory.sqlite` stores the level, provider, model and result of each turn: `ok`, `error`, `limit`, `stopped` or `switched` (set when you change model by hand right after a turn). With 3 or more cases, the success rate raises or lowers the score ("solved 4 of 4 similar tasks"). Limits and stops don't count against the model.
 
 Headless check against your real state (preferably on a copy of the data folder):
@@ -72,6 +72,35 @@ Headless check against your real state (preferably on a copy of the data folder)
 ```sh
 RELEVO_DATA_DIR=/tmp/relevo-copy .build/debug/Relevo --selftest suggest ai - "explain what parse does" "redesign the session lifecycle"
 RELEVO_DATA_DIR=/tmp/relevo-copy .build/debug/Relevo --selftest suggest local codex:gpt-6.1-sol "…"   # mid-thread
+```
+
+## Token usage and cost
+
+Relevo records what every turn consumes, per model, from what each CLI reports:
+
+| Agent | Source | What it gives |
+|---|---|---|
+| Claude Code | `result` (`model_usage_since_last_result`, else the change in `modelUsage`) | input, cache read/write, output, thinking and its list-price `costUSD`, per model (subagents included) |
+| Codex | `thread/tokenUsage/updated` (cumulative: the turn's share is the change since it started) | input (cached included), output (reasoning included), context window |
+| Antigravity | `result.usage` | input, cache read, output, thinking |
+| ZCode (Z.ai) | `turn.completed.usage` (or `tokenCount`) | input, cache, output, reasoning |
+| ACP (Kimi) | `usage_update`, prompt `usage` when present | context size only (Kimi sends no per-turn tokens) |
+
+Counts are normalized (`Usage/TokenUsage.swift`): `input` is the prompt read without cache, `cacheRead`/`cacheWrite` the cached parts, `output` includes reasoning.
+
+- **Per message:** under each reply, a line with tokens, the share read from cache and the cost (click for the breakdown). Toggle it in Agentes › Mostrar consumo de cada mensaje (and in the iPhone's Settings).
+- **Cost:** Claude uses the CLI's own list-price figure; the rest is estimated with a price table kept as data (`Usage/ModelPricing.swift`, rules `pattern → $/M input, output, cache read, cache write`, first match wins). Add or correct rules in `~/Library/Application Support/Relevo/model-prices.json` (**Editar precios…**). For subscriptions it's an API equivalent to compare models, not what you pay; for pay-per-use APIs it estimates real spend.
+- **What switching costs:** a turn that starts cold is labelled with why: a model change, a relay to another agent, a reasoning change, a reopened agent, or a pause longer than the cache's lifetime (the last three only when the tokens show it). Its overhead is the tokens processed without cache beyond what a normal turn of that model processes (median of recent turns), capped at the previous context, priced at the cold rate minus the cache-read rate. It shows on the reply, on the switch notice ("re-procesó 38k tokens sin caché (≈ $0.15)") and in the stats.
+- **Consumo window** (⌥⌘U, or the chart button in the sidebar): totals, conclusions, per day by provider, a weekday × hour heatmap, per model (turns, tokens, cache, cost, cost per turn, success rate), what the switches cost, and **tasks a cheaper model could have done**. The thread toolbar's **Consumo** button shows the same for one thread and its context fill.
+- **Cheaper models:** finished turns of simple tasks (by the same classifier as Relevo suggests, few tool calls, a short answer) done with a model well above what they needed are matched with the cheapest sufficient model of the same subscription. The alternative cost includes switching: the context loaded cold on the cheaper model, and warming the original one again when the thread went on with it. In long threads that usually eats the saving, and the stats say so instead of suggesting it. **Revisar con IA** asks the utility model which of them really could have used the cheaper one.
+- **History:** on first launch Relevo imports the turns made before it recorded tokens from the transcripts Claude Code keeps for each Relevo session (accounts with their own config folder only; read-only).
+
+Charts use a fixed colour per provider from a validated palette (colour-blind safe, separate light and dark steps) and a one-hue scale for the heatmap.
+
+```sh
+RELEVO_TEST_CONFIG_DIR=~/.relevo/accounts/claude-personal .build/debug/Relevo --selftest tokens /tmp/x   # Haiku ×2, then Sonnet
+RELEVO_DATA_DIR=/tmp/relevo-copy .build/debug/Relevo --selftest usagereport                            # import + report on a copy
+RELEVO_DATA_DIR=/tmp/relevo-copy .build/debug/Relevo --selftest usageui /tmp/usage                     # window PNGs, light and dark
 ```
 
 ## Work trace (SQLite): where the agent was
@@ -83,6 +112,7 @@ The main case is **an account running out of quota in the middle of a task**. At
 - `files`: files created or edited in the thread.
 - `checkpoints`: the reason for each stop (limit, error, stopped, turn completed, handoff) and the `HEAD` commit the thread started from.
 - `outcomes`: per-turn results used by Relevo suggests (no content, just level/provider/model/result).
+- `token_usage`: tokens, cost and switch overhead per turn and model (kept when a thread is deleted, without its text); `usage_imports` marks imported Claude sessions.
 
 On each handoff, the new agent first receives a **work state**:
 
@@ -165,6 +195,7 @@ Headless checks of the Mac side: `--selftest companion` (pairs, connects over Bo
 - `~/Library/Application Support/Relevo/state.json`: subscriptions, projects and settings.
 - `~/Library/Application Support/Relevo/threads/*.json`: threads.
 - `~/Library/Application Support/Relevo/handoffs/*.md`: handoff transcripts.
+- `~/Library/Application Support/Relevo/model-prices.json`: optional price corrections for the usage stats.
 - Z.ai: Relevo writes the selected model to `~/.zcode/cli/config.json` (`model` key), because the ZCode CLI doesn't accept `--model`.
 
 ## One subscription per provider

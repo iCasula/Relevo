@@ -29,6 +29,9 @@ enum SelfTest {
             case "markdown" where rest.count >= 2: markdown(out: rest[1])
             case "queue" where rest.count >= 2: await queue(cwd: rest[1])
             case "interactive" where rest.count >= 2: await interactive(cwd: rest[1])
+            case "tokens" where rest.count >= 2: await tokens(cwd: rest[1])
+            case "usagereport": await usageReport()
+            case "usageui" where rest.count >= 2: await usageUI(out: rest[1])
             case "revive" where rest.count >= 2: await revive(cwd: rest[1])
             case "images" where rest.count >= 2: images(threadTitle: rest[1])
             case "apns": await apns()
@@ -79,6 +82,9 @@ enum SelfTest {
                 out("\nAPPROVAL \(r.title) | opciones: \(r.options.map(\.id)) → aprobando")
                 r.respond(r.options.first(where: \.isAllow)?.id ?? r.options[0].id)
             case .usage(let w, let p): out("USAGE plan=\(p ?? "-") " + w.map { "\($0.label)=\(Int($0.percent))%" }.joined(separator: " "))
+            case .tokens(let parts):
+                out("TOKENS " + parts.map { "\($0.model ?? "-"): in=\($0.input) read=\($0.cacheRead) write=\($0.cacheWrite) out=\($0.output) think=\($0.reasoning) cost=\($0.costUSD.map { String(format: "%.5f", $0) } ?? "-")" }.joined(separator: " | "))
+            case .context(let used, let window): out("CONTEXT \(used)/\(window.map(String.init) ?? "?")")
             case .models(let m): out("MODELS \(m.map(\.id))")
             case .plan(let steps): out("PLAN " + steps.map { "[\($0.status)] \($0.text)" }.joined(separator: " | "))
             case .status(let s): if let s { out("STATUS \(s)") }
@@ -306,6 +312,110 @@ enum SelfTest {
         out("avisos nuevos: \(newNotices) · errores: \(thread.items.filter { $0.kind == .error }.count)")
         out("última respuesta: \(thread.items.last { $0.kind == .assistant }?.text.prefix(40) ?? "-") · sesión viva: \(newNotices.filter { $0.hasPrefix("Detenido") }.count == 1)")
         rt.closeSession()
+    }
+
+    /// Token metering against a real agent: two Haiku turns, then a switch to Sonnet in the same session.
+    ///   --selftest tokens <cwd>   (RELEVO_TEST_CONFIG_DIR = Claude config folder)
+    static func tokens(cwd: String) async {
+        let store = AppStore.shared
+        let account = Account(kind: .claude, name: "Claude test", configDir: ProcessInfo.processInfo.environment["RELEVO_TEST_CONFIG_DIR"])
+        store.accounts = [account]
+        let project = Project(name: "tokens-test", path: cwd)
+        store.projects = [project]
+        let thread = ThreadModel(projectId: project.id, mode: .ask, accountId: account.id, model: "haiku")
+        store.threads = [thread]
+        let rt = store.runtime(for: thread)
+        func waitIdle() async {
+            let deadline = Date().addingTimeInterval(120)
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            while rt.isRunning && Date() < deadline { try? await Task.sleep(nanoseconds: 200_000_000) }
+            try? await Task.sleep(nanoseconds: 300_000_000)
+        }
+        for (model, text) in [("haiku", "Responde solo: uno"), ("haiku", "Responde solo: dos"), ("sonnet", "Responde solo: tres")] {
+            thread.selectedModel = model
+            rt.send(text)
+            await waitIdle()
+        }
+        for item in thread.items {
+            if let u = item.usage {
+                let t = u.tokens
+                out("\(item.kind.rawValue) «\(item.text.prefix(20))» in=\(t.input) read=\(t.cacheRead) write=\(t.cacheWrite) out=\(t.output) "
+                    + "coste=\(u.cost.map { String(format: "%.5f", $0) } ?? "-") estimado=\(u.costEstimated) contexto=\(u.context ?? 0)/\(u.contextWindow ?? 0) "
+                    + "cambio=\(u.switchKind?.rawValue ?? "-") \(u.switchDetail ?? "") sobrecoste=\(u.overhead ?? 0) (\(u.overheadCost.map { String(format: "%.5f", $0) } ?? "-"))")
+            } else if item.kind == .notice {
+                out("aviso: \(item.text)")
+            }
+        }
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        let report = UsageAnalytics.report(.today, store: store)
+        out("informe: turnos=\(report.turns) tokens=\(report.tokens.total) coste=\(String(format: "%.5f", report.cost)) cambios=\(report.switches.count) sobrecoste=\(report.switchOverhead)")
+        for m in report.models { out("  modelo \(m.name): turnos=\(m.turns) tokens=\(m.tokens.total) coste=\(String(format: "%.5f", m.cost))") }
+        rt.closeSession()
+    }
+
+    /// Imports the Claude transcripts and prints the usage report of the data folder (use a copy of the real one):
+    ///   --selftest usagereport   (RELEVO_DATA_DIR = copy of ~/Library/Application Support/Relevo)
+    static func usageReport() async {
+        let store = AppStore.shared
+        let started = Date()
+        await UsageImporter.run(store: store)
+        out("importado en \(String(format: "%.1f", Date().timeIntervalSince(started))) s")
+        for period in UsagePeriod.allCases {
+            let r = UsageAnalytics.report(period, store: store)
+            out("== \(period.label): turnos=\(r.turns) tokens=\(TokenFormat.short(r.tokens.total)) (caché \(r.tokens.cacheShare.map(TokenFormat.percent) ?? "-")) coste≈\(TokenFormat.usd(r.cost)) días=\(Set(r.days.map(\.day)).count) celdas=\(r.hours.count)")
+            guard period == .all else { continue }
+            for m in r.models.prefix(8) {
+                out("  \(UsageAnalytics.providerName(m.provider)) · \(m.name): \(m.turns) turnos, \(TokenFormat.short(m.tokens.total)) tokens, \(TokenFormat.usd(m.cost)), ok \(m.okRate.map(TokenFormat.percent) ?? "-")")
+            }
+            out("  cambios: \(r.switches.count) · \(TokenFormat.short(r.switchOverhead)) tokens sin caché · \(TokenFormat.usd(r.switchCost))")
+            for s in r.switchSummary { out("    \(s.kind.label): \(s.count) · \(TokenFormat.short(s.overhead)) · \(TokenFormat.usd(s.cost))") }
+            for sw in r.switches.prefix(5) { out("    · \(sw.switchDetail ?? "") +\(TokenFormat.short(sw.overhead ?? 0)) \(TokenFormat.usd(sw.overheadCost ?? 0)) «\((sw.request ?? "").prefix(50))»") }
+            for d in r.downgrades.prefix(6) {
+                out("  más barato: \(d.fromName) → \(d.toName): \(d.turns.count) turnos, \(TokenFormat.usd(d.actualCost)) → \(TokenFormat.usd(d.cheaperCost)) (ahorro \(TokenFormat.percent(d.share)), cambio \(TokenFormat.usd(d.switchCost))) tipos=\(d.kinds)")
+                for t in d.turns.prefix(3) { out("      «\((t.request ?? "").replacingOccurrences(of: "\n", with: " ").prefix(70))» herramientas=\(t.tools) salida=\(t.tokens.output)") }
+            }
+        }
+    }
+
+    /// Renders the usage window and a reply footer off-screen, light and dark:  --selftest usageui <png prefix>
+    ///   (RELEVO_DATA_DIR = copy of the data folder; RELEVO_USAGE_PERIOD = today|week|month|all)
+    static func usageUI(out prefix: String) async {
+        let store = AppStore.shared
+        await UsageImporter.run(store: store)
+        if let p = ProcessInfo.processInfo.environment["RELEVO_USAGE_PERIOD"] { UserDefaults.standard.set(p, forKey: "usagePeriod") }
+        let sample = TurnUsage(parts: [TokenUsage(model: "claude-sonnet-5-5", input: 4, cacheRead: 10_562, cacheWrite: 41_305, output: 812, reasoning: 120)],
+                               cost: 0.1724, switchKind: .model, switchDetail: "Opus 5.5 → Sonnet 5.5", overhead: 38_400, overheadCost: 0.146,
+                               context: 52_683, contextWindow: 1_000_000, durationMs: 14_200, tools: 3)
+        for scheme in [ColorScheme.light, .dark] {
+            let name = scheme == .light ? "light" : "dark"
+            render(UsageView(scrolls: false).environment(store).frame(width: 1040), scheme: scheme, to: "\(prefix)-window-\(name).png", wait: 2)
+            render(VStack(alignment: .leading, spacing: 12) {
+                Text("Ejemplo de respuesta del agente.").font(.body)
+                TurnUsageFooter(usage: sample)
+                TurnUsageDetail(usage: sample)
+            }.environment(store).padding(20).frame(width: 360), scheme: scheme, to: "\(prefix)-footer-\(name).png", wait: 0.6)
+        }
+    }
+
+    private static func render<V: View>(_ view: V, scheme: ColorScheme, to path: String, wait: Double) {
+        let root = view.environment(\.colorScheme, scheme).background(scheme == .dark ? Color(white: 0.12) : Color.white)
+        let hosting = NSHostingView(rootView: root)
+        hosting.appearance = NSAppearance(named: scheme == .dark ? .darkAqua : .aqua)
+        let window = NSWindow(contentRect: NSRect(x: -20_000, y: -20_000, width: 1000, height: 1000), styleMask: .borderless, backing: .buffered, defer: false)
+        window.appearance = hosting.appearance
+        window.contentView = hosting
+        window.orderFrontRegardless()
+        RunLoop.main.run(until: Date().addingTimeInterval(wait))
+        let size = hosting.fittingSize
+        window.setContentSize(size)
+        hosting.frame = NSRect(origin: .zero, size: size)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        hosting.layoutSubtreeIfNeeded()
+        guard let rep = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else { out("no se pudo renderizar"); return }
+        hosting.cacheDisplay(in: hosting.bounds, to: rep)
+        try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+        window.orderOut(nil)
+        out("PNG \(path) \(Int(size.width))×\(Int(size.height))")
     }
 
     /// Message queue against a real agent (Claude Haiku):

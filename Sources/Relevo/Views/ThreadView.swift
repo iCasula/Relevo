@@ -71,6 +71,8 @@ struct ThreadView: View {
                 }
                 .help("Estado del trabajo: plan, por dónde iba el agente, ficheros tocados y git (lo que recibiría otro agente)")
                 .disabled(thread.items.isEmpty)
+                ThreadUsageButton(thread: thread, runtime: runtime)
+                    .disabled(thread.items.isEmpty)
                 RelayMenu(thread: thread, runtime: runtime)
                 if let project {
                     Menu {
@@ -173,6 +175,7 @@ struct TranscriptView: View {
     let thread: ThreadModel
     let runtime: ThreadRuntime
     var showTools = true
+    @AppStorage("showTurnUsage") private var showTurnUsage = true
 
     private enum Row: Identifiable {
         case item(ChatItem)
@@ -214,11 +217,20 @@ struct TranscriptView: View {
                     ForEach(rows) { row in
                         switch row {
                         case .item(let item):
-                            ItemView(item: item, runtime: runtime, showsAuthor: headers.contains(item.id))
-                                .id(item.id)
+                            VStack(alignment: .leading, spacing: 6) {
+                                ItemView(item: item, runtime: runtime, showsAuthor: headers.contains(item.id))
+                                if showTurnUsage, let usage = item.usage { TurnUsageFooter(usage: usage) }
+                            }
+                            .id(item.id)
                         case .group(let id, let items):
-                            ToolGroupRow(items: items, isExpanded: runtime.expandedItems.contains(id)) {
-                                withAnimation(.easeOut(duration: 0.15)) { runtime.toggleExpanded(id) }
+                            VStack(alignment: .leading, spacing: 6) {
+                                ToolGroupRow(items: items, isExpanded: runtime.expandedItems.contains(id)) {
+                                    withAnimation(.easeOut(duration: 0.15)) { runtime.toggleExpanded(id) }
+                                }
+                                // A turn that ended on a tool: its usage shows under the folded group.
+                                if showTurnUsage, !runtime.expandedItems.contains(id), let usage = items.last(where: { $0.usage != nil })?.usage {
+                                    TurnUsageFooter(usage: usage)
+                                }
                             }
                             .id(id)
                         }

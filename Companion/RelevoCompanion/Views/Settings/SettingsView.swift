@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SettingsView: View {
     @State private var viewModel: SettingsViewModel
+    @AppStorage("showTurnUsage") private var showTurnUsage = true
     @State private var confirmUnpair = false
 
     init(client: CompanionClient) {
@@ -20,6 +21,14 @@ struct SettingsView: View {
                     }
                     LabeledContent("Relevo automático", value: viewModel.autoRelay ? "Activado" : "Desactivado")
                     Button("Reconectar", systemImage: "arrow.clockwise", action: viewModel.reconnect)
+                }
+
+                Section {
+                    Toggle("Consumo de cada mensaje", isOn: $showTurnUsage)
+                } header: {
+                    Text("Conversación")
+                } footer: {
+                    Text("Tokens, caché y coste (equivalente en API) bajo cada respuesta, y lo que costó cambiar de modelo o de proveedor.")
                 }
 
                 Section {

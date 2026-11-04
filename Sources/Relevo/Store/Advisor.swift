@@ -119,6 +119,8 @@ enum Advisor {
         let stats = store.trace.outcomeStats()
         let current = thread.segments.last
         let ideal = catalog.ideal(profile.level)
+        // A switch makes the new model process the whole context again: the longer the thread, the less it pays.
+        let context = store.existingRuntime(thread.id)?.context ?? 0
         var options: [ScoredOption] = []
         for account in store.enabledAccounts {
             let status = store.status[account.id]
@@ -143,6 +145,9 @@ enum Advisor {
                 var sticky = 0.0
                 if let current {
                     if current.accountId == account.id { sticky += 0.2; if current.model == model.id { sticky += 0.1 } }   // no handoff needed
+                    if !(current.accountId == account.id && current.model == model.id), context > 20_000 {
+                        sticky -= min(0.25, Double(context) / 2_000_000)
+                    }
                 } else if thread.selectedAccountId == account.id {
                     sticky += 0.03   // tie-breaker: don't flip between equivalent options
                 }
@@ -224,11 +229,12 @@ enum Advisor {
             return makeSuggestion(best, profile: profile, store: store, selected: selectedAccount, current: current, midThread: midThread, onlyEffort: true)
         }
         if let current, best.score - current.score < (midThread ? 0.12 : 0.04) { return nil }
-        return makeSuggestion(best, profile: profile, store: store, selected: selectedAccount, current: current, midThread: midThread, onlyEffort: false)
+        return makeSuggestion(best, profile: profile, store: store, selected: selectedAccount, current: current, midThread: midThread, onlyEffort: false,
+                              context: store.existingRuntime(thread.id)?.context ?? 0)
     }
 
     private static func makeSuggestion(_ o: ScoredOption, profile: TaskProfile, store: AppStore, selected: Account?, current: ScoredOption?,
-                                       midThread: Bool, onlyEffort: Bool) -> Suggestion {
+                                       midThread: Bool, onlyEffort: Bool, context: Int = 0) -> Suggestion {
         var reasons = [profile.level.label + (profile.kind.map { " (\($0))" } ?? "")]
         if onlyEffort {
             reasons.append(profile.level == .dificil ? "conviene que piense más" : "no hace falta razonar mucho")
@@ -241,6 +247,11 @@ enum Advisor {
             reasons.append("\(selected.name) no tiene cuota ahora")
         }
         if midThread, current?.account.id != o.account.id, !onlyEffort { reasons.append("Relevo le pasará el contexto") }
+        if midThread, !onlyEffort, context >= 20_000 {
+            let cost = ModelPricing.shared.price(provider: o.account.kind, model: o.model.id, name: o.model.name)
+                .map { Double(context) * $0.write / 1_000_000 }
+            reasons.append("cambiar ahora re-procesa hasta \(TokenFormat.short(context)) tokens de contexto" + (cost.map { " (≈ \(TokenFormat.usd($0)))" } ?? ""))
+        }
         return Suggestion(accountId: o.account.id, model: o.model.id, effort: o.effort, profile: profile, reasons: reasons, score: o.score)
     }
 }

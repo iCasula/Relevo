@@ -123,6 +123,13 @@ final class AntigravityAgent: AgentSession {
                 }
             }
             let denied = r.objs("denied_actions")
+            if let u = r.obj("usage") {
+                // Gemini counts cached tokens inside input_tokens and thinking inside output_tokens.
+                let usage = TokenUsage.normalized(model: model.isEmpty ? nil : model, input: u.int("input_tokens") ?? 0,
+                                                  cacheRead: u.int("cache_read_tokens") ?? 0, output: u.int("output_tokens") ?? 0,
+                                                  reasoning: u.int("thinking_tokens") ?? 0, total: u.int("total_tokens"), inputIncludesCache: true)
+                if !usage.isEmpty { onEvent?(.tokens([usage])) }
+            }
             turnActive = false
             onEvent?(.turnFinished)
             if !denied.isEmpty { offerRetry(denied) }

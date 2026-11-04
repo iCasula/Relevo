@@ -28,6 +28,8 @@ struct RelevoApp: App {
             CommandMenu("Agentes") {
                 Button("Actualizar límites") { store.refreshAllUsage() }
                     .keyboardShortcut("r", modifiers: [.command, .shift])
+                OpenUsageCommand()
+                ShowTurnUsageToggle()
                 Divider()
                 Button("Detener agente") {
                     if let t = store.selectedThread { store.runtime(for: t).stop(from: .shortcut) }
@@ -36,10 +38,33 @@ struct RelevoApp: App {
             }
         }
 
+        Window("Consumo", id: "usage") {
+            UsageView()
+                .environment(store)
+        }
+        .defaultSize(width: 980, height: 820)
+
         Settings {
             SettingsView()
                 .environment(store)
         }
+    }
+}
+
+struct OpenUsageCommand: View {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button("Consumo de tokens…") { openWindow(id: "usage") }
+            .keyboardShortcut("u", modifiers: [.command, .option])
+    }
+}
+
+struct ShowTurnUsageToggle: View {
+    @AppStorage("showTurnUsage") private var showTurnUsage = true
+
+    var body: some View {
+        Toggle("Mostrar consumo de cada mensaje", isOn: $showTurnUsage)
     }
 }
 

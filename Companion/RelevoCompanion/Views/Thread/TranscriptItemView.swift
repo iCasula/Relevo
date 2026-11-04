@@ -6,6 +6,7 @@ struct TranscriptItemView: View {
     let item: RemoteItem
     let viewModel: ThreadViewModel
     let showsAuthor: Bool
+    @AppStorage("showTurnUsage") private var showTurnUsage = true
 
     var body: some View {
         switch item.kind {
@@ -19,6 +20,7 @@ struct TranscriptItemView: View {
                 if !images.isEmpty {
                     ImageStrip(paths: images, load: { await viewModel.thumbnail($0) }, open: { viewModel.open(path: $0) })
                 }
+                if showTurnUsage, let usage = item.usage { TurnUsageLine(usage: usage) }
             }
         case .reasoning:
             ReasoningRow(item: item, isExpanded: viewModel.expanded.contains(item.id)) { viewModel.toggle(item) }
@@ -41,6 +43,48 @@ struct TranscriptItemView: View {
 }
 
 /// A folded run of tool calls: "4 acciones · Read, Edit, Bash". Tap to show them.
+/// One line under a reply: tokens, cache and cost of the turn, and what a model or provider switch cost.
+struct TurnUsageLine: View {
+    let usage: RemoteTurnUsage
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            if let label = usage.switchLabel, let overhead = usage.overhead, overhead >= 1000 {
+                Label("\(label): +\(Self.short(overhead)) tokens" + (usage.overheadCost.map { " · \(Self.usd($0))" } ?? ""),
+                      systemImage: "arrow.triangle.swap")
+                    .foregroundStyle(.orange)
+            }
+            HStack(spacing: 8) {
+                Text("\(Self.short(usage.tokens)) tokens")
+                if let share = usage.cacheShare { Text("\(Int((share * 100).rounded()))\u{00A0}% caché") }
+                if let cost = usage.cost { Text((usage.costEstimated ? "≈ " : "") + Self.usd(cost)) }
+            }
+            .foregroundStyle(.tertiary)
+        }
+        .font(.caption2.monospacedDigit())
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(accessibilityText)
+    }
+
+    private var accessibilityText: String {
+        var parts = ["\(usage.tokens) tokens"]
+        if let cost = usage.cost { parts.append("coste aproximado \(Self.usd(cost))") }
+        if let label = usage.switchLabel, let overhead = usage.overhead { parts.append("\(label), \(overhead) tokens re-procesados") }
+        return parts.joined(separator: ", ")
+    }
+
+    static func short(_ n: Int) -> String {
+        if n < 1000 { return "\(n)" }
+        let v = Double(n)
+        if n < 1_000_000 { return (v / 1000).formatted(.number.precision(.fractionLength(v < 10_000 ? 1 : 0))) + "k" }
+        return (v / 1_000_000).formatted(.number.precision(.fractionLength(1))) + "M"
+    }
+
+    static func usd(_ v: Double) -> String {
+        "$" + v.formatted(.number.precision(.fractionLength(v < 0.1 ? 3 : v < 100 ? 2 : 0)))
+    }
+}
+
 struct ActivityGroupRow: View {
     let group: ThreadViewModel.ActivityGroup
     let isExpanded: Bool

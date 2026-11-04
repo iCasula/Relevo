@@ -69,12 +69,45 @@ final class ThreadRuntime {
     @ObservationIgnored private var turnSerial = 0
     /// What to do once the running turn has stopped (a redirected message, a relay).
     @ObservationIgnored private var afterStop: (() -> Void)?
+    // Token usage of the running turn, and why its context may start cold.
+    @ObservationIgnored private var meter: TurnMeter?
+    @ObservationIgnored private var pendingSwitch: PendingSwitch?
+    @ObservationIgnored private var effortChanged = false
+    @ObservationIgnored private var sessionReopened = false
+    @ObservationIgnored private var lastTurnEnd: Date?
+    @ObservationIgnored private var lastTurnContext: Int?
+    /// Tokens in the agent's context now, and its window (when the CLI reports them).
+    var context: Int?
+    var contextWindow: Int?
+
+    private struct TurnMeter {
+        var id = UUID().uuidString
+        var started = Date()
+        var startIndex: Int
+        var accountId: UUID
+        var model: String
+        var request: String?
+        var switchInfo: PendingSwitch?
+        var parts: [TokenUsage] = []
+    }
+
+    private struct PendingSwitch {
+        var kind: SwitchKind
+        var detail: String
+        var noticeId: String?
+    }
 
     init(thread: ThreadModel, store: AppStore) {
         self.thread = thread
         self.store = store
         self.suggester = Suggester(thread: thread, store: store)
         suggester.runtime = self
+        if let last = thread.items.last(where: { $0.usage != nil }), let usage = last.usage {
+            lastTurnEnd = last.date
+            lastTurnContext = usage.context
+            context = usage.context
+            contextWindow = usage.contextWindow
+        }
     }
 
     private var project: Project? { store.project(thread.projectId) }
@@ -202,14 +235,19 @@ final class ThreadRuntime {
     private func prepareSegment(account: Account, model: String, history: [ChatItem]) -> SegmentPlan {
         if let last = thread.segments.indices.last, thread.segments[last].accountId == account.id {
             if thread.segments[last].model != model {
+                let from = ModelNames.cleaned(store.modelName(account, thread.segments[last].model))
                 thread.segments[last].model = model
                 session?.setModel(model)
                 session?.setEffort(validEffort(account: account, model: model))
-                append(ChatItem(id: UUID().uuidString, kind: .notice, text: "Modelo cambiado a \(store.modelName(account, model))", accountId: account.id, model: model))
+                let notice = ChatItem(id: UUID().uuidString, kind: .notice, text: "Modelo cambiado a \(store.modelName(account, model))", accountId: account.id, model: model)
+                append(notice)
+                pendingSwitch = PendingSwitch(kind: .model, detail: "\(from) → \(ModelNames.cleaned(store.modelName(account, model)))", noticeId: notice.id)
             }
             return .direct
         }
         closeSession()
+        context = nil
+        contextWindow = nil
         let previous = thread.segments.last
         let segment = Segment(accountId: account.id, kind: account.kind, model: model, startItem: thread.items.count)
         var plan = SegmentPlan.direct
@@ -223,6 +261,7 @@ final class ThreadRuntime {
             let notice = ChatItem(id: UUID().uuidString, kind: .notice, text: "Relevo: \(fromName) → \(toName) · contexto y traza traspasados", accountId: account.id, model: model)
             append(notice)
             plan = .handoff(noticeId: notice.id)
+            pendingSwitch = PendingSwitch(kind: .provider, detail: "\(fromName) → \(toName)", noticeId: notice.id)
         }
         thread.segments.append(segment)
         store.updateAccount(account.id) { $0.lastModel = model }
@@ -235,6 +274,9 @@ final class ThreadRuntime {
         isRunning = true
         turnSerial += 1
         turnStartIndex = thread.items.count
+        meter = TurnMeter(startIndex: thread.items.count, accountId: account.id, model: model,
+                          request: thread.items.last(where: { $0.kind == .user })?.text, switchInfo: pendingSwitch)
+        pendingSwitch = nil
         turnFailed = false
         turnFailureKind = nil
         stoppedByUser = false
@@ -261,6 +303,7 @@ final class ThreadRuntime {
         closeSession()
         guard let project else { throw AgentFailure(kind: .other, message: "Proyecto no encontrado") }
         let resume = thread.segments.last?.accountId == account.id ? thread.segments.last?.nativeSessionId : nil
+        sessionReopened = resume != nil
         let effort = validEffort(account: account, model: model)
         let s = AgentFactory.make(account: account, cwd: project.path, model: model, effort: effort, mode: thread.mode, resumeId: resume)
         let accountId = account.id
@@ -313,6 +356,7 @@ final class ThreadRuntime {
                 self.thread.items[i].status = .failed
             }
             self.finishTraceTurn(accountId: accountId)
+            self.finishUsage(accountId: accountId)
             self.append(ChatItem(id: UUID().uuidString, kind: .notice, text: "Detenido \(source.label)"))
             self.thread.updatedAt = Date()
             self.store.save(self.thread)
@@ -327,6 +371,7 @@ final class ThreadRuntime {
     }
 
     func setEffort(_ effort: String?) {
+        if session != nil, effort != thread.selectedEffort { effortChanged = true }
         thread.selectedEffort = effort
         if let account = store.account(sessionAccountId), let model = thread.segments.last?.model {
             session?.setEffort(validEffort(account: account, model: model))
@@ -443,6 +488,11 @@ final class ThreadRuntime {
             store.notifyApproval(thread: thread, title: request.title)
         case .usage(let windows, let plan):
             store.mergeUsage(accountId, windows: windows, plan: plan)
+        case .tokens(let parts):
+            meter?.parts += parts
+        case .context(let used, let window):
+            context = used
+            if let window { contextWindow = window }
         case .models(let list):
             store.setModels(accountId, list)
         case .plan(let steps):
@@ -470,6 +520,7 @@ final class ThreadRuntime {
             }
             finishTraceTurn(accountId: accountId)
             recordOutcome(accountId: accountId)
+            finishUsage(accountId: accountId)
             if stoppedByUser { append(ChatItem(id: UUID().uuidString, kind: .notice, text: "Detenido \((stopSource ?? .mac).label)")) }
             thread.updatedAt = Date()
             store.save(thread)
@@ -627,6 +678,7 @@ final class ThreadRuntime {
                     self.isRunning = false
                     self.statusLine = nil
                     self.finishTraceTurn(accountId: self.thread.selectedAccountId)
+                    self.finishUsage(accountId: self.thread.selectedAccountId)
                     if !self.queue.isEmpty { self.queuePaused = true }
                     return
                 }
@@ -648,11 +700,98 @@ final class ThreadRuntime {
 
     private func recordOutcome(accountId: UUID) {
         guard let profile = turnProfile, let account = store.account(accountId), let model = thread.segments.last?.model else { return }
-        let result: String
-        if stoppedByUser { result = "stopped" }
-        else if turnFailed { result = [.limit, .unavailable, .noPlan].contains(turnFailureKind) ? "limit" : "error" }
-        else { result = "ok" }
+        let result = turnResult
         trace.recordOutcome(thread: thread.id, level: profile.level.rawValue, task: profile.kind, provider: account.kind.rawValue, model: model, result: result)
+    }
+
+    private var turnResult: String {
+        if stoppedByUser { return "stopped" }
+        if turnFailed { return [.limit, .unavailable, .noPlan].contains(turnFailureKind) ? "limit" : "error" }
+        return "ok"
+    }
+
+    // MARK: - Token usage
+
+    /// Closes the turn's token meter: cost (reported or estimated), whether the context started cold and why,
+    /// what that cost, shown on the turn's last item and stored for the stats.
+    private func finishUsage(accountId: UUID?) {
+        guard let m = meter else { return }
+        meter = nil
+        defer {
+            lastTurnEnd = Date()
+            lastTurnContext = context ?? lastTurnContext
+            effortChanged = false
+            sessionReopened = false
+        }
+        let account = store.account(accountId ?? m.accountId)
+        let kind = account?.kind ?? store.account(m.accountId)?.kind ?? .claude
+        let parts = m.parts.filter { !$0.isEmpty }
+        guard !parts.isEmpty || context != nil else { return }
+        let pricing = ModelPricing.shared
+        let selectedName = account.map { ModelNames.cleaned(store.modelName($0, m.model)) }
+        func price(_ part: TokenUsage) -> ModelPricing.Price? {
+            pricing.price(provider: kind, model: part.model ?? m.model, name: selectedName)
+        }
+
+        var cost: Double?
+        var estimated = false
+        var partCosts: [Double?] = []
+        for part in parts {
+            var c: Double?
+            if kind == .claude, let reported = part.costUSD { c = reported }
+            else if let p = price(part) { c = p.cost(part); estimated = true }
+            partCosts.append(c)
+            if let c { cost = (cost ?? 0) + c }
+        }
+
+        // Why the context may have started cold: an explicit switch, or a cold turn after a long pause,
+        // a reopened agent or a reasoning change (those only count when the tokens show it).
+        let main = parts.max { $0.total < $1.total }
+        let mainModel = main?.model ?? m.model
+        var info = m.switchInfo
+        if info == nil, let main, lastTurnEnd != nil, (main.cacheShare ?? 1) < 0.5, main.cold > 20_000 {
+            let pause = lastTurnEnd.map { m.started.timeIntervalSince($0) } ?? 0
+            if pause > 3600 { info = PendingSwitch(kind: .idle, detail: "Pausa de \(Int(pause / 3600)) h \(Int(pause.truncatingRemainder(dividingBy: 3600) / 60)) min", noticeId: nil) }
+            else if effortChanged { info = PendingSwitch(kind: .effort, detail: "Nivel de razonamiento cambiado", noticeId: nil) }
+            else if sessionReopened { info = PendingSwitch(kind: .resume, detail: "\(kind.agentName) reabierto", noticeId: nil) }
+        }
+        var overhead: Int?
+        var overheadCost: Double?
+        if let info, let main, main.cold > 0 {
+            // Without the switch most of this would have been a cache read: compare with a normal turn of this model.
+            let baseline = trace.typicalColdTokens(provider: kind.rawValue, model: mainModel) ?? 0
+            var extra = max(0, main.cold - baseline)
+            if let previous = lastTurnContext, info.kind != .provider { extra = min(extra, previous) }
+            overhead = extra
+            if let p = price(main) { overheadCost = Double(extra) * max(0, p.coldPrice(main) - p.read) / 1_000_000 }
+        }
+
+        let end = Date()
+        let tools = thread.items[min(m.startIndex, thread.items.count)...].filter { $0.kind == .tool }.count
+        let usage = TurnUsage(parts: parts, cost: cost, costEstimated: estimated, paid: kind.usesAPIKey, switchKind: info?.kind,
+                              switchDetail: info?.detail, overhead: overhead, overheadCost: overheadCost, context: context,
+                              contextWindow: contextWindow, durationMs: Int(end.timeIntervalSince(m.started) * 1000), tools: tools)
+        let range = min(m.startIndex, thread.items.count)..<thread.items.count
+        if let idx = range.reversed().first(where: { thread.items[$0].kind == .assistant }) ?? range.last {
+            thread.items[idx].usage = usage
+        }
+        if let info, let noticeId = info.noticeId, let overhead, overhead >= 1000,
+           let idx = thread.items.lastIndex(where: { $0.id == noticeId }) {
+            thread.items[idx].text += " · re-procesó \(TokenFormat.short(overhead)) tokens sin caché" + (overheadCost.map { " (≈ \(TokenFormat.usd($0)))" } ?? "")
+        }
+        guard !parts.isEmpty else { return }
+        let rows = parts.enumerated().map { i, part in
+            let isMain = part == main
+            return UsageRecord(threadId: thread.id, turn: m.id, ts: m.started, provider: kind.rawValue, accountId: account?.id,
+                               model: part.model ?? m.model, modelName: ModelNames.display(part.model ?? m.model, account: account, store: store),
+                               main: isMain, tokens: part, cost: partCosts[i], costEstimated: kind != .claude || part.costUSD == nil,
+                               paid: kind.usesAPIKey, switchKind: isMain ? info?.kind : nil, switchDetail: isMain ? info?.detail : nil,
+                               overhead: isMain ? overhead : nil, overheadCost: isMain ? overheadCost : nil,
+                               level: turnProfile?.level.rawValue, task: turnProfile?.kind, result: turnResult, tools: isMain ? tools : 0,
+                               durationMs: isMain ? usage.durationMs : nil, request: isMain ? m.request : nil, source: "live",
+                               context: isMain ? context : nil)
+        }
+        trace.recordUsage(rows)
     }
 
     private func traceFiles(tool: String, title: String, input: String?) {

@@ -19,6 +19,10 @@ final class CodexAgent: AgentSession {
     private var closed = false
     private var turnFailureReported = false
     private var effort: String?
+    /// Codex reports the thread's cumulative tokens: the turn's share is the change since it started.
+    private var latestTotal: TokenUsage?
+    private var turnBaseline: TokenUsage?
+    private var reroutedModel: String?
 
     init(account: Account, cwd: String, model: String, mode: PermissionMode, resumeId: String?) {
         self.account = account
@@ -123,6 +127,7 @@ final class CodexAgent: AgentSession {
 
     private func startTurn(_ text: String) {
         guard let threadId else { return }
+        turnBaseline = latestTotal
         var params: JSONObject = [
             "threadId": threadId,
             "input": [["type": "text", "text": text, "text_elements": [Any]()]],
@@ -206,8 +211,16 @@ final class CodexAgent: AgentSession {
                 reportTurnError(err)
             }
             turnActive = false
+            emitTokens()
             onEvent?(.turnFinished)
             refreshUsage()
+        case "thread/tokenUsage/updated":
+            guard let usage = params.obj("tokenUsage"), let total = usage.obj("total").map(Self.breakdown) else { return }
+            let last = usage.obj("last").map(Self.breakdown)
+            // First report after a resume: the total includes earlier turns, so start from before this request.
+            if turnBaseline == nil { turnBaseline = last.map { total - $0 } ?? total }
+            latestTotal = total
+            if let last { onEvent?(.context(used: last.input + last.output, window: usage.int("modelContextWindow"))) }
         case "error":
             if params.bool("willRetry") == true {
                 onEvent?(.status("Codex reintenta: \(params.obj("error")?.str("message") ?? "")"))
@@ -229,10 +242,29 @@ final class CodexAgent: AgentSession {
         case "thread/compacted":
             onEvent?(.notice("Codex ha compactado el contexto"))
         case "model/rerouted":
-            if let to = params.str("toModel") ?? params.str("model") { onEvent?(.notice("Codex cambió al modelo \(to)")) }
+            if let to = params.str("toModel") ?? params.str("model") {
+                reroutedModel = to
+                onEvent?(.notice("Codex cambió al modelo \(to)"))
+            }
         default:
             break
         }
+    }
+
+    /// Raw counts as Codex sends them (input includes cached tokens; output includes reasoning).
+    private static func breakdown(_ o: JSONObject) -> TokenUsage {
+        TokenUsage(input: o.int("inputTokens") ?? 0, cacheRead: o.int("cachedInputTokens") ?? 0,
+                   cacheWrite: o.int("cacheWriteInputTokens") ?? 0, output: o.int("outputTokens") ?? 0,
+                   reasoning: o.int("reasoningOutputTokens") ?? 0)
+    }
+
+    private func emitTokens() {
+        defer { turnBaseline = latestTotal; reroutedModel = nil }
+        guard let total = latestTotal else { return }
+        let d = total - (turnBaseline ?? TokenUsage())
+        let usage = TokenUsage.normalized(model: reroutedModel ?? (model.isEmpty ? nil : model), input: d.input, cacheRead: d.cacheRead,
+                                          cacheWrite: d.cacheWrite, output: d.output, reasoning: d.reasoning, inputIncludesCache: true)
+        if !usage.isEmpty { onEvent?(.tokens([usage])) }
     }
 
     private func reportTurnError(_ err: JSONObject?) {

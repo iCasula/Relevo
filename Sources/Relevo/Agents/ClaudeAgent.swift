@@ -27,6 +27,9 @@ final class ClaudeAgent: AgentSession {
     private var pendingLimit: AgentFailure?
     private var closed = false
     private var gotOutput = false
+    /// Per-model totals since this process started (`modelUsage` is cumulative), to derive each turn's share.
+    private var cumulativeUsage: [String: TokenUsage] = [:]
+    private var contextWindow: Int?
 
     init(account: Account, cwd: String, model: String, mode: PermissionMode, resumeId: String?) {
         self.account = account
@@ -194,6 +197,12 @@ final class ClaudeAgent: AgentSession {
         case "assistant":
             guard let message = o.obj("message") else { return }
             let mid = message.str("id") ?? UUID().uuidString
+            if !isSubagent, let u = message.obj("usage") {
+                // Each request re-reads the whole conversation: its prompt size is the context size now.
+                let used = (u.int("input_tokens") ?? 0) + (u.int("cache_read_input_tokens") ?? 0)
+                    + (u.int("cache_creation_input_tokens") ?? 0) + (u.int("output_tokens") ?? 0)
+                if used > 0 { onEvent?(.context(used: used, window: contextWindow)) }
+            }
             for (i, block) in message.objs("content").enumerated() {
                 switch block.str("type") {
                 case "text":
@@ -245,6 +254,7 @@ final class ClaudeAgent: AgentSession {
                 onEvent?(.failure(limit))
             }
             pendingLimit = nil
+            emitTokens(o)
             onEvent?(.turnFinished)
             refreshUsage()
             if restartAfterTurn { restartResuming() }
@@ -376,6 +386,37 @@ final class ClaudeAgent: AgentSession {
             }
         }
         onEvent?(.approval(request))
+    }
+
+    /// The turn's tokens per model from the `result` message: `model_usage_since_last_result` when the CLI
+    /// sends it, else the change in the cumulative `modelUsage`, else the turn's `usage`.
+    private func emitTokens(_ o: JSONObject) {
+        func part(_ id: String, _ m: JSONObject) -> TokenUsage {
+            TokenUsage(model: id, input: m.int("inputTokens") ?? 0, cacheRead: m.int("cacheReadInputTokens") ?? 0,
+                       cacheWrite: m.int("cacheCreationInputTokens") ?? 0, output: m.int("outputTokens") ?? 0,
+                       reasoning: m.int("thinkingTokens") ?? 0, costUSD: m.num("costUSD"))
+        }
+        let all = o.obj("modelUsage") ?? [:]
+        var parts: [TokenUsage] = []
+        if let since = o.obj("model_usage_since_last_result") {
+            parts = since.compactMap { key, value in (value as? JSONObject).map { part(key, $0) } }
+        } else if !all.isEmpty {
+            for (key, value) in all {
+                guard let m = value as? JSONObject else { continue }
+                parts.append(part(key, m) - (cumulativeUsage[key] ?? TokenUsage(model: key)))
+            }
+        } else if let u = o.obj("usage") {
+            parts = [TokenUsage(model: model.isEmpty || model == "default" ? nil : model, input: u.int("input_tokens") ?? 0,
+                                cacheRead: u.int("cache_read_input_tokens") ?? 0, cacheWrite: u.int("cache_creation_input_tokens") ?? 0,
+                                output: u.int("output_tokens") ?? 0, costUSD: nil)]
+        }
+        for (key, value) in all {
+            guard let m = value as? JSONObject else { continue }
+            cumulativeUsage[key] = part(key, m)
+            if let w = m.int("contextWindow") { contextWindow = max(contextWindow ?? 0, w) }
+        }
+        parts = parts.filter { !$0.isEmpty }.sorted { $0.total > $1.total }
+        if !parts.isEmpty { onEvent?(.tokens(parts)) }
     }
 
     private func exited(_ code: Int32) {

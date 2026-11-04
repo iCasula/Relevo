@@ -190,6 +190,7 @@ enum ProjectActions {
 
 struct UsageFooter: View {
     @Environment(AppStore.self) private var store
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -198,6 +199,13 @@ struct UsageFooter: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                 Spacer()
+                Button {
+                    openWindow(id: "usage")
+                } label: {
+                    Image(systemName: "chart.bar.xaxis")
+                }
+                .buttonStyle(.borderless)
+                .help("Consumo de tokens (⌥⌘U)")
                 Button {
                     store.refreshAllUsage()
                 } label: {

@@ -6,6 +6,7 @@ import RelevoProtocol
 struct ThreadDetailView: View {
     @State private var viewModel: ThreadViewModel
     @State private var isAtBottom = true
+    @AppStorage("showTurnUsage") private var showTurnUsage = true
     private static let bottomID = "transcript-bottom"
 
     init(client: CompanionClient, threadId: UUID) {
@@ -70,7 +71,13 @@ struct ThreadDetailView: View {
                     case .item(let item):
                         TranscriptItemView(item: item, viewModel: viewModel, showsAuthor: headers.contains(item.id))
                     case .group(let group):
-                        ActivityGroupRow(group: group, isExpanded: viewModel.expanded.contains(group.id)) { viewModel.toggle(group) }
+                        VStack(alignment: .leading, spacing: 6) {
+                            ActivityGroupRow(group: group, isExpanded: viewModel.expanded.contains(group.id)) { viewModel.toggle(group) }
+                            // A turn that ended on a tool: its usage shows under the folded group.
+                            if showTurnUsage, !viewModel.expanded.contains(group.id), let usage = group.items.last(where: { $0.usage != nil })?.usage {
+                                TurnUsageLine(usage: usage)
+                            }
+                        }
                     }
                 }
                 if viewModel.isRunning {

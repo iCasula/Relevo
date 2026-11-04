@@ -72,6 +72,7 @@ final class AppStore {
         refreshAllUsage()
         scheduleTimer()
         CompanionServer.shared.attach(self)
+        Task { await UsageImporter.run(store: self) }
         if Self.canNotify {
             UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
         }

@@ -148,7 +148,12 @@ enum CompanionMapper {
                                options: q.options.map { RemoteQuestion.Option(label: $0.label, description: $0.description) },
                                multiSelect: q.multiSelect)
             },
-            answers: i.answers
+            answers: i.answers,
+            usage: i.usage.map { u in
+                RemoteTurnUsage(tokens: u.tokens.total, cacheShare: u.tokens.cacheShare, cost: u.cost, costEstimated: u.costEstimated, paid: u.paid,
+                                switchLabel: u.switchKind?.label, switchDetail: u.switchDetail, overhead: u.overhead, overheadCost: u.overheadCost,
+                                context: u.context, contextWindow: u.contextWindow)
+            }
         )
     }
 
