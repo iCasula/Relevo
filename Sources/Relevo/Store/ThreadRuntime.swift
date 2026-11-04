@@ -746,10 +746,8 @@ final class ThreadRuntime {
 
     // MARK: - Out of quota
 
-    #if DEBUG
     /// Selftests: as if the agent had just hit this failure.
     func simulateFailure(_ failure: AgentFailure, accountId: UUID) { handleFailure(failure, accountId: accountId) }
-    #endif
 
     /// The thread's own plan, or the default in Settings.
     var limitPlan: LimitPlan { thread.limitPlan ?? store.settings.defaultLimitPlan }
