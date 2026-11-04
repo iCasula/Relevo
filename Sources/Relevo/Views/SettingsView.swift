@@ -175,6 +175,7 @@ struct AccountEditor: View {
                 }
                 if let err = s?.error { Text(err).font(.caption).foregroundStyle(.orange) }
             }
+            ModelsSection(account: store.account(account.id) ?? account)
             Section("Configuración") {
                 TextField("Nombre", text: $name)
                     .onSubmit { store.updateAccount(account.id) { $0.name = name } }
@@ -451,5 +452,55 @@ private struct LimitPlanSetting: View {
             $0.limitPlan = plan
             $0.autoRelay = plan.mode == .mostQuota || plan.mode == .chain
         }
+    }
+}
+
+/// Settings › Suscripciones › a subscription: which of its models appear in the thread's model menu.
+private struct ModelsSection: View {
+    @Environment(AppStore.self) private var store
+    let account: Account
+
+    var body: some View {
+        let all = store.modelsFor(account)
+        let new = store.newModelIds[account.id] ?? []
+        Section {
+            if all.isEmpty {
+                Text("Esta suscripción aún no ha dado su lista de modelos.").foregroundStyle(.secondary)
+            }
+            ForEach(all) { model in
+                Toggle(isOn: Binding(get: { !store.isModelHidden(account, model.id) },
+                                     set: { store.setModel(model.id, hidden: !$0, in: account) })) {
+                    HStack(spacing: 6) {
+                        Text(model.name)
+                        if new.contains(model.id) {
+                            Text("Nuevo")
+                                .font(.caption2.weight(.semibold))
+                                .padding(.horizontal, 6).padding(.vertical, 1)
+                                .background(Color.accentColor.opacity(0.15), in: .capsule)
+                        }
+                        if let detail = model.detail, !detail.isEmpty {
+                            Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        }
+                    }
+                }
+                .toggleStyle(.checkbox)
+                .disabled(!store.isModelHidden(account, model.id) && store.visibleModels(for: account).count <= 1)
+            }
+            HStack {
+                Text(checkedText).font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("Actualizar lista") { store.refreshUsage(account.id) }
+            }
+            Text("Los que desmarques no salen en el menú del modelo del hilo (Mac e iPhone), ni en relevos, comparaciones o sugerencias. Los hilos que ya usan uno lo conservan. La lista se pide al proveedor cada vez que arranca Relevo y en cada comprobación de cuota.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        } header: {
+            Text("Modelos")
+        }
+    }
+
+    private var checkedText: String {
+        guard let date = store.modelsCheckedAt[account.id] else { return "Aún no se ha comprobado en esta sesión" }
+        return "Lista del proveedor comprobada " + date.formatted(.relative(presentation: .named))
     }
 }

@@ -316,7 +316,7 @@ enum UsageAnalytics {
             guard usedPower - need >= 1.5 else { continue }
             let usedPrice = pricing.price(provider: kind, model: rec.model, name: rec.modelName)
             guard let actual = rec.cost ?? usedPrice?.cost(rec.tokens), actual > 0 else { continue }
-            let options = catalog.candidates(kind, store.modelsFor(account)).filter { $0.power >= need && $0.power < usedPower }
+            let options = catalog.candidates(kind, store.visibleModels(for: account)).filter { $0.power >= need && $0.power < usedPower }
             let context = startContext[rec.turn] ?? 0
             let priced = options.compactMap { option -> (ModelOption, Double, Double)? in
                 guard let p = pricing.price(provider: kind, model: option.model.id, name: option.model.name) else { return nil }

@@ -114,13 +114,14 @@ struct ThreadDetailView: View {
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
         ToolbarItem(placement: .topBarTrailing) {
+            // Each command the agent runs as its own row, or each run of them folded into one "N acciones" row.
             Button {
                 withAnimation(.snappy) { viewModel.showTools.toggle() }
             } label: {
-                Label(viewModel.showTools ? "Ocultar herramientas" : "Mostrar herramientas",
-                      systemImage: viewModel.showTools ? "wrench.and.screwdriver.fill" : "wrench.and.screwdriver")
+                Label(viewModel.showTools ? "Agrupar acciones" : "Ver cada acción",
+                      systemImage: viewModel.showTools ? "rectangle.compress.vertical" : "rectangle.expand.vertical")
             }
-            .accessibilityHint("Muestra u oculta los comandos y herramientas que ejecuta el agente")
+            .accessibilityHint("Muestra cada comando del agente por separado, o los agrupa en una línea por tanda")
         }
         ToolbarItem(placement: .topBarTrailing) {
             Menu {

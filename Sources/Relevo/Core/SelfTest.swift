@@ -39,6 +39,7 @@ enum SelfTest {
             case "followscroll": await followScroll()
             case "background" where rest.count >= 2: await background(cwd: rest[1])
             case "limitplan" where rest.count >= 2: await limitPlan(cwd: rest[1])
+            case "models": await modelLists()
             case "commitmsg" where rest.count >= 2: await commitMessage(dir: rest[1])
             case "turnchanges" where rest.count >= 2: await turnChanges(dir: rest[1])
             case "workspaceui" where rest.count >= 3: await workspaceUI(dir: rest[1], out: rest[2])
@@ -576,10 +577,35 @@ enum SelfTest {
                     Text(item.text).font(.body)
                     TurnFooter(item: item, runtime: rt, showUsage: true)
                 }.environment(store).padding(20).frame(width: 560), scheme: scheme, to: "\(prefix)-footer-\(name).png", wait: 0.6)
+                let toolThread = ThreadModel(projectId: project.id, mode: .ask, accountId: claude?.id, model: "claude-opus-5-5")
+                toolThread.items = [
+                    ChatItem(id: "tu", kind: .user, text: "Pasa los tests de login"),
+                    ChatItem(id: "tr", kind: .reasoning, text: "Primero miro qué tests hay y luego los ejecuto.", accountId: claude?.id),
+                    ChatItem(id: "t1", kind: .tool, text: "{}", title: "ls Tests/LoginTests", toolName: "Bash", status: .done, accountId: claude?.id),
+                    ChatItem(id: "t2", kind: .tool, text: "{}", title: "xcodebuild test -only-testing LoginTests", output: "Executed 42 tests, with 0 failures", toolName: "Bash", status: .done, accountId: claude?.id),
+                    ChatItem(id: "ta", kind: .assistant, text: "Los 42 tests de login pasan.", accountId: claude?.id, model: "claude-opus-5-5"),
+                ]
+                let toolRuntime = store.runtime(for: toolThread)
+                for shown in [true, false] {
+                    await render(TranscriptView(thread: toolThread, runtime: toolRuntime, showTools: shown).environment(store).frame(width: 640, height: 420),
+                                 scheme: scheme, to: "\(prefix)-tools-\(shown ? "shown" : "hidden")-\(name).png", wait: 0.8)
+                }
                 await render(VStack(alignment: .leading, spacing: 12) {
                     Text("Duo: estoy repitiendo con el arreglo los 6 tests de UI. Te aviso en cuanto tenga el resultado.").font(.body)
                     WaitingIndicator(tasks: [BackgroundTask(id: "b1", description: "Run the 6 UI tests with the fix", startedAt: Date().addingTimeInterval(-370))])
                 }.environment(store).padding(20).frame(width: 560), scheme: scheme, to: "\(prefix)-waiting-\(name).png", wait: 0.6)
+                if let codex = store.accounts.first(where: { $0.kind == .codex }), scheme == .light {
+                    let all = store.modelsFor(codex)
+                    if all.count > 3 {
+                        store.setModel(all[1].id, hidden: true, in: codex)
+                        store.newModelIds[codex.id] = [all[0].id]
+                        store.modelsCheckedAt[codex.id] = Date().addingTimeInterval(-120)
+                        let updated = store.account(codex.id)!
+                        out("ocultar «\(all[1].name)»: visibles \(store.visibleModels(for: updated).count) de \(all.count) · en el menú del iPhone: \(CompanionMapper.snapshot(store).accounts.first { $0.id == codex.id }?.models.contains { $0.id == all[1].id } == true ? "sale" : "no sale") · por defecto: \(store.defaultModel(for: updated))")
+                        await render(AccountEditor(account: updated).environment(store).frame(width: 620, height: 900), scheme: scheme, to: "\(prefix)-models-\(name).png", wait: 0.8)
+                        store.setModel(all[1].id, hidden: false, in: codex)
+                    }
+                }
                 if let codex = store.accounts.first(where: { $0.kind == .codex }), let gemini = store.accounts.first(where: { $0.kind == .gemini }) {
                     await render(LimitPlanEditor(title: "Si se acaba la cuota en este hilo",
                                                  plan: LimitPlan(mode: .chain, targets: [FallbackTarget(accountId: codex.id, model: store.defaultModel(for: codex)),
@@ -695,6 +721,23 @@ enum SelfTest {
         out("mensaje (\(String(format: "%.1f", Date().timeIntervalSince(start))) s):\n---\n\(message)\n---")
         let pr = CommitWriter.pullRequest(from: message, thread: thread, store: store)
         out("PR: \(pr.title)\n\(pr.body)\n---")
+    }
+
+    /// Each subscription's model list: what's saved and what its provider gives now.
+    ///   --selftest models   (RELEVO_DATA_DIR with a state.json copy; API-key accounts are skipped)
+    static func modelLists() async {
+        let store = AppStore.shared
+        for account in store.enabledAccounts where !account.kind.usesAPIKey {
+            let saved = store.models[account.id] ?? []
+            let probe = await UsageService.probe(account)
+            let live = probe.models ?? []
+            let added = live.filter { m in !saved.contains { $0.id == m.id } }.map(\.name)
+            let gone = saved.filter { m in !live.contains { $0.id == m.id } }.map(\.name)
+            out("\(account.name): guardados \(saved.count) · ahora \(probe.models == nil ? "sin lista" : "\(live.count)")"
+                + (added.isEmpty ? "" : " · nuevos \(added)") + (gone.isEmpty ? "" : " · ya no están \(gone)")
+                + (probe.status.error.map { " · error: \($0.prefix(80))" } ?? ""))
+            if !live.isEmpty { out("   " + live.map(\.name).joined(separator: ", ")) }
+        }
     }
 
     /// What a thread does when its agent runs out of quota, with simulated limits on a real Claude thread (Haiku):

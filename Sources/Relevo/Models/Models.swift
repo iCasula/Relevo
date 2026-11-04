@@ -19,6 +19,8 @@ struct Account: Codable, Identifiable, Hashable {
     var enabled: Bool = true
     var binaryPath: String? = nil
     var lastModel: String? = nil
+    /// Models left out of the pickers (Settings › Suscripciones); threads already on one keep it.
+    var hiddenModels: [String]? = nil
 }
 
 struct Project: Codable, Identifiable, Hashable {

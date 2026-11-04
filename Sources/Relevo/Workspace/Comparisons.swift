@@ -34,7 +34,7 @@ enum Comparisons {
         var seen = Set<UUID>()
         var out: [ComparisonOption] = []
         for o in Advisor.rank(profile, thread: probe, store: store) where seen.insert(o.account.id).inserted {
-            let models = ModelCatalog.shared.candidates(o.account.kind, store.modelsFor(o.account))
+            let models = ModelCatalog.shared.candidates(o.account.kind, store.visibleModels(for: o.account))
             let own = models.filter { isOwnFamily(o.account.kind, $0.model) }
             if let best = (own.isEmpty ? models : own).max(by: { $0.power < $1.power })?.model {
                 out.append(ComparisonOption(accountId: o.account.id, model: best.id))

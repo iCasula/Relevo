@@ -31,7 +31,7 @@ struct LimitPlanMenu: View {
             Menu("Pasar a…") {
                 ForEach(store.enabledAccounts) { account in
                     Section(account.name) {
-                        ForEach(store.modelsFor(account)) { model in
+                        ForEach(store.visibleModels(for: account)) { model in
                             let target = FallbackTarget(accountId: account.id, model: model.id)
                             pick(model.name, selected: current?.mode == .chain && current?.targets.count == 1
                                  && current?.targets.first?.accountId == account.id && current?.targets.first?.model == model.id) {
@@ -101,7 +101,7 @@ struct LimitPlanEditor: View {
                 Menu("Añadir") {
                     ForEach(store.enabledAccounts) { account in
                         Section(account.name) {
-                            ForEach(store.modelsFor(account)) { model in
+                            ForEach(store.visibleModels(for: account)) { model in
                                 Button(model.name) { plan.targets.append(FallbackTarget(accountId: account.id, model: model.id)) }
                             }
                         }

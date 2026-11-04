@@ -24,7 +24,8 @@ enum CompanionMapper {
         RemoteAccount(
             id: a.id, kind: a.kind.rawValue, name: a.name, agentName: a.kind.agentName, symbol: a.kind.symbol,
             tint: hex(a.kind.tint), usesAPIKey: a.kind.usesAPIKey, status: store.status[a.id].map(status),
-            models: store.modelsFor(a).map(model), defaultModel: store.defaultModel(for: a),
+            models: { let visible = Set(store.visibleModels(for: a).map(\.id))
+                return store.modelsFor(a).map { m in var r = model(m); r.hidden = visible.contains(m.id) ? nil : true; return r } }(), defaultModel: store.defaultModel(for: a),
             refreshing: store.refreshing.contains(a.id)
         )
     }

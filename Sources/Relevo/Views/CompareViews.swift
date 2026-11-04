@@ -45,7 +45,7 @@ struct CompareLaunchSheet: View {
                     }
                     if let account = store.account(option.accountId) {
                         Picker("", selection: $option.model) {
-                            ForEach(store.modelsFor(account)) { Text($0.name).tag($0.id) }
+                            ForEach(store.visibleModels(for: account)) { Text($0.name).tag($0.id) }
                         }
                         .labelsHidden()
                     }

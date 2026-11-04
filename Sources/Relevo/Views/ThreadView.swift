@@ -67,14 +67,18 @@ struct ThreadView: View {
         .navigationSubtitle(store.workPath(thread).map(abbreviateHome) ?? "")
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
+                // Each command the agent runs as its own row, or each run of them folded into one
+                // "N acciones" row (which opens on click). The change is often above what you're looking at.
                 Button {
                     withAnimation(.easeOut(duration: 0.15)) { showTools.toggle() }
+                    store.flash(showTools ? "Mostrando cada acción del agente" : "Acciones del agente agrupadas")
                 } label: {
-                    Label(showTools ? "Ocultar herramientas" : "Mostrar herramientas",
-                          systemImage: showTools ? "wrench.and.screwdriver.fill" : "wrench.and.screwdriver")
+                    Label(showTools ? "Agrupar acciones" : "Ver cada acción",
+                          systemImage: showTools ? "rectangle.compress.vertical" : "rectangle.expand.vertical")
                 }
                 .keyboardShortcut("t", modifiers: [.command, .option])
-                .help(showTools ? "Ocultar los comandos y herramientas del agente (⌥⌘T)" : "Mostrar los comandos y herramientas del agente (⌥⌘T)")
+                .help(showTools ? "Agrupar los comandos y herramientas del agente en una línea por tanda (⌥⌘T)"
+                      : "Ver cada comando y herramienta del agente por separado (⌥⌘T)")
                 Button {
                     showTrace = true
                 } label: {
@@ -129,7 +133,7 @@ struct RelayMenu: View {
             Section("Continuar la última petición con…") {
                 ForEach(store.enabledAccounts) { account in
                     Menu {
-                        ForEach(store.modelsFor(account)) { model in
+                        ForEach(store.visibleModels(for: account)) { model in
                             Button(model.name) { runtime.relay(to: account, model: model.id) }
                         }
                     } label: {

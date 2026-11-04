@@ -126,7 +126,7 @@ enum Advisor {
             let status = store.status[account.id]
             guard status?.loggedIn != false, status?.noPlan != true else { continue }
             if account.kind.usesAPIKey, Keychain.get(Keychain.apiKeyName(account.id)) == nil { continue }
-            var models = catalog.candidates(account.kind, store.modelsFor(account))
+            var models = catalog.candidates(account.kind, store.visibleModels(for: account))
             if models.isEmpty, let fallback = store.modelOption(account, store.defaultModel(for: account)) ?? store.modelsFor(account).first {
                 models = [(fallback, 5.5)]   // provider without a model list yet: assume a mid-range default
             }

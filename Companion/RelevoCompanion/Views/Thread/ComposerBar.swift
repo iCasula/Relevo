@@ -124,7 +124,7 @@ private struct ModelMenu: View {
             LimitPlanMenu(viewModel: viewModel)
             ForEach(viewModel.accounts) { account in
                 Section(sectionTitle(account)) {
-                    ForEach(account.models) { model in
+                    ForEach(account.models.filter { $0.hidden != true }) { model in
                         Button {
                             viewModel.select(account, model: model)
                         } label: {
@@ -195,7 +195,7 @@ private struct LimitPlanMenu: View {
                 Menu("Pasar a…") {
                     ForEach(viewModel.accounts) { account in
                         Section(account.name) {
-                            ForEach(account.models) { model in
+                            ForEach(account.models.filter { $0.hidden != true }) { model in
                                 let target = RemoteCandidate(accountId: account.id, model: model.id)
                                 pick(model.name, own?.mode == "chain" && own?.targets == [target]) {
                                     viewModel.setLimitPlan(RemoteLimitPlan(mode: "chain", targets: [target]))

@@ -288,7 +288,7 @@ enum MCPTools {
             let lines = store.enabledAccounts.map { acc -> String in
                 let s = store.status[acc.id]
                 let quota = (s?.windows ?? []).map { "\($0.label) \(Int($0.percent))% used" }.joined(separator: ", ")
-                let models = store.modelsFor(acc).map(\.id).prefix(12).joined(separator: ", ")
+                let models = store.visibleModels(for: acc).map(\.id).prefix(12).joined(separator: ", ")
                 return "- \(acc.name) (\(acc.kind.rawValue)) — \(s?.isUsable == false ? "not usable now" : "usable")" + (quota.isEmpty ? "" : " — \(quota)") + " — models: \(models)"
             }
             return (lines.joined(separator: "\n"), false)

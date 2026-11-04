@@ -142,7 +142,7 @@ struct ModelPicker: View {
         Menu {
             ForEach(store.enabledAccounts) { acc in
                 Section(sectionTitle(acc)) {
-                    ForEach(store.modelsFor(acc)) { model in
+                    ForEach(store.visibleModels(for: acc)) { model in
                         Button {
                             thread.selectedAccountId = acc.id
                             thread.selectedModel = model.id

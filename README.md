@@ -19,6 +19,8 @@ Relevo doesn't store tokens or call model APIs on its own: it drives each provid
 
 > Google no longer supports Gemini CLI with personal accounts ("migrate to Antigravity"), and in 2026 it suspended accounts that reused its OAuth tokens outside its own clients. That's why Relevo uses **only** the official Antigravity CLI and never reads or refreshes Google tokens.
 
+**Models.** Each subscription's model list comes from its provider: Claude Code's `list_models`, Codex's `model/list`, `agy models`, the API's `/models` for DeepSeek, and the ZCode app's bundled list for Z.ai. It's fetched again every time Relevo starts and with every quota check, and new models are pointed out ("Nuevo" in Settings, and a note when they appear). In Settings › Suscripciones › a subscription › **Modelos** you can untick the ones you don't use: they're left out of the thread's model menu (Mac and iPhone), handoffs, comparisons and suggestions, while threads already on one keep it.
+
 When a provider says you're signed in but your plan doesn't cover the service (for example, a lapsed Kimi Code membership), Relevo shows it as **"plan without access"**: it's not a login problem, and that account is left out of handoffs and suggestions until it reports quota again.
 
 ## How context handoff works
@@ -150,6 +152,7 @@ RELEVO_MCP_TOKEN=test .build/debug/Relevo --selftest mcp # initialize, tools, a 
 .build/debug/Relevo --selftest prwatch                   # the PR watcher's decisions over a sequence of PR states
 .build/debug/Relevo --selftest background /tmp/bg        # a Claude agent waiting on a background command, then resuming on its own
 .build/debug/Relevo --selftest limitplan /tmp/lp         # simulated limits: list in order, most quota, nothing left, wait and carry on
+.build/debug/Relevo --selftest models                    # each subscription's saved model list against what its provider gives now
 .build/debug/Relevo --selftest followscroll              # the transcript follows the last line and lets go when you scroll up
 .build/debug/Relevo --selftest commitmsg /tmp/cm         # commit message and PR body from the utility model
 .build/debug/Relevo --selftest workspaceui /tmp/ui /tmp/ui/ws   # diff, commit, comparison, actions and settings rendered to PNGs

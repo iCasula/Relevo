@@ -248,8 +248,27 @@ final class AppStore {
         return account.kind.provider.localModels() ?? account.kind.fallbackModels
     }
 
+    /// The models offered in pickers and suggestions: the provider's list minus the ones you hid
+    /// (never none: hiding them all would leave nothing to pick).
+    func visibleModels(for account: Account) -> [ModelOption] {
+        let all = modelsFor(account)
+        let hidden = Set(account.hiddenModels ?? [])
+        let visible = all.filter { !hidden.contains($0.id) }
+        return visible.isEmpty ? all : visible
+    }
+
+    func isModelHidden(_ account: Account, _ model: String) -> Bool { account.hiddenModels?.contains(model) ?? false }
+
+    func setModel(_ model: String, hidden: Bool, in account: Account) {
+        updateAccount(account.id) { a in
+            var list = Set(a.hiddenModels ?? [])
+            if hidden { list.insert(model) } else { list.remove(model) }
+            a.hiddenModels = list.isEmpty ? nil : list.sorted()
+        }
+    }
+
     func defaultModel(for account: Account) -> String {
-        let list = modelsFor(account)
+        let list = visibleModels(for: account)
         if let last = account.lastModel, list.contains(where: { $0.id == last }) { return last }
         return list.first?.id ?? ""
     }
@@ -321,8 +340,24 @@ final class AppStore {
         saveState()
     }
 
+    /// When each subscription's list was last fetched from its provider (in this session).
+    var modelsCheckedAt: [UUID: Date] = [:]
+    /// Models that appeared since the last list, to point them out in Settings.
+    var newModelIds: [UUID: Set<String>] = [:]
+
     func setModels(_ accountId: UUID, _ list: [ModelOption]) {
-        guard !list.isEmpty, models[accountId] != list else { return }
+        guard !list.isEmpty else { return }
+        modelsCheckedAt[accountId] = Date()
+        guard models[accountId] != list else { return }
+        if let old = models[accountId], !old.isEmpty {
+            let added = list.filter { m in !old.contains { $0.id == m.id } }
+            if !added.isEmpty {
+                newModelIds[accountId, default: []].formUnion(added.map(\.id))
+                if let account = account(accountId) {
+                    flash("\(account.name): \(added.count == 1 ? "modelo nuevo" : "modelos nuevos"), \(added.map(\.name).joined(separator: ", "))")
+                }
+            }
+        }
         models[accountId] = list
         saveState()
     }

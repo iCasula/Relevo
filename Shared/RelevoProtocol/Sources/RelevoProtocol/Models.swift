@@ -58,8 +58,11 @@ public struct RemoteModel: Codable, Hashable, Identifiable, Sendable {
     public var detail: String?
     public var efforts: [String]?
     public var defaultEffort: String?
+    /// Hidden in the Mac's settings: kept for showing its name, left out of pickers.
+    public var hidden: Bool?
 
-    public init(id: String, name: String, detail: String?, efforts: [String]?, defaultEffort: String?) {
+    public init(id: String, name: String, detail: String?, efforts: [String]?, defaultEffort: String?, hidden: Bool? = nil) {
+        self.hidden = hidden
         self.id = id
         self.name = name
         self.detail = detail
