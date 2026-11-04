@@ -135,7 +135,8 @@ enum ModelNames {
         s = s.replacingOccurrences(of: #"(\d+)-(\d+)"#, with: "$1.$2", options: .regularExpression)
         s = s.replacingOccurrences(of: "-", with: " ")
         return s.split(separator: " ").map { part in
-            part.first?.isLetter == true && part.count > 2 ? part.prefix(1).uppercased() + part.dropFirst() : String(part).uppercased()
+            if ["gpt", "glm"].contains(part) { return part.uppercased() }   // acronyms
+            return part.first?.isLetter == true && part.count > 2 ? part.prefix(1).uppercased() + part.dropFirst() : String(part).uppercased()
         }.joined(separator: " ")
     }
 

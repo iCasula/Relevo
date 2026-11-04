@@ -8,6 +8,8 @@ struct ThreadView: View {
     @Bindable var thread: ThreadModel
     let runtime: ThreadRuntime
     @State private var showTrace = false
+    @State private var showCompare = false
+    @State private var showComparison = false
     /// Show every tool call, or fold each run of them into one summary row.
     @AppStorage("showTools") private var showTools = true
 
@@ -46,6 +48,15 @@ struct ThreadView: View {
                     .environment(store)
             }
         }
+        .sheet(isPresented: $showCompare) {
+            CompareLaunchSheet(source: thread.items.isEmpty ? nil : thread, projectId: thread.projectId, prompt: thread.draft)
+                .environment(store)
+        }
+        .sheet(isPresented: $showComparison) {
+            if let c = store.comparisons.first(where: { $0.id == thread.comparisonId }) {
+                ComparisonSheet(comparison: c).environment(store)
+            }
+        }
         .onChange(of: store.debugRequest) {
             if store.debugRequest == "trace" {
                 showTrace = true
@@ -53,7 +64,7 @@ struct ThreadView: View {
             }
         }
         .navigationTitle(thread.title)
-        .navigationSubtitle(project.map { abbreviateHome($0.path) } ?? "")
+        .navigationSubtitle(store.workPath(thread).map(abbreviateHome) ?? "")
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 Button {
@@ -73,16 +84,26 @@ struct ThreadView: View {
                 .disabled(thread.items.isEmpty)
                 ThreadUsageButton(thread: thread, runtime: runtime)
                     .disabled(thread.items.isEmpty)
+                GitMenu(thread: thread, runtime: runtime)
+                QuickActionsMenu(thread: thread)
+                if thread.comparisonId != nil {
+                    Button { showComparison = true } label: { Label("Comparación", systemImage: "person.3.sequence.fill") }
+                        .help("Ver a los agentes que hacen esta misma tarea y quedarte con el mejor")
+                } else {
+                    Button { showCompare = true } label: { Label("Varios agentes", systemImage: "person.3.sequence") }
+                        .help("La misma tarea a varios agentes, cada uno en su worktree, para quedarte con el mejor resultado")
+                }
                 RelayMenu(thread: thread, runtime: runtime)
                 if let project {
                     Menu {
+                        let folder = store.workPath(thread) ?? project.path
                         Button("Mostrar en Finder") {
-                            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: project.path)])
+                            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: folder)])
                         }
-                        Button("Abrir en Terminal") { ProjectActions.openTerminal(project.path) }
+                        Button("Abrir en Terminal") { ProjectActions.openTerminal(folder) }
                         Button("Abrir en VS Code") {
                             if let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.microsoft.VSCode") {
-                                NSWorkspace.shared.open([URL(fileURLWithPath: project.path)], withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration())
+                                NSWorkspace.shared.open([URL(fileURLWithPath: folder)], withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration())
                             }
                         }
                         Divider()
@@ -219,7 +240,7 @@ struct TranscriptView: View {
                         case .item(let item):
                             VStack(alignment: .leading, spacing: 6) {
                                 ItemView(item: item, runtime: runtime, showsAuthor: headers.contains(item.id))
-                                if showTurnUsage, let usage = item.usage { TurnUsageFooter(usage: usage) }
+                                TurnFooter(item: item, runtime: runtime, showUsage: showTurnUsage)
                             }
                             .id(item.id)
                         case .group(let id, let items):
@@ -227,9 +248,9 @@ struct TranscriptView: View {
                                 ToolGroupRow(items: items, isExpanded: runtime.expandedItems.contains(id)) {
                                     withAnimation(.easeOut(duration: 0.15)) { runtime.toggleExpanded(id) }
                                 }
-                                // A turn that ended on a tool: its usage shows under the folded group.
-                                if showTurnUsage, !runtime.expandedItems.contains(id), let usage = items.last(where: { $0.usage != nil })?.usage {
-                                    TurnUsageFooter(usage: usage)
+                                // A turn that ended on a tool: its usage and changes show under the folded group.
+                                if !runtime.expandedItems.contains(id), let last = items.last(where: { $0.usage != nil || $0.changes != nil }) {
+                                    TurnFooter(item: last, runtime: runtime, showUsage: showTurnUsage)
                                 }
                             }
                             .id(id)

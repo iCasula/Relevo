@@ -27,7 +27,16 @@ struct ItemView: View {
         case .tool:
             ToolRow(item: item, runtime: runtime)
         case .notice:
-            NoticeRow(item: item)
+            if item.title == "restore", item.output != nil {
+                HStack(spacing: 10) {
+                    NoticeRow(item: item)
+                    Button("Deshacer") { Task { try? await runtime.undoRestore(item) } }
+                        .controlSize(.small)
+                        .disabled(runtime.isRunning)
+                }
+            } else {
+                NoticeRow(item: item)
+            }
         case .error:
             ErrorRow(text: item.text)
         case .approval:

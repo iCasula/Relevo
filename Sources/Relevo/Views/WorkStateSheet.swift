@@ -46,7 +46,7 @@ struct WorkStateSheet: View {
         }
         .frame(width: 720, height: 620)
         .task {
-            let git = await GitSnapshot.capture(project.path)
+            let git = await GitSnapshot.capture(store.workPath(thread) ?? project.path)
             text = WorkState.markdown(thread: thread, project: project, store: store, git: git)
         }
     }

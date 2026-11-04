@@ -22,6 +22,8 @@ struct RelevoApp: App {
             CommandGroup(replacing: .newItem) {
                 Button("Nuevo hilo") { store.newThread() }
                     .keyboardShortcut("n")
+                Button("Nuevo hilo en un worktree") { store.newWorktreeThread() }
+                    .keyboardShortcut("n", modifiers: [.command, .option])
                 Button("Añadir proyecto…") { store.showNewProject = true }
                     .keyboardShortcut("o")
             }
@@ -30,11 +32,16 @@ struct RelevoApp: App {
                     .keyboardShortcut("r", modifiers: [.command, .shift])
                 OpenUsageCommand()
                 ShowTurnUsageToggle()
+                Button("Capturar ventana para el mensaje") { WindowCapture.captureIntoDraft(store: store) }
                 Divider()
                 Button("Detener agente") {
                     if let t = store.selectedThread { store.runtime(for: t).stop(from: .shortcut) }
                 }
                 .keyboardShortcut(".", modifiers: .command)
+            }
+            CommandMenu("Acciones") {
+                QuickActionCommands()
+                    .environment(store)
             }
         }
 

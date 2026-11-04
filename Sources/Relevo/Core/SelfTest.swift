@@ -32,6 +32,13 @@ enum SelfTest {
             case "tokens" where rest.count >= 2: await tokens(cwd: rest[1])
             case "usagereport": await usageReport()
             case "usageui" where rest.count >= 2: await usageUI(out: rest[1])
+            case "workspace" where rest.count >= 2: await workspace(dir: rest[1])
+            case "mcp": await mcp()
+            case "mcpserve" where rest.count >= 2: await mcpServe(seconds: Double(rest[1]) ?? 120, full: rest.count > 2 && rest[2] == "full")
+            case "prwatch": prWatch()
+            case "commitmsg" where rest.count >= 2: await commitMessage(dir: rest[1])
+            case "turnchanges" where rest.count >= 2: await turnChanges(dir: rest[1])
+            case "workspaceui" where rest.count >= 3: await workspaceUI(dir: rest[1], out: rest[2])
             case "revive" where rest.count >= 2: await revive(cwd: rest[1])
             case "images" where rest.count >= 2: images(threadTitle: rest[1])
             case "apns": await apns()
@@ -388,8 +395,8 @@ enum SelfTest {
                                context: 52_683, contextWindow: 1_000_000, durationMs: 14_200, tools: 3)
         for scheme in [ColorScheme.light, .dark] {
             let name = scheme == .light ? "light" : "dark"
-            render(UsageView(scrolls: false).environment(store).frame(width: 1040), scheme: scheme, to: "\(prefix)-window-\(name).png", wait: 2)
-            render(VStack(alignment: .leading, spacing: 12) {
+            await render(UsageView(scrolls: false).environment(store).frame(width: 1040), scheme: scheme, to: "\(prefix)-window-\(name).png", wait: 2)
+            await render(VStack(alignment: .leading, spacing: 12) {
                 Text("Ejemplo de respuesta del agente.").font(.body)
                 TurnUsageFooter(usage: sample)
                 TurnUsageDetail(usage: sample)
@@ -397,7 +404,7 @@ enum SelfTest {
         }
     }
 
-    private static func render<V: View>(_ view: V, scheme: ColorScheme, to path: String, wait: Double) {
+    private static func render<V: View>(_ view: V, scheme: ColorScheme, to path: String, wait: Double) async {
         let root = view.environment(\.colorScheme, scheme).background(scheme == .dark ? Color(white: 0.12) : Color.white)
         let hosting = NSHostingView(rootView: root)
         hosting.appearance = NSAppearance(named: scheme == .dark ? .darkAqua : .aqua)
@@ -405,17 +412,340 @@ enum SelfTest {
         window.appearance = hosting.appearance
         window.contentView = hosting
         window.orderFrontRegardless()
-        RunLoop.main.run(until: Date().addingTimeInterval(wait))
+        try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
         let size = hosting.fittingSize
         window.setContentSize(size)
         hosting.frame = NSRect(origin: .zero, size: size)
-        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        try? await Task.sleep(nanoseconds: 500_000_000)
         hosting.layoutSubtreeIfNeeded()
         guard let rep = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else { out("no se pudo renderizar"); return }
         hosting.cacheDisplay(in: hosting.bounds, to: rep)
         try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
         window.orderOut(nil)
         out("PNG \(path) \(Int(size.width))×\(Int(size.height))")
+    }
+
+    /// Worktrees, per-turn snapshots, diff, restore and commit on a scratch repository (no agent):
+    ///   --selftest workspace <empty dir>
+    static func workspace(dir: String) async {
+        let store = AppStore.shared
+        let repo = (dir as NSString).appendingPathComponent("repo")
+        try? FileManager.default.createDirectory(atPath: repo, withIntermediateDirectories: true)
+        func sh(_ args: [String]) async -> String { await Git.run(repo, args).out.trimmingCharacters(in: .whitespacesAndNewlines) }
+        _ = await sh(["init", "-q", "-b", "main"])
+        _ = await sh(["config", "user.email", "test@example.com"])
+        _ = await sh(["config", "user.name", "Test"])
+        try? "uno\ndos\n".write(toFile: repo + "/a.txt", atomically: true, encoding: .utf8)
+        _ = await sh(["add", "-A"])
+        _ = await sh(["commit", "-q", "-m", "Initial commit"])
+        let project = Project(name: "ws-test", path: repo)
+        store.projects = [project]
+        let thread = ThreadModel(projectId: project.id, mode: .ask, accountId: nil, model: nil)
+        store.threads = [thread]
+        do {
+            let info = try await Worktrees.create(for: thread, project: project, store: store)
+            out("worktree: \(info.branch) en \(info.path) desde \(info.baseBranch ?? "-") \(info.baseCommit.prefix(7))")
+            let wt = info.path
+            guard let before = await Git.snapshot(wt, ref: "refs/relevo/test/before", message: "before") else { out("sin snapshot"); return }
+            try? "uno\nDOS\ntres\n".write(toFile: wt + "/a.txt", atomically: true, encoding: .utf8)
+            try? "nuevo\n".write(toFile: wt + "/b.txt", atomically: true, encoding: .utf8)
+            guard let after = await Git.snapshot(wt, ref: "refs/relevo/test/after", message: "after") else { out("sin snapshot after"); return }
+            let stat = await Git.diffStat(wt, from: before, to: after)
+            out("cambios del turno: \(stat.files) ficheros +\(stat.added) −\(stat.removed)")
+            let files = DiffParser.parse(await Git.diff(wt, from: before, to: after))
+            out("diff: " + files.map { "\($0.change.rawValue) \($0.path) +\($0.added) −\($0.removed)" }.joined(separator: " · "))
+            let status = await Git.run(wt, ["status", "--porcelain"]).out
+            out("índice intacto: \(!status.contains("A ") && status.contains("??"))")
+            try await Git.restore(wt, to: before)
+            let a = (try? String(contentsOfFile: wt + "/a.txt", encoding: .utf8)) ?? "?"
+            out("tras restaurar: a.txt=\(a.replacingOccurrences(of: "\n", with: "|")) b.txt existe=\(FileManager.default.fileExists(atPath: wt + "/b.txt"))")
+            try await Git.restore(wt, to: after)
+            out("deshacer: b.txt existe=\(FileManager.default.fileExists(atPath: wt + "/b.txt"))")
+            try await Git.commitAll(wt, message: Git.strippingAgentAttribution("Update a and add b\n\nCo-Authored-By: Claude <noreply@anthropic.com>"))
+            out("commit: \(await Git.run(wt, ["log", "-1", "--format=%s|%b"]).out.trimmingCharacters(in: .whitespacesAndNewlines))")
+            let merged = try await Worktrees.merge(thread, store: store)
+            out("fusionado en main: \(merged.split(separator: "\n").first ?? "") · main tiene b.txt=\(FileManager.default.fileExists(atPath: repo + "/b.txt"))")
+            try await Worktrees.remove(thread, store: store, deleteBranch: true)
+            out("worktree eliminado: \(!FileManager.default.fileExists(atPath: wt)) · ramas: \(await sh(["branch", "--format=%(refname:short)"]).replacingOccurrences(of: "\n", with: ","))")
+        } catch {
+            out("ERROR \(error.localizedDescription)")
+        }
+    }
+
+    /// The workspace views rendered offscreen, light and dark, on a scratch repository (no agent):
+    ///   --selftest workspaceui <empty dir> <png prefix>   (RELEVO_DATA_DIR with a copy of state.json for real accounts)
+    static func workspaceUI(dir: String, out prefix: String) async {
+        let store = AppStore.shared
+        let repo = (dir as NSString).appendingPathComponent("repo")
+        try? FileManager.default.createDirectory(atPath: repo + "/Sources", withIntermediateDirectories: true)
+        func sh(_ path: String, _ args: [String]) async { _ = await Git.run(path, args) }
+        await sh(repo, ["init", "-q", "-b", "main"])
+        await sh(repo, ["config", "user.email", "test@example.com"])
+        await sh(repo, ["config", "user.name", "Test"])
+        let original = """
+        import Foundation
+
+        final class LoginViewModel {
+            var email = ""
+            var password = ""
+            private let api: AuthAPI
+
+            init(api: AuthAPI) { self.api = api }
+
+            func login() async throws -> Session {
+                try await api.login(email: email, password: password)
+            }
+        }
+
+        """
+        try? original.write(toFile: repo + "/Sources/LoginViewModel.swift", atomically: true, encoding: .utf8)
+        try? "# Proclubs\n".write(toFile: repo + "/README.md", atomically: true, encoding: .utf8)
+        await sh(repo, ["add", "-A"])
+        await sh(repo, ["commit", "-q", "-m", "Initial commit"])
+
+        var project = Project(name: "Proclubs-iOS", path: repo)
+        project.actions = [QuickAction(name: "Tests", command: "echo 'Test Suite LoginTests started'; sleep 0.2; echo 'Executed 42 tests, with 0 failures'", symbol: "checkmark.diamond"),
+                           QuickAction(name: "Lint", command: "echo 'Sources/Login.swift:12: warning: line too long'; exit 1", symbol: "text.badge.checkmark"),
+                           QuickAction(name: "XcodeGen", command: "echo 'Generated project'", symbol: "hammer", runOnWorktreeCreate: true)]
+        store.projects = [project]
+        store.accounts.removeAll { $0.kind.usesAPIKey }   // their keys are in the Keychain, which would ask for permission
+        let claude = store.accounts.first { $0.kind == .claude }
+        let codex = store.accounts.first { $0.kind == .codex }
+        let gemini = store.accounts.first { $0.kind == .gemini }
+        func makeThread(_ title: String, _ account: Account?, _ model: String) -> ThreadModel {
+            let t = ThreadModel(projectId: project.id, mode: .ask, accountId: account?.id, model: model)
+            t.title = title
+            t.titleSource = .manual
+            return t
+        }
+        let thread = makeThread("Arreglar el test de login", claude, "claude-opus-5-5")
+        store.threads = [thread]
+        let rt = store.runtime(for: thread)
+        do {
+            let info = try await Worktrees.create(for: thread, project: project, store: store)
+            let wt = info.path
+            guard let before = await Git.snapshot(wt, ref: "refs/relevo/\(thread.id.uuidString)/1-before", message: "before") else { out("sin snapshot"); return }
+            let fixed = original
+                .replacingOccurrences(of: "    func login() async throws -> Session {\n        try await api.login(email: email, password: password)\n    }",
+                                      with: "    var canSubmit: Bool { email.contains(\"@\") && password.count >= 8 }\n\n    func login() async throws -> Session {\n        guard canSubmit else { throw LoginError.invalidInput }\n        let session = try await api.login(email: email, password: password)\n        await MainActor.run { self.session = session }\n        return session\n    }")
+                .replacingOccurrences(of: "    var password = \"\"\n", with: "    var password = \"\"\n    private(set) var session: Session?\n")
+            try? fixed.write(toFile: wt + "/Sources/LoginViewModel.swift", atomically: true, encoding: .utf8)
+            try? FileManager.default.createDirectory(atPath: wt + "/Sources/Validation", withIntermediateDirectories: true)
+            try? "enum LoginError: Error {\n    case invalidInput\n}\n".write(toFile: wt + "/Sources/Validation/LoginError.swift", atomically: true, encoding: .utf8)
+            guard let after = await Git.snapshot(wt, ref: "refs/relevo/\(thread.id.uuidString)/1-after", message: "after") else { out("sin snapshot after"); return }
+            let stat = await Git.diffStat(wt, from: before, to: after)
+            let usage = TurnUsage(parts: [TokenUsage(model: "claude-opus-5-5", input: 12, cacheRead: 38_410, cacheWrite: 2_210, output: 940, reasoning: 210)],
+                                  cost: 0.043, context: 41_572, contextWindow: 1_000_000, durationMs: 48_000, tools: 6)
+            thread.items = [
+                ChatItem(id: "u1", kind: .user, text: "Revisa por qué falla el test de login en el simulador"),
+                ChatItem(id: "a1", kind: .assistant,
+                         text: "El test falla porque `LoginViewModel` publica la sesión antes de validar. He añadido `canSubmit`, un `LoginError` y guardo la sesión en el hilo principal. Los 42 tests pasan.",
+                         accountId: claude?.id, model: "claude-opus-5-5", usage: usage,
+                         changes: TurnChanges(before: before, after: after, files: stat.files, added: stat.added, removed: stat.removed)),
+            ]
+            let item = thread.items[1]
+            store.actions.run(project.actions![0], thread: thread, store: store)
+            store.actions.run(project.actions![1], thread: thread, store: store)
+
+            // Two more agents on the same task, for the comparison.
+            let rivals = [makeThread("Arreglar el test de login · GPT-5.5", codex, "gpt-5.5"), makeThread("Arreglar el test de login · Gemini 3.5 Pro", gemini, "gemini-3.5-pro")]
+            var comparison = Comparison(projectId: project.id, prompt: "Arregla el test de login que falla en el simulador", threadIds: [], baseCommit: info.baseCommit)
+            for (n, t) in rivals.enumerated() {
+                t.comparisonId = comparison.id
+                store.threads.append(t)
+                let w = try await Worktrees.create(for: t, project: project, store: store)
+                let text = n == 0 ? fixed : original.replacingOccurrences(of: "    func login()", with: "    @MainActor\n    func login()")
+                try? text.write(toFile: w.path + "/Sources/LoginViewModel.swift", atomically: true, encoding: .utf8)
+                comparison.threadIds.append(t.id)
+            }
+            comparison.threadIds.insert(thread.id, at: 0)
+            thread.comparisonId = comparison.id
+            store.comparisons = [comparison]
+            store.settings.mcpEnabled = true
+            store.settings.captureEnabled = true
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+
+            for scheme in [ColorScheme.light, .dark] {
+                let name = scheme == .light ? "light" : "dark"
+                await render(VStack(alignment: .leading, spacing: 8) {
+                    Text(item.text).font(.body)
+                    TurnFooter(item: item, runtime: rt, showUsage: true)
+                }.environment(store).padding(20).frame(width: 560), scheme: scheme, to: "\(prefix)-footer-\(name).png", wait: 0.6)
+                await render(DiffSheet(title: "Cambios de este turno", path: wt, from: before, to: after, runtime: rt, turnItem: item)
+                    .environment(store).frame(width: 1040, height: 600), scheme: scheme, to: "\(prefix)-diff-\(name).png", wait: 1.5)
+                await render(CommitSheet(thread: thread, runtime: rt).environment(store).frame(width: 640), scheme: scheme, to: "\(prefix)-commit-\(name).png", wait: 1.5)
+                await render(CompareLaunchSheet(source: thread, projectId: project.id, prompt: comparison.prompt).environment(store).frame(width: 640),
+                       scheme: scheme, to: "\(prefix)-launch-\(name).png", wait: 1)
+                await render(ComparisonSheet(comparison: comparison).environment(store).frame(width: 980), scheme: scheme, to: "\(prefix)-compare-\(name).png", wait: 2)
+                await render(ActionRunsSheet(thread: thread).environment(store).frame(width: 820, height: 460), scheme: scheme, to: "\(prefix)-runs-\(name).png", wait: 1)
+                await render(QuickActionsEditor(project: project).environment(store), scheme: scheme, to: "\(prefix)-actions-\(name).png", wait: 0.8)
+                await render(IntegrationsSettings().formStyle(.grouped).environment(store).frame(width: 620), scheme: scheme, to: "\(prefix)-integrations-\(name).png", wait: 0.8)
+            }
+        } catch {
+            out("ERROR \(error.localizedDescription)")
+        }
+    }
+
+    /// Per-turn changes with a real agent (the Claude account of RELEVO_DATA_DIR's state, Haiku): the turn
+    /// records what it changed, restoring puts the files back, the agent is told, and the restore can be undone.
+    ///   --selftest turnchanges <empty dir>
+    static func turnChanges(dir: String) async {
+        let store = AppStore.shared
+        guard let account = store.accounts.first(where: { $0.kind == .claude }) else { out("sin cuenta Claude"); return }
+        store.accounts = [account]
+        let repo = (dir as NSString).appendingPathComponent("repo")
+        try? FileManager.default.createDirectory(atPath: repo, withIntermediateDirectories: true)
+        for args in [["init", "-q", "-b", "main"], ["config", "user.email", "test@example.com"], ["config", "user.name", "Test"]] { _ = await Git.run(repo, args) }
+        try? "uno\ndos\n".write(toFile: repo + "/a.txt", atomically: true, encoding: .utf8)
+        _ = await Git.run(repo, ["add", "-A"])
+        _ = await Git.run(repo, ["commit", "-q", "-m", "Initial commit"])
+        let project = Project(name: "turn-test", path: repo)
+        store.projects = [project]
+        let thread = ThreadModel(projectId: project.id, mode: .full, accountId: account.id, model: "haiku")
+        store.threads = [thread]
+        let rt = store.runtime(for: thread)
+        func waitIdle() async {
+            let deadline = Date().addingTimeInterval(150)
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            while rt.isRunning && Date() < deadline { try? await Task.sleep(nanoseconds: 200_000_000) }
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+        }
+        func exists(_ f: String) -> Bool { FileManager.default.fileExists(atPath: repo + "/" + f) }
+        func read(_ f: String) -> String { ((try? String(contentsOfFile: repo + "/" + f, encoding: .utf8)) ?? "-").replacingOccurrences(of: "\n", with: "|") }
+
+        rt.send("Crea un fichero hola.txt con el texto «hola» y añade una línea «tres» al final de a.txt. No hagas nada más y responde solo «hecho».")
+        await waitIdle()
+        guard let item = thread.items.last(where: { $0.changes != nil }), let c = item.changes else {
+            out("SIN CAMBIOS REGISTRADOS · items: " + thread.items.map { "\($0.kind.rawValue): \($0.text.prefix(40))" }.joined(separator: " | "))
+            rt.closeSession()
+            return
+        }
+        out("turno: \(c.files) ficheros +\(c.added) −\(c.removed) en «\(item.text.prefix(30))» · hola.txt=\(read("hola.txt")) a.txt=\(read("a.txt"))")
+        do {
+            try await rt.restoreBefore(item)
+            out("restaurado: hola.txt existe=\(exists("hola.txt")) a.txt=\(read("a.txt")) · git status: \(await Git.run(repo, ["status", "--porcelain"]).out.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "\n", with: ","))")
+        } catch { out("ERROR restaurando: \(error.localizedDescription)") }
+        rt.send("¿Existe ahora el fichero hola.txt y qué contiene a.txt? Compruébalo en disco y responde en una línea.")
+        await waitIdle()
+        out("el agente dice: \(thread.items.last { $0.kind == .assistant }?.text.prefix(160) ?? "-")")
+        if let notice = thread.items.last(where: { $0.title == "restore" }) {
+            do {
+                try await rt.undoRestore(notice)
+                out("deshecho: hola.txt=\(read("hola.txt")) a.txt=\(read("a.txt")) · aviso «\(thread.items.first { $0.id == notice.id }?.text ?? "")»")
+            } catch { out("ERROR deshaciendo: \(error.localizedDescription)") }
+        }
+        rt.closeSession()
+    }
+
+    /// Commit message and PR text from the utility model, on a scratch repository with a change:
+    ///   --selftest commitmsg <empty dir>   (RELEVO_DATA_DIR with a copy of state.json)
+    static func commitMessage(dir: String) async {
+        let store = AppStore.shared
+        store.accounts.removeAll { $0.kind.usesAPIKey }   // their keys are in the Keychain, which would ask for permission
+        let repo = (dir as NSString).appendingPathComponent("repo")
+        try? FileManager.default.createDirectory(atPath: repo, withIntermediateDirectories: true)
+        for args in [["init", "-q", "-b", "main"], ["config", "user.email", "test@example.com"], ["config", "user.name", "Test"]] { _ = await Git.run(repo, args) }
+        let before = "final class LoginViewModel {\n    var email = \"\"\n    var password = \"\"\n\n    func login() async throws -> Session {\n        try await api.login(email: email, password: password)\n    }\n}\n"
+        try? before.write(toFile: repo + "/LoginViewModel.swift", atomically: true, encoding: .utf8)
+        _ = await Git.run(repo, ["add", "-A"])
+        _ = await Git.run(repo, ["commit", "-q", "-m", "Initial commit"])
+        let after = before.replacingOccurrences(of: "    func login() async throws -> Session {\n        try await",
+                                                with: "    var canSubmit: Bool { email.contains(\"@\") && password.count >= 8 }\n\n    func login() async throws -> Session {\n        guard canSubmit else { throw LoginError.invalidInput }\n        return try await")
+        try? after.write(toFile: repo + "/LoginViewModel.swift", atomically: true, encoding: .utf8)
+        try? "enum LoginError: Error {\n    case invalidInput\n}\n".write(toFile: repo + "/LoginError.swift", atomically: true, encoding: .utf8)
+        let project = Project(name: "commit-test", path: repo)
+        store.projects = [project]
+        let thread = ThreadModel(projectId: project.id, mode: .ask, accountId: nil, model: nil)
+        thread.items = [
+            ChatItem(id: "u1", kind: .user, text: "El login deja enviar el formulario vacío y el test testEmptyFormIsRejected falla. Arréglalo."),
+            ChatItem(id: "t1", kind: .tool, text: "{}", title: "cd ~/Projects/proclubs && xcodebuild test -scheme Proclubs -only-testing LoginTests", toolName: "Bash", status: .done),
+            ChatItem(id: "t2", kind: .tool, text: "", title: "/bin/zsh -lc \"swiftlint lint --strict\"", toolName: "Shell", status: .done),
+            ChatItem(id: "t3", kind: .tool, text: "", title: "cat LoginViewModel.swift", toolName: "Bash", status: .done),
+            ChatItem(id: "a1", kind: .assistant, text: "Añadido `canSubmit` y `LoginError.invalidInput`; `login()` valida antes de llamar a la API. LoginTests pasa (12 tests)."),
+        ]
+        store.threads = [thread]
+        out("modelo de utilidad: \(store.topicProvider().map { "\($0.0.name)" } ?? "ninguno")")
+        let start = Date()
+        guard let message = await CommitWriter.message(for: thread, path: repo, store: store) else { out("sin mensaje"); return }
+        out("mensaje (\(String(format: "%.1f", Date().timeIntervalSince(start))) s):\n---\n\(message)\n---")
+        let pr = CommitWriter.pullRequest(from: message, thread: thread, store: store)
+        out("PR: \(pr.title)\n\(pr.body)\n---")
+    }
+
+    /// The PR watcher's decisions over a sequence of PR states (no network):  --selftest prwatch
+    static func prWatch() {
+        func check(_ name: String, _ conclusion: String, _ status: String = "COMPLETED", at time: String = "10:00") -> String {
+            #"{"name":"\#(name)","conclusion":"\#(conclusion)","status":"\#(status)","completedAt":"\#(time)"}"#
+        }
+        func pr(_ checks: [String], comments: [String] = [], reviews: [(String, String)] = [], mergeable: String = "MERGEABLE", state: String = "OPEN") -> JSONObject {
+            let c = comments.map { #"{"author":{"login":"ana"},"body":"\#($0)"}"# }.joined(separator: ",")
+            let r = reviews.map { #"{"author":{"login":"luis"},"state":"\#($0.0)","body":"\#($0.1)"}"# }.joined(separator: ",")
+            return JSONUtil.parse(#"{"number":42,"state":"\#(state)","mergeable":"\#(mergeable)","statusCheckRollup":[\#(checks.joined(separator: ","))],"comments":[\#(c)],"reviews":[\#(r)]}"#) ?? [:]
+        }
+        let steps: [(String, JSONObject)] = [
+            ("primera vista, checks en curso", pr([check("build", "", "IN_PROGRESS"), check("lint", "SUCCESS")])),
+            ("build falla", pr([check("build", "FAILURE"), check("lint", "SUCCESS")])),
+            ("sigue igual", pr([check("build", "FAILURE"), check("lint", "SUCCESS")])),
+            ("push y vuelve a fallar (otra ejecución)", pr([check("build", "FAILURE", at: "10:20"), check("lint", "SUCCESS")])),
+            ("un comentario y una revisión", pr([check("build", "FAILURE", at: "10:20"), check("lint", "SUCCESS")], comments: ["¿Por qué este cambio?"], reviews: [("CHANGES_REQUESTED", "Falta un test")])),
+            ("conflicto", pr([check("build", "FAILURE", at: "10:20"), check("lint", "SUCCESS")], comments: ["¿Por qué este cambio?"], reviews: [("CHANGES_REQUESTED", "Falta un test")], mergeable: "CONFLICTING")),
+            ("todo en verde", pr([check("build", "SUCCESS", at: "10:40"), check("lint", "SUCCESS")], comments: ["¿Por qué este cambio?"], reviews: [("CHANGES_REQUESTED", "Falta un test")])),
+            ("sigue en verde", pr([check("build", "SUCCESS", at: "10:40"), check("lint", "SUCCESS")], comments: ["¿Por qué este cambio?"], reviews: [("CHANGES_REQUESTED", "Falta un test")])),
+            ("fusionado", pr([check("build", "SUCCESS", at: "10:40"), check("lint", "SUCCESS")], comments: ["¿Por qué este cambio?"], reviews: [("CHANGES_REQUESTED", "Falta un test")], state: "MERGED")),
+        ]
+        var info = PullRequestInfo(number: 42, url: "https://github.com/x/y/pull/42", state: "OPEN", watching: true)
+        for (label, o) in steps {
+            let r = PRWatcher.evaluate(o, pr: &info)
+            let agent = r.tellAgent.map { String($0.split(separator: "\n").first ?? "").prefix(70) }
+            out("· \(label): agente=\(agent.isEmpty ? "—" : agent.joined(separator: " / ")) · notas=\(r.notes.isEmpty ? "—" : r.notes.joined(separator: " / ")) · vigilando=\(info.watching)")
+        }
+    }
+
+    /// Keeps the MCP server up (port 47899) for a real client to try:  --selftest mcpserve <seconds> [full]
+    static func mcpServe(seconds: Double, full: Bool) async {
+        let store = AppStore.shared
+        store.settings.mcpEnabled = true
+        store.settings.mcpFullAccess = full
+        store.settings.mcpPort = 47899
+        MCPServer.shared.attach(store)
+        out("MCP en \(MCPServer.shared.url) · \(full ? "acceso completo" : "solo lectura") · \(store.threads.count) hilos")
+        try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+        MCPServer.shared.stop()
+    }
+
+    /// The MCP server over real HTTP: initialize, tools, a call, and a wrong token.  --selftest mcp
+    ///   (RELEVO_MCP_TOKEN overrides the Keychain token; port 47899)
+    static func mcp() async {
+        let store = AppStore.shared
+        store.settings.mcpEnabled = true
+        store.settings.mcpPort = 47899
+        MCPServer.shared.attach(store)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        let token = MCPServer.shared.token
+        func post(_ body: String, token: String) async -> (Int, String) {
+            var req = URLRequest(url: URL(string: "http://127.0.0.1:47899/mcp")!)
+            req.httpMethod = "POST"
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.setValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
+            req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            req.httpBody = Data(body.utf8)
+            guard let (data, resp) = try? await URLSession.shared.data(for: req) else { return (-1, "") }
+            return ((resp as? HTTPURLResponse)?.statusCode ?? -1, String(decoding: data, as: UTF8.self))
+        }
+        let i = await post(#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#, token: token)
+        out("initialize: \(i.0) \(i.1.prefix(140))")
+        let n = await post(#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#, token: token)
+        out("initialized: \(n.0)")
+        let l = await post(#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#, token: token)
+        let names = (JSONUtil.parse(l.1)?.obj("result")?.objs("tools") ?? []).compactMap { $0.str("name") }
+        out("tools/list: \(l.0) \(names)")
+        let c = await post(#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_projects","arguments":{}}}"#, token: token)
+        out("list_projects: \(c.0) \(c.1.prefix(160))")
+        let w = await post(#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"send_message","arguments":{"thread_id":"x","text":"hola"}}}"#, token: token)
+        out("send_message en solo lectura: \(w.1.contains("\"isError\":true") ? "rechazado" : "¡permitido!")")
+        let bad = await post(#"{"jsonrpc":"2.0","id":5,"method":"tools/list"}"#, token: "mal")
+        out("token incorrecto: \(bad.0)")
+        MCPServer.shared.stop()
     }
 
     /// Message queue against a real agent (Claude Haiku):
@@ -446,6 +776,15 @@ enum SelfTest {
         out("orden: " + thread.items.filter { $0.kind == .user || $0.kind == .assistant }
             .map { "\($0.kind == .user ? "→" : "←") \($0.text.prefix(40))" }.joined(separator: " | "))
 
+        out("== B0: detener antes de que el mensaje llegue al agente ==")
+        rt.send("Responde solo con la palabra: nunca")
+        rt.stop()
+        out("al momento: trabajando=\(rt.isRunning) · último: \(thread.items.last.map { "\($0.kind.rawValue): \($0.text)" } ?? "-")")
+        try? await Task.sleep(nanoseconds: 1_500_000_000)
+        rt.send("Responde solo con la palabra: sigue")
+        await waitIdle(90)
+        out("después: \(thread.items.suffix(2).map { "\($0.kind.rawValue): \($0.text.prefix(30))" })")
+
         out("== B: detener con un mensaje en cola ==")
         rt.send("Escribe los números del 1 al 300 separados por comas, sin nada más")
         try? await Task.sleep(nanoseconds: 300_000_000)
@@ -455,7 +794,7 @@ enum SelfTest {
         let stopDeadline = Date().addingTimeInterval(12)
         while rt.isRunning && Date() < stopDeadline { try? await Task.sleep(nanoseconds: 200_000_000) }
         try? await Task.sleep(nanoseconds: 800_000_000)
-        out("tras detener: pausada=\(rt.queuePaused) cola=\(rt.queue.map(\.text)) · últimos: \(thread.items.suffix(3).map { "\($0.kind.rawValue): \($0.text.prefix(30))" })")
+        out("tras detener: pausada=\(rt.queuePaused) cola=\(rt.queue.map(\.text)) · últimos: \(thread.items.suffix(4).map { "\($0.kind.rawValue): \($0.text.prefix(30))…\($0.text.suffix(12))" })")
         rt.resumeQueue()
         await waitIdle(90)
         out("tras reanudar: pausada=\(rt.queuePaused) cola=\(rt.queue.count) última respuesta=\(thread.items.last { $0.kind == .assistant }?.text.prefix(40) ?? "-")")

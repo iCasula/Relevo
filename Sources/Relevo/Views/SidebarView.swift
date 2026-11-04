@@ -108,6 +108,7 @@ struct ProjectGroup: View {
             .help(abbreviateHome(project.path))
             .contextMenu {
                 Button("Nuevo hilo") { store.newThread(in: project) }
+                Button("Nuevo hilo en un worktree") { store.newWorktreeThread(in: project) }
                 Button("Mostrar en Finder") {
                     NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: project.path)])
                 }
@@ -161,9 +162,22 @@ struct ThreadRow: View {
             } else {
                 Circle().strokeBorder(.tertiary).frame(width: 6, height: 6)
             }
+            if thread.comparisonId != nil {
+                Image(systemName: "person.3.sequence").font(.caption2).foregroundStyle(.secondary)
+                    .help("Uno de varios agentes haciendo la misma tarea")
+            } else if let w = thread.worktree {
+                Image(systemName: "square.stack.3d.down.right").font(.caption2).foregroundStyle(.secondary)
+                    .help("Worktree propio · \(w.branch)")
+            }
             Text(thread.title)
                 .lineLimit(1)
                 .help(thread.titleSource == .ai ? "Tema puesto por IA · clic derecho para renombrar" : thread.title)
+            if let pr = thread.pullRequest {
+                Image(systemName: pr.state == "MERGED" ? "arrow.triangle.merge" : "arrow.triangle.pull")
+                    .font(.caption2)
+                    .foregroundStyle(pr.state == "MERGED" ? Color.purple : pr.state == "OPEN" ? Color.green : Color.secondary)
+                    .help("PR #\(pr.number) \(GitMenu.stateName(pr.state))" + (pr.watching ? " · vigilado" : ""))
+            }
             Spacer(minLength: 4)
             if store.existingRuntime(thread.id)?.isRunning == true {
                 ProgressView().controlSize(.mini)

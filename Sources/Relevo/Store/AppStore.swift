@@ -21,6 +21,11 @@ final class AppStore {
     var toast: String?
     var bootstrapped = false
     var debugRequest: String?
+    /// Same task given to several agents (each thread keeps its `comparisonId`).
+    var comparisons: [Comparison] = []
+    /// Quick actions running or run in the threads' folders.
+    let actions = QuickActionRunner()
+    @ObservationIgnored lazy var prWatcher = PRWatcher(store: self)
 
     @ObservationIgnored let trace = TraceStore(url: AppStore.supportDirectory.appendingPathComponent("memory.sqlite"))
     @ObservationIgnored private var runtimes: [UUID: ThreadRuntime] = [:]
@@ -55,6 +60,7 @@ final class AppStore {
         var status: [String: AccountStatus]?
         var selectedThreadId: UUID?
         var expandedProjects: [UUID]?
+        var comparisons: [Comparison]?
     }
 
     init() {
@@ -73,6 +79,9 @@ final class AppStore {
         scheduleTimer()
         CompanionServer.shared.attach(self)
         Task { await UsageImporter.run(store: self) }
+        prWatcher.start()
+        MCPServer.shared.attach(self)
+        applyCaptureShortcut()
         if Self.canNotify {
             UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
         }
@@ -149,6 +158,7 @@ final class AppStore {
             expandedProjects = Set(s.expandedProjects ?? s.projects.map(\.id))
             for (k, v) in s.models ?? [:] { if let id = UUID(uuidString: k) { models[id] = v } }
             for (k, v) in s.status ?? [:] { if let id = UUID(uuidString: k) { status[id] = v } }
+            comparisons = s.comparisons ?? []
         }
         let files = (try? FileManager.default.contentsOfDirectory(at: threadsDir, includingPropertiesForKeys: nil)) ?? []
         var loaded: [ThreadModel] = []
@@ -176,7 +186,8 @@ final class AppStore {
             accounts: accounts, projects: projects, settings: settings,
             models: Dictionary(uniqueKeysWithValues: models.map { ($0.key.uuidString, $0.value) }),
             status: Dictionary(uniqueKeysWithValues: status.map { ($0.key.uuidString, $0.value) }),
-            selectedThreadId: selectedThreadId, expandedProjects: Array(expandedProjects)
+            selectedThreadId: selectedThreadId, expandedProjects: Array(expandedProjects),
+            comparisons: comparisons.isEmpty ? nil : comparisons
         )
         if let data = try? encoder.encode(s) { try? data.write(to: stateURL, options: .atomic) }
     }
@@ -392,7 +403,24 @@ final class AppStore {
         mutate(&settings)
         if before != settings.refreshMinutes { scheduleTimer() }
         saveState()
-        if bootstrapped { CompanionServer.shared.settingsChanged() }
+        if bootstrapped {
+            CompanionServer.shared.settingsChanged()
+            MCPServer.shared.settingsChanged()
+            applyCaptureShortcut()
+        }
+    }
+
+    /// Registers (or removes) the global window-capture shortcut to match the settings.
+    func applyCaptureShortcut() {
+        if settings.captureEnabled {
+            GlobalHotKey.shared.action = { [weak self] in
+                guard let self else { return }
+                WindowCapture.captureIntoDraft(store: self)
+            }
+            GlobalHotKey.shared.register()
+        } else {
+            GlobalHotKey.shared.unregister()
+        }
     }
 
     // MARK: - Projects & threads
@@ -442,6 +470,16 @@ final class AppStore {
         runtimes[thread.id]?.closeSession()
         runtimes.removeValue(forKey: thread.id)
         trace.deleteThread(thread.id)
+        // Its worktree folder goes too (the branch stays, with any commits it has); so do its turn snapshots.
+        if let project = project(thread.projectId) {
+            let worktree = thread.worktree
+            let id = thread.id.uuidString
+            Task {
+                if let worktree { try? await Git.removeWorktree(repo: project.path, path: worktree.path, branch: nil, deleteBranch: false) }
+                let refs = await Git.run(project.path, ["for-each-ref", "--format=%(refname)", "refs/relevo/\(id)/"]).out
+                for ref in refs.split(separator: "\n") { await Git.run(project.path, ["update-ref", "-d", String(ref)]) }
+            }
+        }
         threads.removeAll { $0.id == thread.id }
         try? FileManager.default.removeItem(at: threadsDir.appendingPathComponent("\(thread.id.uuidString).json"))
         if selectedThreadId == thread.id { selectedThreadId = threads.first?.id }
@@ -451,6 +489,62 @@ final class AppStore {
     func select(_ id: UUID?) {
         selectedThreadId = id
         saveState()
+    }
+
+    // MARK: - Working folders
+
+    /// Where a thread's agent works: its worktree, or the project folder.
+    func workPath(_ thread: ThreadModel) -> String? {
+        thread.worktree?.path ?? project(thread.projectId)?.path
+    }
+
+    /// The project as seen from the thread: same project, with the path of the thread's worktree.
+    func workProject(_ thread: ThreadModel) -> Project? {
+        guard var p = project(thread.projectId) else { return nil }
+        if let w = thread.worktree { p.path = w.path }
+        return p
+    }
+
+    /// A new thread in its own worktree (its own branch and folder, from the project's current commit).
+    func newWorktreeThread(in project: Project? = nil) {
+        let target = project ?? self.project(selectedThread?.projectId) ?? projects.first
+        guard let target else { showNewProject = true; return }
+        let previous = selectedThread
+        let accountId = previous?.selectedAccountId ?? preferredAccount()?.id
+        let model = previous?.selectedModel ?? account(accountId).map { defaultModel(for: $0) }
+        let t = ThreadModel(projectId: target.id, mode: settings.defaultMode, accountId: accountId, model: model)
+        threads.insert(t, at: 0)
+        expandedProjects.insert(target.id)
+        selectedThreadId = t.id
+        save(t)
+        saveState()
+        Task {
+            do {
+                let info = try await Worktrees.create(for: t, project: target, store: self)
+                runtime(for: t).noteWorktree(info)
+            } catch {
+                runtime(for: t).noteWorktreeFailure(error.localizedDescription)
+            }
+        }
+    }
+
+    func updateProject(_ project: Project) {
+        guard let i = projects.firstIndex(where: { $0.id == project.id }) else { return }
+        projects[i] = project
+        saveState()
+    }
+
+    func notifyWatcher(thread: ThreadModel, text: String) {
+        flash(String(text.prefix(120)))
+        guard let app = NSApp, !app.isActive else { return }
+        notify(title: thread.title, body: String(text.prefix(160)))
+    }
+
+    func notifyActionFinished(_ run: ActionRun, thread: ThreadModel) {
+        let ok = run.state == .succeeded
+        flash("«\(run.action.name)» \(ok ? "terminó bien" : "falló")")
+        guard let app = NSApp, !app.isActive else { return }
+        notify(title: "\(run.action.name) · \(thread.title)", body: ok ? "Terminó bien" : "Falló (código \(run.exitCode ?? -1))")
     }
 
     /// Creates AGENTS.md (shared memory read by Codex, ZCode…) and imports it from CLAUDE.md / GEMINI.md.

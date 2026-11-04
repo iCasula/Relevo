@@ -26,6 +26,38 @@ struct Project: Codable, Identifiable, Hashable {
     var name: String
     var path: String
     var createdAt = Date()
+    /// Commands run from the thread toolbar (builds, tests…); optional so older state files still decode.
+    var actions: [QuickAction]? = nil
+
+    var quickActions: [QuickAction] { actions ?? [] }
+}
+
+/// A thread working in its own git worktree: its own folder and branch, created from the project's branch.
+struct WorktreeInfo: Codable, Equatable, Hashable {
+    var path: String
+    var branch: String
+    var baseBranch: String?
+    var baseCommit: String
+    var createdAt = Date()
+}
+
+/// The pull request a thread opened, and whether Relevo watches it for checks, reviews and conflicts.
+struct PullRequestInfo: Codable, Equatable, Hashable {
+    var number: Int
+    var url: String
+    var state: String
+    var watching = false
+    /// What was last seen (checks, comments, reviews, mergeability), to report only what changed.
+    var seen: [String]? = nil
+}
+
+/// What a turn changed on disk: snapshots of the working folder before and after it.
+struct TurnChanges: Codable, Equatable, Hashable {
+    var before: String
+    var after: String
+    var files: Int
+    var added: Int
+    var removed: Int
 }
 
 enum PermissionMode: String, Codable, CaseIterable, Identifiable {
@@ -103,6 +135,8 @@ struct ChatItem: Codable, Identifiable, Equatable {
     var answers: [String: String]? = nil
     /// Tokens and cost of the turn this item closes.
     var usage: TurnUsage? = nil
+    /// Files the turn this item closes changed.
+    var changes: TurnChanges? = nil
 }
 
 struct Segment: Codable, Identifiable, Equatable {
@@ -130,6 +164,9 @@ struct ThreadRecord: Codable {
     var selectedEffort: String?
     var titleSource: TitleSource?
     var topicAttempts: Int?
+    var worktree: WorktreeInfo?
+    var pullRequest: PullRequestInfo?
+    var comparisonId: UUID?
 }
 
 /// Where a thread title comes from: first message (provisional), AI topic, or the user.
@@ -153,6 +190,10 @@ final class ThreadModel: Identifiable {
     var draft: String
     var titleSource: TitleSource = .provisional
     var topicAttempts = 0
+    var worktree: WorktreeInfo?
+    var pullRequest: PullRequestInfo?
+    /// Set when the thread is one of several agents doing the same task (see `Comparison`).
+    var comparisonId: UUID?
 
     static let untitled = "Nuevo hilo"
 
@@ -185,13 +226,17 @@ final class ThreadModel: Identifiable {
         draft = r.draft ?? ""
         titleSource = r.titleSource ?? .provisional
         topicAttempts = r.topicAttempts ?? 0
+        worktree = r.worktree
+        pullRequest = r.pullRequest
+        comparisonId = r.comparisonId
     }
 
     var record: ThreadRecord {
         ThreadRecord(id: id, projectId: projectId, title: title, createdAt: createdAt, updatedAt: updatedAt,
                      segments: segments, items: items, mode: mode, selectedAccountId: selectedAccountId,
                      selectedModel: selectedModel, draft: draft.isEmpty ? nil : draft, selectedEffort: selectedEffort,
-                     titleSource: titleSource, topicAttempts: topicAttempts)
+                     titleSource: titleSource, topicAttempts: topicAttempts, worktree: worktree, pullRequest: pullRequest,
+                     comparisonId: comparisonId)
     }
 
     var lastKind: ProviderKind? { segments.last?.kind }
@@ -255,6 +300,14 @@ struct AppSettings: Codable, Equatable {
     var companionBundleId: String = "app.relevo.companion"
     /// When Relevo started recording tokens per turn; earlier Claude turns are imported from its transcripts.
     var usageTrackingSince: Date? = nil
+    /// Window capture with a global shortcut (⌃⌥⌘C), attached to the draft; off by default.
+    var captureEnabled: Bool = false
+    /// Also read the window's text and controls through Accessibility.
+    var captureIncludeText: Bool = true
+    /// MCP server for outside agents, on 127.0.0.1 only; off by default and read-only unless `mcpFullAccess`.
+    var mcpEnabled: Bool = false
+    var mcpPort: Int = 47821
+    var mcpFullAccess: Bool = false
 
     init() {}
 
@@ -279,6 +332,11 @@ struct AppSettings: Codable, Equatable {
         apnsKeyId = try? c.decodeIfPresent(String.self, forKey: .apnsKeyId)
         companionBundleId = (try? c.decodeIfPresent(String.self, forKey: .companionBundleId)) ?? d.companionBundleId
         usageTrackingSince = try? c.decodeIfPresent(Date.self, forKey: .usageTrackingSince)
+        captureEnabled = (try? c.decodeIfPresent(Bool.self, forKey: .captureEnabled)) ?? d.captureEnabled
+        captureIncludeText = (try? c.decodeIfPresent(Bool.self, forKey: .captureIncludeText)) ?? d.captureIncludeText
+        mcpEnabled = (try? c.decodeIfPresent(Bool.self, forKey: .mcpEnabled)) ?? d.mcpEnabled
+        mcpPort = (try? c.decodeIfPresent(Int.self, forKey: .mcpPort)) ?? d.mcpPort
+        mcpFullAccess = (try? c.decodeIfPresent(Bool.self, forKey: .mcpFullAccess)) ?? d.mcpFullAccess
     }
 }
 

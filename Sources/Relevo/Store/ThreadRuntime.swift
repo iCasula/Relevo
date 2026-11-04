@@ -76,6 +76,14 @@ final class ThreadRuntime {
     @ObservationIgnored private var sessionReopened = false
     @ObservationIgnored private var lastTurnEnd: Date?
     @ObservationIgnored private var lastTurnContext: Int?
+    // Snapshots of the working folder around each turn (git repos only), to show and undo what a turn changed.
+    @ObservationIgnored private var isGitRepo: Bool?
+    @ObservationIgnored private var turnBefore: String?
+    /// Between dispatching a turn and handing the message to the agent (while the "before" snapshot is taken).
+    @ObservationIgnored private var awaitingDispatch = false
+    @ObservationIgnored private var pendingAfter: Task<String?, Never>?
+    /// Told to the agent with the next message (e.g. that files were restored).
+    @ObservationIgnored private var pendingAgentNote: String?
     /// Tokens in the agent's context now, and its window (when the CLI reports them).
     var context: Int?
     var contextWindow: Int?
@@ -110,7 +118,11 @@ final class ThreadRuntime {
         }
     }
 
-    private var project: Project? { store.project(thread.projectId) }
+    /// The project as the agent sees it: the thread's worktree when it has one.
+    private var project: Project? { store.workProject(thread) }
+    /// The project itself (for the trace, which groups by project).
+    private var baseProject: Project? { store.project(thread.projectId) }
+    private var workPath: String? { store.workPath(thread) }
     private var trace: TraceStore { store.trace }
 
     private enum SegmentPlan {
@@ -150,7 +162,47 @@ final class ThreadRuntime {
         TopicNamer.maybeName(thread, store: store)
         record(ref: "u:" + userItem.id, kind: "request", title: String(text.prefix(200)), detail: String(text.prefix(8000)), accountId: account.id)
         captureStartHeadIfNeeded()
-        launch(plan, request: text, history: history, pending: false, account: account, model: model)
+        let request = pendingAgentNote.map { $0 + "\n\n" + text } ?? text
+        pendingAgentNote = nil
+        launch(plan, request: request, history: history, pending: false, account: account, model: model)
+    }
+
+    /// First message of a thread that is one of several agents doing the same task: the conversation it was
+    /// copied from (if any) is handed over like a relay, and the agent starts in the thread's own worktree.
+    func startFork(_ text: String, account: Account, model: String, sourceTitle: String?) {
+        turnProfile = suggester.didSend(text)
+        thread.selectedAccountId = account.id
+        thread.selectedModel = model
+        let history = thread.items
+        let hasHistory = history.contains { $0.kind == .user || $0.kind == .assistant }
+        thread.segments.append(Segment(accountId: account.id, kind: account.kind, model: model, startItem: thread.items.count))
+        store.updateAccount(account.id) { $0.lastModel = model }
+        let notice = ChatItem(id: UUID().uuidString, kind: .notice,
+                              text: "Comparación: la misma tarea en varios agentes, cada uno en su worktree"
+                                + (hasHistory ? " · contexto de «\(sourceTitle ?? "el hilo")» traspasado" : ""),
+                              accountId: account.id, model: model)
+        append(notice)
+        let userItem = ChatItem(id: UUID().uuidString, kind: .user, text: text, accountId: account.id, model: model)
+        append(userItem)
+        record(ref: "u:" + userItem.id, kind: "request", title: String(text.prefix(200)), detail: String(text.prefix(8000)), accountId: account.id)
+        captureStartHeadIfNeeded()
+        launch(hasHistory ? .handoff(noticeId: notice.id) : .direct, request: text, history: history, pending: false, account: account, model: model)
+    }
+
+    func noteWorktree(_ info: WorktreeInfo) {
+        append(ChatItem(id: UUID().uuidString, kind: .notice,
+                        text: "Trabaja en su propio worktree: rama \(info.branch) desde \(info.baseBranch ?? "HEAD") (\(info.baseCommit.prefix(7))). Los cambios sin commit del proyecto no se copian."))
+        store.save(thread)
+    }
+
+    func noteFromWatcher(_ text: String) {
+        append(ChatItem(id: UUID().uuidString, kind: .notice, text: text))
+        store.save(thread)
+    }
+
+    func noteWorktreeFailure(_ message: String) {
+        append(ChatItem(id: UUID().uuidString, kind: .error, text: "No se pudo crear el worktree: \(message). El hilo trabaja en la carpeta del proyecto."))
+        store.save(thread)
     }
 
     /// Interrupts the agent and sends this right away in the same conversation (redirecting it).
@@ -285,7 +337,18 @@ final class ThreadRuntime {
         statusLine = "Iniciando \(account.kind.agentName)…"
         do {
             let s = try ensureSession(account: account, model: model)
-            s.send(text)
+            // Snapshot the folder first (it takes a moment), so the turn's changes can be shown and undone.
+            let serial = turnSerial
+            turnBefore = nil
+            awaitingDispatch = true
+            Task { @MainActor in
+                let before = await self.snapshot("\(serial)-before")
+                guard self.turnSerial == serial else { return }
+                self.awaitingDispatch = false
+                guard self.isRunning, !self.stoppedByUser else { return }
+                self.turnBefore = before
+                s.send(text)
+            }
         } catch {
             isRunning = false
             statusLine = nil
@@ -325,6 +388,7 @@ final class ThreadRuntime {
     enum StopSource {
         case mac, shortcut, relay, redirect
         case iphone(String)
+        case external(String)
 
         var label: String {
             switch self {
@@ -333,6 +397,7 @@ final class ThreadRuntime {
             case .relay: "para relevar a otro agente"
             case .redirect: "para enviar tu mensaje ya"
             case .iphone(let name): "desde el iPhone (\(name))"
+            case .external(let name): "desde un \(name)"
             }
         }
     }
@@ -340,6 +405,12 @@ final class ThreadRuntime {
     func stop(from source: StopSource = .mac) {
         stoppedByUser = true
         stopSource = source
+        // Still taking the "before" snapshot: the agent hasn't got the message, so there is nothing to interrupt.
+        if awaitingDispatch && isRunning {
+            awaitingDispatch = false
+            endStoppedTurn(source: source, closingSession: false)
+            return
+        }
         session?.interrupt()
         statusLine = "Deteniendo…"
         let current = session, serial = turnSerial
@@ -347,21 +418,27 @@ final class ThreadRuntime {
         // confirmed it and a redirected message started a new turn in the same session, which must live on.
         DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
             guard let self, self.isRunning, self.stoppedByUser, self.turnSerial == serial, self.session === current else { return }
-            let accountId = self.sessionAccountId ?? self.thread.selectedAccountId
-            self.closeSession()
-            self.isRunning = false
-            self.statusLine = nil
-            self.watchdog?.cancel()
-            for i in self.thread.items.indices where self.thread.items[i].kind == .tool && self.thread.items[i].status == .running {
-                self.thread.items[i].status = .failed
-            }
-            self.finishTraceTurn(accountId: accountId)
-            self.finishUsage(accountId: accountId)
-            self.append(ChatItem(id: UUID().uuidString, kind: .notice, text: "Detenido \(source.label)"))
-            self.thread.updatedAt = Date()
-            self.store.save(self.thread)
-            if !self.runAfterStop(), !self.queue.isEmpty { self.queuePaused = true }
+            self.endStoppedTurn(source: source, closingSession: true)
         }
+    }
+
+    /// Closes a stopped turn without waiting for the agent (it didn't confirm, or never got the message).
+    private func endStoppedTurn(source: StopSource, closingSession: Bool) {
+        let accountId = sessionAccountId ?? thread.selectedAccountId
+        if closingSession { closeSession() }
+        isRunning = false
+        statusLine = nil
+        watchdog?.cancel()
+        for i in thread.items.indices where thread.items[i].kind == .tool && thread.items[i].status == .running {
+            thread.items[i].status = .failed
+        }
+        finishTraceTurn(accountId: accountId)
+        finishChanges()
+        finishUsage(accountId: accountId)
+        append(ChatItem(id: UUID().uuidString, kind: .notice, text: "Detenido \(source.label)"))
+        thread.updatedAt = Date()
+        store.save(thread)
+        if !runAfterStop(), !queue.isEmpty { queuePaused = true }
     }
 
     func setMode(_ mode: PermissionMode) {
@@ -520,6 +597,7 @@ final class ThreadRuntime {
             }
             finishTraceTurn(accountId: accountId)
             recordOutcome(accountId: accountId)
+            finishChanges()
             finishUsage(accountId: accountId)
             if stoppedByUser { append(ChatItem(id: UUID().uuidString, kind: .notice, text: "Detenido \((stopSource ?? .mac).label)")) }
             thread.updatedAt = Date()
@@ -626,7 +704,7 @@ final class ThreadRuntime {
     }
 
     private func record(ref: String, kind: String, title: String, detail: String? = nil, status: String? = nil, accountId: UUID?, appendDetail: Bool = false) {
-        guard let project else { return }
+        guard let project = baseProject else { return }
         let ctx = store.account(accountId).map { context($0, model: thread.segments.last?.model) }
         trace.record(thread: thread.id, project: project.path, ref: ref, kind: kind, context: ctx, title: title, detail: detail, status: status, appendDetail: appendDetail)
     }
@@ -678,6 +756,7 @@ final class ThreadRuntime {
                     self.isRunning = false
                     self.statusLine = nil
                     self.finishTraceTurn(accountId: self.thread.selectedAccountId)
+                    self.finishChanges()
                     self.finishUsage(accountId: self.thread.selectedAccountId)
                     if !self.queue.isEmpty { self.queuePaused = true }
                     return
@@ -708,6 +787,103 @@ final class ThreadRuntime {
         if stoppedByUser { return "stopped" }
         if turnFailed { return [.limit, .unavailable, .noPlan].contains(turnFailureKind) ? "limit" : "error" }
         return "ok"
+    }
+
+    // MARK: - Files changed per turn
+
+    /// Snapshot of the working folder, at most a few seconds' wait (a huge untracked folder must not hold up the turn).
+    private func snapshot(_ name: String) async -> String? {
+        if let previous = pendingAfter { _ = await previous.value }   // the last turn's "after" comes first
+        guard let path = workPath else { return nil }
+        if isGitRepo == nil { isGitRepo = await Git.isRepo(path) }
+        guard isGitRepo == true else { return nil }
+        let ref = "refs/relevo/\(thread.id.uuidString)/\(name)"
+        return await Self.firstOf(seconds: 6) { await Git.snapshot(path, ref: ref, message: "Relevo: \(name)") }
+    }
+
+    /// Records what the turn changed on its last item (the same one that shows its usage).
+    private func finishChanges() {
+        guard let before = turnBefore else { return }
+        turnBefore = nil
+        let start = meter?.startIndex ?? turnStartIndex
+        let range = min(start, thread.items.count)..<thread.items.count
+        guard let idx = range.reversed().first(where: { thread.items[$0].kind == .assistant }) ?? range.last else { return }
+        let anchor = thread.items[idx].id
+        let name = "\(turnSerial)-after"
+        let task = Task { @MainActor () -> String? in
+            guard let path = self.workPath else { return nil }
+            let ref = "refs/relevo/\(self.thread.id.uuidString)/\(name)"
+            guard let after = await Git.snapshot(path, ref: ref, message: "Relevo: \(name)") else { return nil }
+            let stat = await Git.diffStat(path, from: before, to: after)
+            if !stat.isEmpty, let i = self.thread.items.firstIndex(where: { $0.id == anchor }) {
+                self.thread.items[i].changes = TurnChanges(before: before, after: after, files: stat.files, added: stat.added, removed: stat.removed)
+                self.store.save(self.thread)
+            }
+            return after
+        }
+        pendingAfter = task
+    }
+
+    /// Puts the files back as they were before the turn `item` closes. What is there now is saved first, so it
+    /// can be undone, and the agent is told with the next message.
+    func restoreBefore(_ item: ChatItem) async throws {
+        guard let changes = item.changes, let path = workPath else { return }
+        guard !isRunning else { throw GitError(message: "Detén al agente antes de restaurar.") }
+        let safety = await Git.snapshot(path, ref: "refs/relevo/\(thread.id.uuidString)/restore-\(Int(Date().timeIntervalSince1970))",
+                                        message: "Relevo: before restore")
+        try await Git.restore(path, to: changes.before)
+        let request = requestText(before: item)
+        var notice = ChatItem(id: UUID().uuidString, kind: .notice,
+                              text: "Ficheros restaurados a antes de «\(String(request.prefix(60)))»")
+        notice.title = "restore"
+        notice.output = safety
+        append(notice)
+        pendingAgentNote = "[Relevo: he restaurado los ficheros a como estaban antes de mi petición «\(String(request.prefix(120)))». "
+            + "Lo que cambiaste a partir de ahí ya no está en disco; vuelve a mirar los ficheros antes de seguir.]"
+        store.save(thread)
+    }
+
+    /// Undoes a restore (back to what was there just before it).
+    func undoRestore(_ notice: ChatItem) async throws {
+        guard let safety = notice.output, let path = workPath else { return }
+        try await Git.restore(path, to: safety)
+        if let i = thread.items.firstIndex(where: { $0.id == notice.id }) {
+            thread.items[i].text += " · deshecho"
+            thread.items[i].output = nil
+        }
+        pendingAgentNote = "[Relevo: he deshecho la restauración; los ficheros vuelven a estar como los dejaste.]"
+        store.save(thread)
+    }
+
+    private func requestText(before item: ChatItem) -> String {
+        guard let idx = thread.items.firstIndex(where: { $0.id == item.id }) else { return "" }
+        return thread.items[..<idx].last(where: { $0.kind == .user })?.text ?? ""
+    }
+
+    /// Review comments on lines of a diff, sent to the agent as one message.
+    func sendReviewComments(_ comments: [DiffComment]) {
+        guard !comments.isEmpty else { return }
+        var text = "Comentarios sobre tus cambios:\n"
+        for c in comments {
+            text += "\n`\(c.file):\(c.line)`" + (c.code.isEmpty ? "" : " — `\(c.code.trimmingCharacters(in: .whitespaces).prefix(160))`") + "\n"
+            text += c.text.split(separator: "\n").map { "> " + $0 }.joined(separator: "\n") + "\n"
+        }
+        send(text)
+    }
+
+    /// Runs `operation`, giving up waiting after `seconds` (the operation itself keeps going).
+    private static func firstOf<T>(seconds: Double, _ operation: @escaping () async -> T?) async -> T? {
+        let gate = OnceGate()
+        return await withCheckedContinuation { (continuation: CheckedContinuation<T?, Never>) in
+            Task { @MainActor in
+                let value = await operation()
+                if gate.open() { continuation.resume(returning: value) }
+            }
+            Task {
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                if gate.open() { continuation.resume(returning: nil) }
+            }
+        }
     }
 
     // MARK: - Token usage

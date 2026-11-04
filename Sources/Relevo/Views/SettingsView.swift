@@ -10,6 +10,8 @@ struct SettingsView: View {
                 .tabItem { Label("General", systemImage: "gearshape") }
             CompanionSettings()
                 .tabItem { Label("iPhone", systemImage: "iphone.gen3") }
+            IntegrationsSettings()
+                .tabItem { Label("Integraciones", systemImage: "puzzlepiece.extension") }
         }
         .frame(width: 680, height: 500)
     }

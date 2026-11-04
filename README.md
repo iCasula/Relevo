@@ -103,6 +103,41 @@ RELEVO_DATA_DIR=/tmp/relevo-copy .build/debug/Relevo --selftest usagereport     
 RELEVO_DATA_DIR=/tmp/relevo-copy .build/debug/Relevo --selftest usageui /tmp/usage                     # window PNGs, light and dark
 ```
 
+## Worktrees, parallel agents and reviewing changes
+
+- **A worktree per thread** (⌥⌘N, or the project's context menu): the thread gets its own folder under `~/.relevo/worktrees/<project>/` and its own branch `relevo/t-xxxxxx`, from the project's current commit (uncommitted changes in the project stay there). Several agents can then work on the same repository without stepping on each other. The **Git** toolbar menu merges the branch back into the one it came from (aborting on conflicts), opens the folder, or removes the worktree.
+- **The same task on several agents** (**Varios agentes** in the toolbar): pick 2–5 subscription · model pairs (by default up to three subscriptions the Advisor would use for the task, each with its strongest model of its own family) and Relevo creates one thread per agent, each in a worktree from the same commit; if launched from a thread, its conversation is handed to all of them. The sheet shows what starting each one costs (the context it has to read cold). **Comparación** then shows each agent's status, files changed, tokens and cost; **Quedarme con este** commits that agent's changes on its branch and merges it where the comparison started, optionally removing the other worktrees.
+- **What each turn changed:** before and after every turn Relevo snapshots the working folder into a commit kept under `refs/relevo/<thread>/` (built with a scratch index, so the agent's index, branch and stash are never touched; ignored files are left out). A line under the reply shows "3 ficheros · +40 −12"; it opens the diff, where you can click any line to leave a comment and send all of them to the agent in one message, or **restore** the files to before that turn (what's there is saved first, so it can be undone, and the agent is told with your next message). **Git › Cambios del hilo** shows the whole thread.
+- **Commit, push and PR** (**Git › Commit…**): changed files, a message the utility model writes in English (no co-author lines or mentions of AI; they're stripped anyway), then commit, commit and push, or commit, push and open a PR with `gh` (title and body from the message, plus the checks the agent ran).
+- **Watching a PR:** every two minutes Relevo looks at it with `gh pr view` and wakes the thread's agent when checks fail (again, after a push that doesn't fix them), someone comments or reviews, or the branch has conflicts; it tells you when everything is green and stops when the PR is merged or closed.
+
+## Quick actions
+
+Per-project commands (builds, tests, code generators) in the thread toolbar's **Acciones** menu and the **Acciones** menu bar (⌃1…⌃9), run with your login shell in the thread's folder (its worktree, if it has one). Their output is kept per thread and can be sent to the agent in one click, which is handy for build errors. An action can also run automatically when a worktree is created (`xcodegen generate`, `npm install`…).
+
+## Window capture
+
+Off by default (Settings › Integraciones). With ⌃⌥⌘C from any app, Relevo captures the window in front of you with ScreenCaptureKit and adds it to the message you're writing. With Accessibility allowed, it also writes the window's text and controls with their positions, so the agent knows what each part of the screenshot is. Captures live in `~/Library/Application Support/Relevo/captures/`; the message carries their paths, which Claude Code, Codex and the others can open.
+
+## MCP server for outside agents
+
+Off by default (Settings › Integraciones). Relevo serves MCP over Streamable HTTP on `http://127.0.0.1:47821/mcp`, only on this Mac and only with its bearer token (stored in the Keychain; **Nuevo token** revokes the old one). Requests from web pages of other origins are refused.
+
+- **Read-only (default):** `list_projects`, `list_threads`, `read_thread`, `get_usage`, `list_accounts`.
+- **Full access:** also `create_thread` (optionally in a worktree), `send_message` (queued if the agent is busy, or `now` to interrupt), `stop_thread` and `relay_thread`.
+
+Settings copies the command for Claude Code (`claude mcp add --transport http relevo … --header "Authorization: Bearer …"`) and the `config.toml` snippet for Codex.
+
+```sh
+.build/debug/Relevo --selftest workspace /tmp/ws         # worktree, snapshots, diff, restore, commit, merge (RELEVO_WORKTREES_DIR to keep it out of ~/.relevo)
+RELEVO_MCP_TOKEN=test .build/debug/Relevo --selftest mcp # initialize, tools, a call, read-only refusal, wrong token
+.build/debug/Relevo --selftest turnchanges /tmp/tc       # a real agent's turn: changes recorded, restored, agent told, undone
+.build/debug/Relevo --selftest prwatch                   # the PR watcher's decisions over a sequence of PR states
+.build/debug/Relevo --selftest commitmsg /tmp/cm         # commit message and PR body from the utility model
+.build/debug/Relevo --selftest workspaceui /tmp/ui /tmp/ui/ws   # diff, commit, comparison, actions and settings rendered to PNGs
+RELEVO_MCP_TOKEN=test .build/debug/Relevo --selftest mcpserve 120 [full]   # keep the MCP server up for a real client
+```
+
 ## Work trace (SQLite): where the agent was
 
 The main case is **an account running out of quota in the middle of a task**. At that point the agent can no longer summarize anything, so Relevo doesn't ask it to: it records the trace **live and without spending tokens** in `~/Library/Application Support/Relevo/memory.sqlite` (WAL + FTS5):
@@ -196,6 +231,8 @@ Headless checks of the Mac side: `--selftest companion` (pairs, connects over Bo
 - `~/Library/Application Support/Relevo/threads/*.json`: threads.
 - `~/Library/Application Support/Relevo/handoffs/*.md`: handoff transcripts.
 - `~/Library/Application Support/Relevo/model-prices.json`: optional price corrections for the usage stats.
+- `~/Library/Application Support/Relevo/captures/`: window captures.
+- `~/.relevo/worktrees/`: threads' worktrees.
 - Z.ai: Relevo writes the selected model to `~/.zcode/cli/config.json` (`model` key), because the ZCode CLI doesn't accept `--model`.
 
 ## One subscription per provider
