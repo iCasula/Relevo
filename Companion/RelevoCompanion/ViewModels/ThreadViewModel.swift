@@ -249,6 +249,11 @@ final class ThreadViewModel {
         client.send(.relay(threadId: threadId, accountId: candidate.accountId, model: candidate.model))
     }
 
+    /// nil = the Mac's default.
+    func setLimitPlan(_ plan: RemoteLimitPlan?) { client.send(.setLimitPlan(threadId: threadId, plan: plan)) }
+
+    func limitAction(_ action: LimitAction) { client.send(.limitAction(threadId: threadId, action: action)) }
+
     func suggestion(_ action: SuggestionAction) { client.send(.suggestion(threadId: threadId, action: action)) }
 
     func toggle(_ item: RemoteItem) {

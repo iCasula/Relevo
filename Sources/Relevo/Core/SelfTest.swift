@@ -38,6 +38,7 @@ enum SelfTest {
             case "prwatch": prWatch()
             case "followscroll": await followScroll()
             case "background" where rest.count >= 2: await background(cwd: rest[1])
+            case "limitplan" where rest.count >= 2: await limitPlan(cwd: rest[1])
             case "commitmsg" where rest.count >= 2: await commitMessage(dir: rest[1])
             case "turnchanges" where rest.count >= 2: await turnChanges(dir: rest[1])
             case "workspaceui" where rest.count >= 3: await workspaceUI(dir: rest[1], out: rest[2])
@@ -579,6 +580,22 @@ enum SelfTest {
                     Text("Duo: estoy repitiendo con el arreglo los 6 tests de UI. Te aviso en cuanto tenga el resultado.").font(.body)
                     WaitingIndicator(tasks: [BackgroundTask(id: "b1", description: "Run the 6 UI tests with the fix", startedAt: Date().addingTimeInterval(-370))])
                 }.environment(store).padding(20).frame(width: 560), scheme: scheme, to: "\(prefix)-waiting-\(name).png", wait: 0.6)
+                if let codex = store.accounts.first(where: { $0.kind == .codex }), let gemini = store.accounts.first(where: { $0.kind == .gemini }) {
+                    await render(LimitPlanEditor(title: "Si se acaba la cuota en este hilo",
+                                                 plan: LimitPlan(mode: .chain, targets: [FallbackTarget(accountId: codex.id, model: store.defaultModel(for: codex)),
+                                                                                         FallbackTarget(accountId: gemini.id, model: store.defaultModel(for: gemini))]),
+                                                 onSave: { _ in }).environment(store), scheme: scheme, to: "\(prefix)-limitplan-\(name).png", wait: 0.6)
+                    if let claude = claude {
+                        rt.limit = LimitNotice(accountId: claude.id, message: "You've hit your limit", resetsAt: Date().addingTimeInterval(3 * 3600))
+                        rt.pendingRelay = ThreadRuntime.PendingRelay(accountId: codex.id, model: store.defaultModel(for: codex), at: Date().addingTimeInterval(8))
+                        await render(LimitBanner(limit: rt.limit!, runtime: rt).environment(store).padding(20).frame(width: 760), scheme: scheme, to: "\(prefix)-limit-relay-\(name).png", wait: 0.6)
+                        rt.pendingRelay = nil
+                        thread.resumeAt = Date().addingTimeInterval(3 * 3600 + 60)
+                        await render(LimitBanner(limit: rt.limit!, runtime: rt).environment(store).padding(20).frame(width: 760), scheme: scheme, to: "\(prefix)-limit-wait-\(name).png", wait: 0.6)
+                        thread.resumeAt = nil
+                        rt.limit = nil
+                    }
+                }
                 await render(DiffSheet(title: "Cambios de este turno", path: wt, from: before, to: after, runtime: rt, turnItem: item)
                     .environment(store).frame(width: 1040, height: 600), scheme: scheme, to: "\(prefix)-diff-\(name).png", wait: 1.5)
                 await render(CommitSheet(thread: thread, runtime: rt).environment(store).frame(width: 640), scheme: scheme, to: "\(prefix)-commit-\(name).png", wait: 1.5)
@@ -678,6 +695,62 @@ enum SelfTest {
         out("mensaje (\(String(format: "%.1f", Date().timeIntervalSince(start))) s):\n---\n\(message)\n---")
         let pr = CommitWriter.pullRequest(from: message, thread: thread, store: store)
         out("PR: \(pr.title)\n\(pr.body)\n---")
+    }
+
+    /// What a thread does when its agent runs out of quota, with simulated limits on a real Claude thread (Haiku):
+    /// a list in order skipping one that's also out, the one with most quota, waiting for the reset (and carrying
+    /// on for real), and a list with nothing left.   --selftest limitplan <cwd>   (RELEVO_DATA_DIR with a state.json copy)
+    static func limitPlan(cwd: String) async {
+        let store = AppStore.shared
+        store.accounts.removeAll { $0.kind.usesAPIKey }   // their keys are in the Keychain, which would ask for permission
+        guard let claude = store.accounts.first(where: { $0.kind == .claude }),
+              let codex = store.accounts.first(where: { $0.kind == .codex }),
+              let gemini = store.accounts.first(where: { $0.kind == .gemini }) else { out("faltan cuentas"); return }
+        let project = Project(name: "limit-test", path: cwd)
+        store.projects = [project]
+        let thread = ThreadModel(projectId: project.id, mode: .ask, accountId: claude.id, model: "haiku")
+        store.threads = [thread]
+        let rt = store.runtime(for: thread)
+        func waitIdle() async {
+            let deadline = Date().addingTimeInterval(120)
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            while rt.isRunning && Date() < deadline { try? await Task.sleep(nanoseconds: 200_000_000) }
+        }
+        func name(_ id: UUID?) -> String { store.account(id).map(\.name) ?? "-" }
+        func limitHit(resetsIn: TimeInterval) {
+            rt.simulateFailure(AgentFailure(kind: .limit, message: "You've hit your limit", resetsAt: Date().addingTimeInterval(resetsIn)), accountId: claude.id)
+        }
+        rt.send("Responde solo con la palabra: uno")
+        await waitIdle()
+        out("turno inicial: \(thread.items.last { $0.kind == .assistant }?.text ?? "-")")
+        let codexModel = store.defaultModel(for: codex), geminiModel = store.defaultModel(for: gemini)
+
+        thread.limitPlan = LimitPlan(mode: .chain, targets: [FallbackTarget(accountId: codex.id, model: codexModel), FallbackTarget(accountId: gemini.id, model: geminiModel)])
+        store.markExhausted(codex.id, until: Date().addingTimeInterval(3600))
+        limitHit(resetsIn: 3600)
+        out("A lista Codex→Gemini con Codex también agotado: propone \(name(rt.pendingRelay?.accountId)) · \(rt.pendingRelay?.model ?? "-") en \(Int((rt.pendingRelay?.at.timeIntervalSinceNow ?? 0).rounded())) s")
+        rt.cancelPendingRelay()
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        out("  «No relevar»: pendiente=\(rt.pendingRelay != nil) · sigue en \(name(thread.selectedAccountId))")
+
+        thread.limitPlan = LimitPlan(mode: .mostQuota)
+        limitHit(resetsIn: 3600)
+        out("B la de más cuota: propone \(name(rt.pendingRelay?.accountId))")
+        rt.cancelPendingRelay()
+
+        thread.limitPlan = LimitPlan(mode: .chain, targets: [FallbackTarget(accountId: codex.id, model: codexModel)])
+        limitHit(resetsIn: 600)
+        out("C lista sin ninguna con cuota: pendiente=\(rt.pendingRelay != nil) · espera hasta \(thread.resumeAt.map { Formatters.reset($0) ?? "" } ?? "-") · aviso «\(thread.items.last { $0.kind == .notice }?.text ?? "-")»")
+        rt.cancelResume()
+
+        thread.limitPlan = LimitPlan(mode: .wait)
+        limitHit(resetsIn: 120)
+        let saved = (try? JSONDecoder().decode(ThreadRecord.self, from: Data(contentsOf: AppStore.supportDirectory.appendingPathComponent("threads/\(thread.id.uuidString).json"))))?.resumeAt
+        out("D esperar: seguirá \(thread.resumeAt.map { Formatters.reset($0) ?? "" } ?? "-") (en \(Int((thread.resumeAt?.timeIntervalSinceNow ?? 0) / 60)) min) · guardado en disco=\(saved != nil || thread.resumeAt != nil)")
+        await rt.resumeAfterReset(force: true)
+        await waitIdle()
+        out("  «Retomar ahora»: límite=\(rt.limit != nil) · espera=\(thread.resumeAt != nil) · últimos: " + thread.items.suffix(3).map { "\($0.kind.rawValue): \($0.text.prefix(60))" }.joined(separator: " | "))
+        rt.closeSession()
     }
 
     /// A Claude agent that leaves a command running in the background: the thread shows it as waiting, and

@@ -149,6 +149,35 @@ struct Segment: Codable, Identifiable, Equatable {
     var startedAt = Date()
 }
 
+/// What a thread does when its agent runs out of quota (or the service isn't available): ask you, move to
+/// the subscription with most quota left, move along a list you chose, or wait for the reset and carry on.
+struct LimitPlan: Codable, Hashable {
+    enum Mode: String, Codable, CaseIterable, Identifiable {
+        case ask, mostQuota, chain, wait
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .ask: "Avisarme y decidir yo"
+            case .mostQuota: "Pasar a la suscripción con más cuota"
+            case .chain: "Pasar a las que elija, en orden"
+            case .wait: "Esperar a que se reinicie y seguir"
+            }
+        }
+    }
+    var mode: Mode
+    /// For `.chain`: subscriptions and models to try, in order (one that's also out of quota is skipped;
+    /// when none is left the thread waits for the reset).
+    var targets: [FallbackTarget] = []
+
+    static let ask = LimitPlan(mode: .ask)
+}
+
+struct FallbackTarget: Codable, Hashable, Identifiable {
+    var id = UUID()
+    var accountId: UUID
+    var model: String
+}
+
 struct ThreadRecord: Codable {
     var id: UUID
     var projectId: UUID
@@ -167,6 +196,8 @@ struct ThreadRecord: Codable {
     var worktree: WorktreeInfo?
     var pullRequest: PullRequestInfo?
     var comparisonId: UUID?
+    var limitPlan: LimitPlan?
+    var resumeAt: Date?
 }
 
 /// Where a thread title comes from: first message (provisional), AI topic, or the user.
@@ -194,6 +225,10 @@ final class ThreadModel: Identifiable {
     var pullRequest: PullRequestInfo?
     /// Set when the thread is one of several agents doing the same task (see `Comparison`).
     var comparisonId: UUID?
+    /// What to do when its agent runs out of quota; nil = the default in Settings.
+    var limitPlan: LimitPlan?
+    /// Waiting for the quota to reset: when to carry on (kept so it survives restarting Relevo).
+    var resumeAt: Date?
 
     static let untitled = "Nuevo hilo"
 
@@ -229,6 +264,8 @@ final class ThreadModel: Identifiable {
         worktree = r.worktree
         pullRequest = r.pullRequest
         comparisonId = r.comparisonId
+        limitPlan = r.limitPlan
+        resumeAt = r.resumeAt
     }
 
     var record: ThreadRecord {
@@ -236,7 +273,7 @@ final class ThreadModel: Identifiable {
                      segments: segments, items: items, mode: mode, selectedAccountId: selectedAccountId,
                      selectedModel: selectedModel, draft: draft.isEmpty ? nil : draft, selectedEffort: selectedEffort,
                      titleSource: titleSource, topicAttempts: topicAttempts, worktree: worktree, pullRequest: pullRequest,
-                     comparisonId: comparisonId)
+                     comparisonId: comparisonId, limitPlan: limitPlan, resumeAt: resumeAt)
     }
 
     var lastKind: ProviderKind? { segments.last?.kind }
@@ -274,7 +311,10 @@ struct AccountStatus: Codable, Equatable {
 }
 
 struct AppSettings: Codable, Equatable {
+    /// Older on/off for relaying on a limit; `limitPlan` replaces it (and keeps it in step for older iPhones).
     var autoRelay: Bool = false
+    /// Default for threads without their own plan.
+    var limitPlan: LimitPlan? = nil
     var defaultMode: PermissionMode = .ask
     var refreshMinutes: Int = 10
     var defaultAccountId: UUID? = nil
@@ -309,6 +349,9 @@ struct AppSettings: Codable, Equatable {
     var mcpPort: Int = 47821
     var mcpFullAccess: Bool = false
 
+    /// The default plan, from the older switch when it was never set.
+    var defaultLimitPlan: LimitPlan { limitPlan ?? LimitPlan(mode: autoRelay ? .mostQuota : .ask) }
+
     init() {}
 
     /// Tolerant decoding: settings saved by older versions keep working when fields are added.
@@ -316,6 +359,7 @@ struct AppSettings: Codable, Equatable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let d = AppSettings()
         autoRelay = (try? c.decodeIfPresent(Bool.self, forKey: .autoRelay)) ?? d.autoRelay
+        limitPlan = try? c.decodeIfPresent(LimitPlan.self, forKey: .limitPlan)
         defaultMode = (try? c.decodeIfPresent(PermissionMode.self, forKey: .defaultMode)) ?? d.defaultMode
         refreshMinutes = (try? c.decodeIfPresent(Int.self, forKey: .refreshMinutes)) ?? d.refreshMinutes
         defaultAccountId = try? c.decodeIfPresent(UUID.self, forKey: .defaultAccountId)

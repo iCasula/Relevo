@@ -103,6 +103,17 @@ RELEVO_DATA_DIR=/tmp/relevo-copy .build/debug/Relevo --selftest usagereport     
 RELEVO_DATA_DIR=/tmp/relevo-copy .build/debug/Relevo --selftest usageui /tmp/usage                     # window PNGs, light and dark
 ```
 
+## When the quota runs out
+
+Each thread can say what to do when its agent runs out of quota (or the service isn't available), from the model menu on the Mac or the iPhone; threads that don't say use the default in Settings › General:
+
+- **Avisarme y decidir yo:** the limit banner offers the other subscriptions.
+- **Pasar a la suscripción con más cuota.**
+- **Pasar a las que elija, en orden:** one subscription · model, or a list ("Varias, en orden…"); the ones that are also out are skipped.
+- **Esperar a que se reinicie y seguir:** at the reset time (or as soon as the quota is back, when the provider doesn't say when), the same agent is asked to carry on where it left off. Its session keeps the whole conversation, half-done work included, and the queue goes on after it. The wait survives restarting Relevo; if the Mac was asleep, it carries on when it wakes.
+
+Before relaying, the banner says where the thread is going, with 10 seconds to stop it ("No relevar") or do it now; while waiting it says when it will carry on, with "Retomar ahora" and "No esperar". A list with nothing left, or no other subscription with quota, falls back to waiting.
+
 ## Background tasks
 
 When a Claude agent leaves something running after its turn (tests, a build, a server, with Claude Code's background commands), the thread says it's **waiting**, not working: "Esperando a una tarea en segundo plano", with what and for how long, on the Mac (transcript and sidebar) and the iPhone. When the task ends the agent picks up on its own; Relevo shows that turn as working, notes why it started, and records its usage and changes like any other. Closing the agent's session (relaying it to another subscription, for instance) ends its background tasks too, and the thread says so.
@@ -138,6 +149,7 @@ RELEVO_MCP_TOKEN=test .build/debug/Relevo --selftest mcp # initialize, tools, a 
 .build/debug/Relevo --selftest turnchanges /tmp/tc       # a real agent's turn: changes recorded, restored, agent told, undone
 .build/debug/Relevo --selftest prwatch                   # the PR watcher's decisions over a sequence of PR states
 .build/debug/Relevo --selftest background /tmp/bg        # a Claude agent waiting on a background command, then resuming on its own
+.build/debug/Relevo --selftest limitplan /tmp/lp         # simulated limits: list in order, most quota, nothing left, wait and carry on
 .build/debug/Relevo --selftest followscroll              # the transcript follows the last line and lets go when you scroll up
 .build/debug/Relevo --selftest commitmsg /tmp/cm         # commit message and PR body from the utility model
 .build/debug/Relevo --selftest workspaceui /tmp/ui /tmp/ui/ws   # diff, commit, comparison, actions and settings rendered to PNGs

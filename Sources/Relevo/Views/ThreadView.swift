@@ -485,6 +485,38 @@ struct SuggestionBar: View {
     }
 }
 
+/// In the limit banner: the relay about to happen (with a countdown to stop it) or the wait for the reset.
+struct LimitPlanStatus: View {
+    @Environment(AppStore.self) private var store
+    let runtime: ThreadRuntime
+
+    var body: some View {
+        if let pending = runtime.pendingRelay, let target = store.account(pending.accountId) {
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                let seconds = max(0, Int(pending.at.timeIntervalSince(context.date).rounded(.up)))
+                HStack(spacing: 8) {
+                    Image(systemName: "arrow.triangle.2.circlepath").foregroundStyle(.secondary)
+                    Text("Pasa a **\(target.name) · \(store.modelName(target, pending.model))** en \(seconds) s, con todo el contexto")
+                        .font(.callout)
+                    Spacer()
+                    Button("Ahora") { runtime.relayNow() }
+                        .buttonStyle(.borderedProminent)
+                    Button("No relevar") { runtime.cancelPendingRelay() }
+                }
+            }
+        } else if let at = runtime.thread.resumeAt {
+            HStack(spacing: 8) {
+                Image(systemName: "clock").foregroundStyle(.secondary)
+                Text("Seguirá \(Formatters.reset(at) ?? "cuando se reinicie la cuota") con el mismo agente, donde lo dejó")
+                    .font(.callout)
+                Spacer()
+                Button("Retomar ahora") { Task { await runtime.resumeAfterReset(force: true) } }
+                Button("No esperar") { runtime.cancelResume() }
+            }
+        }
+    }
+}
+
 struct LimitBanner: View {
     @Environment(AppStore.self) private var store
     let limit: LimitNotice
@@ -521,12 +553,14 @@ struct LimitBanner: View {
                 }
                 Spacer()
                 Button {
+                    runtime.cancelPendingRelay()
                     runtime.limit = nil
                 } label: {
                     Image(systemName: "xmark")
                 }
                 .buttonStyle(.borderless)
             }
+            LimitPlanStatus(runtime: runtime)
             if let progress = WorkState.whereLeftOff(thread: runtime.thread, store: store) {
                 Label("Iba por: \(progress)", systemImage: "point.topleft.down.to.point.bottomright.curvepath")
                     .font(.caption)

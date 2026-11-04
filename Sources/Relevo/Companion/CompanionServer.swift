@@ -266,6 +266,19 @@ final class CompanionPeer {
         case .relay(let id, let accountId, let model):
             guard let t = thread(id), let account = store.account(accountId) else { return }
             store.runtime(for: t).relay(to: account, model: model)
+        case .setLimitPlan(let id, let plan):
+            guard let t = thread(id) else { return }
+            t.limitPlan = plan.flatMap { CompanionMapper.limitPlan($0) }
+            store.save(t)
+        case .limitAction(let id, let action):
+            guard let t = thread(id) else { return }
+            let rt = store.runtime(for: t)
+            switch action {
+            case .relayNow: rt.relayNow()
+            case .cancelRelay: rt.cancelPendingRelay()
+            case .resumeNow: Task { await rt.resumeAfterReset(force: true) }
+            case .cancelResume: rt.cancelResume()
+            }
         case .newThread(let projectId, let requestId):
             guard let project = store.project(projectId), let t = store.newThread(in: project, select: false) else {
                 send(.toast("No se pudo crear el hilo"))

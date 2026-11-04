@@ -31,6 +31,14 @@ public enum ClientMessage: Codable, Sendable {
     case fetchImage(requestId: UUID, threadId: UUID, path: String, maxPixel: Int)
     /// Show a path the thread mentions on the Mac (Quick Look for files, Finder for folders).
     case openOnMac(threadId: UUID, path: String)
+    /// What the thread does when its agent runs out of quota (nil = the default in the Mac's settings).
+    case setLimitPlan(threadId: UUID, plan: RemoteLimitPlan?)
+    /// About the limit in progress: relay now, don't relay, carry on now, don't wait.
+    case limitAction(threadId: UUID, action: LimitAction)
+}
+
+public enum LimitAction: String, Codable, Sendable {
+    case relayNow, cancelRelay, resumeNow, cancelResume
 }
 
 public enum SuggestionAction: String, Codable, Sendable {

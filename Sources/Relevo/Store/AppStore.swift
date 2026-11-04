@@ -80,6 +80,8 @@ final class AppStore {
         CompanionServer.shared.attach(self)
         Task { await UsageImporter.run(store: self) }
         prWatcher.start()
+        // Threads that were waiting for a quota reset when Relevo quit carry on waiting.
+        for t in threads where t.resumeAt != nil { runtime(for: t).restoreScheduledResume() }
         MCPServer.shared.attach(self)
         applyCaptureShortcut()
         if Self.canNotify {
@@ -344,6 +346,14 @@ final class AppStore {
     func markExhausted(_ accountId: UUID, until: Date?) {
         var s = status[accountId] ?? AccountStatus()
         s.exhaustedUntil = until ?? Date().addingTimeInterval(15 * 60)
+        status[accountId] = s
+        refreshUsageSoon(accountId)
+    }
+
+    /// The quota is back (its reset time passed and the probe says so).
+    func clearExhausted(_ accountId: UUID) {
+        guard var s = status[accountId], s.exhaustedUntil != nil else { return }
+        s.exhaustedUntil = nil
         status[accountId] = s
         refreshUsageSoon(accountId)
     }

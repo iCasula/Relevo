@@ -2,6 +2,44 @@ import SwiftUI
 import RelevoProtocol
 
 /// The agent hit a limit (or its plan has no access): continue with another subscription in one tap.
+/// In the limit card: the relay about to happen (with a countdown to stop it) or the wait for the reset.
+private struct LimitPlanStatus: View {
+    let viewModel: ThreadViewModel
+
+    var body: some View {
+        if let pending = viewModel.runtime?.pendingRelay, let target = viewModel.account(pending.accountId) {
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                let seconds = max(0, Int(pending.at.timeIntervalSince(context.date).rounded(.up)))
+                VStack(alignment: .leading, spacing: 8) {
+                    Label("Pasa a \(target.name) · \(target.shortModelName(pending.model)) en \(seconds) s, con todo el contexto",
+                          systemImage: "arrow.triangle.2.circlepath")
+                        .font(.footnote)
+                    HStack {
+                        Button("Ahora") { viewModel.limitAction(.relayNow) }
+                            .buttonStyle(.glassProminent)
+                        Button("No relevar") { viewModel.limitAction(.cancelRelay) }
+                            .buttonStyle(.glass)
+                    }
+                    .font(.footnote)
+                }
+            }
+        } else if let at = viewModel.runtime?.resumeAt {
+            VStack(alignment: .leading, spacing: 8) {
+                Label("Seguirá " + (ResetFormatter.string(at) ?? "cuando se reinicie la cuota") + " con el mismo agente, donde lo dejó",
+                      systemImage: "clock")
+                    .font(.footnote)
+                HStack {
+                    Button("Retomar ahora") { viewModel.limitAction(.resumeNow) }
+                        .buttonStyle(.glass)
+                    Button("No esperar") { viewModel.limitAction(.cancelResume) }
+                        .buttonStyle(.glass)
+                }
+                .font(.footnote)
+            }
+        }
+    }
+}
+
 struct LimitCard: View {
     let limit: RemoteLimit
     let viewModel: ThreadViewModel
@@ -22,6 +60,7 @@ struct LimitCard: View {
                 Image(systemName: limit.isNoPlan ? "creditcard.trianglebadge.exclamationmark" : "hourglass")
                     .foregroundStyle(.orange)
             }
+            LimitPlanStatus(viewModel: viewModel)
             if candidates.isEmpty {
                 Text("No hay otras suscripciones con cuota disponible ahora mismo.")
                     .font(.caption)

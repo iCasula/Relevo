@@ -229,14 +229,7 @@ struct GeneralSettings: View {
     var body: some View {
         Form {
             Section("Relevo entre agentes") {
-                Toggle(isOn: Binding(get: { store.settings.autoRelay }, set: { v in store.updateSettings { $0.autoRelay = v } })) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Relevo automático al alcanzar un límite")
-                        Text("Si un agente se queda sin cuota, Relevo reenvía la petición (con todo el contexto) a la suscripción con más cuota libre.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
+                LimitPlanSetting()
                 Picker("Suscripción por defecto", selection: Binding(get: { store.settings.defaultAccountId }, set: { v in store.updateSettings { $0.defaultAccountId = v } })) {
                     Text("La que tenga más cuota libre").tag(UUID?.none)
                     ForEach(store.enabledAccounts) { a in Text(a.name).tag(UUID?.some(a.id)) }
@@ -416,5 +409,47 @@ struct NewProjectSheet: View {
         if sharedMemory { store.setupSharedMemory(project) }
         store.newThread(in: project)
         dismiss()
+    }
+}
+
+/// Settings › General: what threads do by default when their agent runs out of quota.
+private struct LimitPlanSetting: View {
+    @Environment(AppStore.self) private var store
+    @State private var editing = false
+
+    var body: some View {
+        let plan = store.settings.defaultLimitPlan
+        VStack(alignment: .leading, spacing: 6) {
+            Picker(selection: Binding(get: { plan.mode }, set: { mode in
+                if mode == .chain && plan.targets.isEmpty { editing = true; return }
+                save(LimitPlan(mode: mode, targets: plan.targets))
+            })) {
+                ForEach(LimitPlan.Mode.allCases) { Text($0.label).tag($0) }
+            } label: {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Si se acaba la cuota")
+                    Text("Lo que hace un hilo cuando su agente se queda sin cuota, salvo que el hilo tenga lo suyo (en su menú de modelo). Al relevar, pasa la petición con todo el contexto; al esperar, el mismo agente sigue donde lo dejó cuando se reinicia.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if plan.mode == .chain {
+                HStack {
+                    Text(plan.summary(store)).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                    Spacer()
+                    Button("Editar orden…") { editing = true }
+                }
+            }
+        }
+        .sheet(isPresented: $editing) {
+            LimitPlanEditor(title: "Si se acaba la cuota (por defecto)", plan: LimitPlan(mode: .chain, targets: plan.targets)) { save($0) }
+        }
+    }
+
+    private func save(_ plan: LimitPlan) {
+        store.updateSettings {
+            $0.limitPlan = plan
+            $0.autoRelay = plan.mode == .mostQuota || plan.mode == .chain
+        }
     }
 }

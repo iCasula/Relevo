@@ -135,6 +135,7 @@ struct ComposerView: View {
 struct ModelPicker: View {
     @Environment(AppStore.self) private var store
     @Bindable var thread: ThreadModel
+    @State private var editingLimitPlan = false
 
     var body: some View {
         let account = store.account(thread.selectedAccountId) ?? store.preferredAccount()
@@ -160,6 +161,8 @@ struct ModelPicker: View {
                     }
                 }
             }
+            Divider()
+            LimitPlanMenu(thread: thread, editing: $editingLimitPlan)
             Divider()
             SettingsLink { Text("Gestionar suscripciones…") }
         } label: {
@@ -188,6 +191,13 @@ struct ModelPicker: View {
         .menuIndicator(.hidden)
         .fixedSize()
         .help(switchHelp(account))
+        .sheet(isPresented: $editingLimitPlan) {
+            LimitPlanEditor(title: "Si se acaba la cuota en este hilo",
+                            plan: thread.limitPlan ?? LimitPlan(mode: .chain, targets: store.settings.defaultLimitPlan.targets)) { plan in
+                thread.limitPlan = plan
+                store.save(thread)
+            }
+        }
     }
 
     private func currentModel(_ account: Account?) -> String {

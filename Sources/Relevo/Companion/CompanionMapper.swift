@@ -135,8 +135,22 @@ enum CompanionMapper {
             queuePaused: rt.queuePaused,
             usage: usage.map { RemoteWindow(id: $0.id, label: $0.label, percent: $0.percent, resetsAt: $0.resetsAt, detail: $0.detail) },
             usageNote: usage.isEmpty ? status?.note : nil,
-            backgroundTasks: rt.backgroundTasks.map { RemoteBackgroundTask(id: $0.id, description: $0.description, startedAt: $0.startedAt) }
+            backgroundTasks: rt.backgroundTasks.map { RemoteBackgroundTask(id: $0.id, description: $0.description, startedAt: $0.startedAt) },
+            limitPlan: t.limitPlan.map { limitPlan($0, store: store) },
+            defaultLimitPlan: limitPlan(store.settings.defaultLimitPlan, store: store),
+            pendingRelay: rt.pendingRelay.map { RemotePendingRelay(accountId: $0.accountId, model: $0.model, at: $0.at) },
+            resumeAt: t.resumeAt
         )
+    }
+
+    static func limitPlan(_ p: LimitPlan, store: AppStore) -> RemoteLimitPlan {
+        RemoteLimitPlan(mode: p.mode.rawValue, targets: p.targets.map { RemoteCandidate(accountId: $0.accountId, model: $0.model) },
+                        summary: p.summary(store))
+    }
+
+    static func limitPlan(_ r: RemoteLimitPlan) -> LimitPlan? {
+        guard let mode = LimitPlan.Mode(rawValue: r.mode) else { return nil }
+        return LimitPlan(mode: mode, targets: r.targets.map { FallbackTarget(accountId: $0.accountId, model: $0.model) })
     }
 
     static func item(_ i: ChatItem) -> RemoteItem {

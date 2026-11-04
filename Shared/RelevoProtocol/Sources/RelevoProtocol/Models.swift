@@ -348,12 +348,24 @@ public struct RemoteRuntime: Codable, Hashable, Sendable {
     /// What the agent left running after its turn (tests, a build…): it isn't working, it's waiting,
     /// and picks up on its own when they finish. Older Macs don't send it.
     public var backgroundTasks: [RemoteBackgroundTask]?
+    /// The thread's own plan for running out of quota (nil = the Mac's default, described in `defaultLimitPlan`).
+    public var limitPlan: RemoteLimitPlan?
+    public var defaultLimitPlan: RemoteLimitPlan?
+    /// Out of quota and about to move to another subscription at `at` (can be stopped).
+    public var pendingRelay: RemotePendingRelay?
+    /// Waiting for the quota to reset; the same agent carries on at this time.
+    public var resumeAt: Date?
 
     public init(isRunning: Bool, statusLine: String?, limit: RemoteLimit?, suggestion: RemoteSuggestion?, mode: RemoteMode,
                 selectedAccountId: UUID?, selectedModel: String?, selectedEffort: String?, relayCandidates: [RemoteCandidate],
                 queued: [RemoteQueuedMessage]? = nil, queuePaused: Bool? = nil, usage: [RemoteWindow]? = nil, usageNote: String? = nil,
-                backgroundTasks: [RemoteBackgroundTask]? = nil) {
+                backgroundTasks: [RemoteBackgroundTask]? = nil, limitPlan: RemoteLimitPlan? = nil, defaultLimitPlan: RemoteLimitPlan? = nil,
+                pendingRelay: RemotePendingRelay? = nil, resumeAt: Date? = nil) {
         self.backgroundTasks = backgroundTasks
+        self.limitPlan = limitPlan
+        self.defaultLimitPlan = defaultLimitPlan
+        self.pendingRelay = pendingRelay
+        self.resumeAt = resumeAt
         self.queued = queued
         self.queuePaused = queuePaused
         self.usage = usage
@@ -367,6 +379,33 @@ public struct RemoteRuntime: Codable, Hashable, Sendable {
         self.selectedModel = selectedModel
         self.selectedEffort = selectedEffort
         self.relayCandidates = relayCandidates
+    }
+}
+
+/// What a thread does when its agent runs out of quota: `ask`, `mostQuota`, `chain` (through `targets` in
+/// order) or `wait` (for the reset, then the same agent carries on).
+public struct RemoteLimitPlan: Codable, Hashable, Sendable {
+    public var mode: String
+    public var targets: [RemoteCandidate]
+    /// Described by the Mac ("Codex · GPT-6-Astra, luego …").
+    public var summary: String?
+
+    public init(mode: String, targets: [RemoteCandidate] = [], summary: String? = nil) {
+        self.mode = mode
+        self.targets = targets
+        self.summary = summary
+    }
+}
+
+public struct RemotePendingRelay: Codable, Hashable, Sendable {
+    public var accountId: UUID
+    public var model: String
+    public var at: Date
+
+    public init(accountId: UUID, model: String, at: Date) {
+        self.accountId = accountId
+        self.model = model
+        self.at = at
     }
 }
 

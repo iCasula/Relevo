@@ -21,6 +21,19 @@ final class ThreadRuntime {
     var composerSends = 0
     /// What the agent left running after its turn (it isn't working, it's waiting; it picks up on its own).
     var backgroundTasks: [BackgroundTask] = []
+    /// Out of quota, about to move to another subscription (shown with a countdown so you can stop or change it).
+    var pendingRelay: PendingRelay?
+    @ObservationIgnored private var relayWork: DispatchWorkItem?
+    @ObservationIgnored private var resumeTask: Task<Void, Never>?
+
+    struct PendingRelay: Equatable {
+        var accountId: UUID
+        var model: String
+        var at: Date
+    }
+
+    /// Seconds between announcing a relay and doing it.
+    static let relayDelay: TimeInterval = 10
 
     struct QueuedMessage: Identifiable, Equatable {
         let id = UUID()
@@ -139,6 +152,9 @@ final class ThreadRuntime {
     func send(_ raw: String) {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
+        // A new message replaces whatever the thread was going to do about a limit.
+        cancelPendingRelay()
+        cancelResume()
         if isRunning {
             queue.append(QueuedMessage(text: text))
             return
@@ -249,6 +265,8 @@ final class ThreadRuntime {
 
     /// Re-sends the last user request to another subscription, carrying the whole context and the trace.
     func relay(to account: Account, model: String) {
+        cancelPendingRelay()
+        cancelResume()
         if isRunning {
             // Wait for the stop: with the same subscription the session is reused, and the stopped turn's
             // late end would otherwise be taken for the end of the relayed one.
@@ -707,14 +725,14 @@ final class ThreadRuntime {
         case .limit:
             limit = LimitNotice(accountId: accountId, message: failure.message, resetsAt: failure.resetsAt)
             store.markExhausted(accountId, until: failure.resetsAt)
-            if store.settings.autoRelay { autoRelay(from: accountId) }
+            applyLimitPlan(from: accountId, failure: failure)
         case .unavailable:
             limit = LimitNotice(accountId: accountId, message: failure.message, resetsAt: nil, isCapacity: true)
-            if store.settings.autoRelay { autoRelay(from: accountId) }
+            applyLimitPlan(from: accountId, failure: failure)
         case .noPlan:
             limit = LimitNotice(accountId: accountId, message: failure.message, resetsAt: nil, isNoPlan: true)
             store.markNoPlan(accountId)
-            if store.settings.autoRelay { autoRelay(from: accountId) }
+            applyLimitPlan(from: accountId, failure: failure)
         case .auth:
             let hint = account?.kind.usesAPIKey == true
                 ? "Añade tu API key en Ajustes › Suscripciones › \(account?.name ?? "")"
@@ -726,15 +744,135 @@ final class ThreadRuntime {
         }
     }
 
-    private func autoRelay(from accountId: UUID) {
+    // MARK: - Out of quota
+
+    #if DEBUG
+    /// Selftests: as if the agent had just hit this failure.
+    func simulateFailure(_ failure: AgentFailure, accountId: UUID) { handleFailure(failure, accountId: accountId) }
+    #endif
+
+    /// The thread's own plan, or the default in Settings.
+    var limitPlan: LimitPlan { thread.limitPlan ?? store.settings.defaultLimitPlan }
+
+    private func applyLimitPlan(from accountId: UUID, failure: AgentFailure) {
         autoRelayed.insert(accountId)
-        guard let next = store.relayCandidates(excluding: autoRelayed).first else {
-            append(ChatItem(id: UUID().uuidString, kind: .notice, text: "Relevo automático: no hay otra suscripción con cuota disponible"))
+        let plan = limitPlan
+        switch plan.mode {
+        case .ask:
+            return
+        case .wait:
+            waitForReset(accountId: accountId, failure: failure, reason: nil)
+        case .mostQuota:
+            if let next = store.relayCandidates(excluding: autoRelayed).first {
+                proposeRelay(to: next.account, model: next.model)
+            } else {
+                waitForReset(accountId: accountId, failure: failure, reason: "No hay otra suscripción con cuota")
+            }
+        case .chain:
+            if let target = nextTarget(in: plan), let account = store.account(target.accountId) {
+                proposeRelay(to: account, model: target.model)
+            } else {
+                waitForReset(accountId: accountId, failure: failure, reason: "Ninguna suscripción de tu lista tiene cuota")
+            }
+        }
+    }
+
+    /// The first subscription of the list that can take the work now (skipping the ones already out).
+    private func nextTarget(in plan: LimitPlan) -> FallbackTarget? {
+        plan.targets.first { t in
+            !autoRelayed.contains(t.accountId) && store.enabledAccounts.contains { $0.id == t.accountId }
+                && store.status[t.accountId]?.isUsable != false
+        }
+    }
+
+    /// Announces the relay, and does it after a few seconds unless you stop it or pick another one.
+    private func proposeRelay(to account: Account, model: String) {
+        relayWork?.cancel()
+        pendingRelay = PendingRelay(accountId: account.id, model: model, at: Date().addingTimeInterval(Self.relayDelay))
+        let work = DispatchWorkItem { [weak self] in self?.relayNow() }
+        relayWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.relayDelay, execute: work)
+    }
+
+    func relayNow() {
+        relayWork?.cancel()
+        guard let pending = pendingRelay, let account = store.account(pending.accountId) else { pendingRelay = nil; return }
+        pendingRelay = nil
+        guard !isRunning else { return }
+        append(ChatItem(id: UUID().uuidString, kind: .notice, text: "Relevo automático a \(account.name) · \(store.modelName(account, pending.model))"))
+        relay(to: account, model: pending.model)
+    }
+
+    func cancelPendingRelay() {
+        relayWork?.cancel()
+        pendingRelay = nil
+    }
+
+    /// Waits for the quota to come back and then asks the same agent to carry on: its session keeps the
+    /// whole conversation, including what it left half done. The queue goes on after that.
+    private func waitForReset(accountId: UUID, failure: AgentFailure, reason: String?) {
+        guard failure.kind != .noPlan else {
+            if let reason { append(ChatItem(id: UUID().uuidString, kind: .notice, text: "\(reason), y este plan no se reinicia: elige otro agente.")) }
             return
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-            guard let self, !self.isRunning else { return }
-            self.relay(to: next.account, model: next.model)
+        let exhaustedWindow = store.status[accountId]?.windows.filter { $0.percent >= 99.5 }.compactMap(\.resetsAt).max()
+        let fallback: TimeInterval = failure.kind == .unavailable ? 5 * 60 : 15 * 60
+        let at = (failure.resetsAt ?? exhaustedWindow ?? Date().addingTimeInterval(fallback)).addingTimeInterval(60)
+        if let reason {
+            append(ChatItem(id: UUID().uuidString, kind: .notice, text: "\(reason): espero a que se reinicie la cuota y sigo \(Formatters.reset(at) ?? "")"))
+        }
+        scheduleResume(at: at)
+    }
+
+    private func scheduleResume(at date: Date) {
+        thread.resumeAt = date
+        store.save(thread)
+        resumeTask?.cancel()
+        // Checked every 30 s against the clock (a sleeping task would oversleep when the Mac sleeps).
+        resumeTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 30_000_000_000)
+                guard let self, let at = self.thread.resumeAt else { return }
+                if Date() >= at { await self.resumeAfterReset(); return }
+            }
+        }
+    }
+
+    /// After a restart of Relevo: picks up a wait that was pending.
+    func restoreScheduledResume() {
+        guard let at = thread.resumeAt, resumeTask == nil else { return }
+        scheduleResume(at: max(at, Date().addingTimeInterval(30)))
+    }
+
+    /// Carries on now (also the "Retomar ahora" button): if the quota still isn't back, waits again.
+    func resumeAfterReset(force: Bool = false) async {
+        resumeTask?.cancel()
+        resumeTask = nil
+        guard let account = store.account(thread.selectedAccountId) ?? store.account(limit?.accountId) else { cancelResume(); return }
+        if !force {
+            let probe = await UsageService.probe(account)
+            let stillOut = probe.status.windows.filter { $0.percent >= 99.5 && ($0.resetsAt ?? .distantFuture) > Date() }
+            if !stillOut.isEmpty {
+                scheduleResume(at: (stillOut.compactMap(\.resetsAt).max() ?? Date().addingTimeInterval(15 * 60)).addingTimeInterval(60))
+                return
+            }
+        }
+        guard thread.resumeAt != nil || force, !isRunning else { return }
+        thread.resumeAt = nil
+        store.clearExhausted(account.id)
+        limit = nil
+        queuePaused = false
+        autoRelayed.removeAll()
+        append(ChatItem(id: UUID().uuidString, kind: .notice, text: "La cuota de \(account.name) se ha reiniciado: el agente retoma donde lo dejó"))
+        send("Te quedaste sin cuota a mitad de lo que te pedí y ya se ha reiniciado: sigue exactamente donde lo dejaste.")
+    }
+
+    func cancelResume() {
+        resumeTask?.cancel()
+        resumeTask = nil
+        if thread.resumeAt != nil {
+            thread.resumeAt = nil
+            store.save(thread)
         }
     }
 

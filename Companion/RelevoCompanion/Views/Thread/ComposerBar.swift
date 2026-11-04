@@ -121,6 +121,7 @@ private struct ModelMenu: View {
             } else if let note = viewModel.usageNote {
                 Section("Cuota") { Text(note) }
             }
+            LimitPlanMenu(viewModel: viewModel)
             ForEach(viewModel.accounts) { account in
                 Section(sectionTitle(account)) {
                     ForEach(account.models) { model in
@@ -176,6 +177,48 @@ private struct ModelMenu: View {
     private func sectionTitle(_ account: RemoteAccount) -> String {
         let who = account.status?.email ?? account.agentName
         return [account.name, who, account.availabilityNote].compactMap { $0 }.joined(separator: " · ")
+    }
+}
+
+/// "Si se acaba la cuota" in the model menu: the Mac's default, the subscription with most quota, one
+/// subscription·model, waiting for the reset, or asking. Lists of several are edited on the Mac.
+private struct LimitPlanMenu: View {
+    let viewModel: ThreadViewModel
+
+    var body: some View {
+        let own = viewModel.runtime?.limitPlan
+        let effective = own ?? viewModel.runtime?.defaultLimitPlan
+        if viewModel.runtime?.defaultLimitPlan != nil {   // older Macs don't support it
+            Menu {
+                pick("Como en el Mac (\(viewModel.runtime?.defaultLimitPlan?.summary ?? ""))", own == nil) { viewModel.setLimitPlan(nil) }
+                pick("Pasar a la de más cuota", own?.mode == "mostQuota") { viewModel.setLimitPlan(RemoteLimitPlan(mode: "mostQuota")) }
+                Menu("Pasar a…") {
+                    ForEach(viewModel.accounts) { account in
+                        Section(account.name) {
+                            ForEach(account.models) { model in
+                                let target = RemoteCandidate(accountId: account.id, model: model.id)
+                                pick(model.name, own?.mode == "chain" && own?.targets == [target]) {
+                                    viewModel.setLimitPlan(RemoteLimitPlan(mode: "chain", targets: [target]))
+                                }
+                            }
+                        }
+                    }
+                }
+                if let own, own.mode == "chain", own.targets.count > 1 {
+                    pick("En orden: \(own.summary ?? "")", true) {}
+                }
+                pick("Esperar a que se reinicie y seguir", own?.mode == "wait") { viewModel.setLimitPlan(RemoteLimitPlan(mode: "wait")) }
+                pick("Avisarme y decidir yo", own?.mode == "ask") { viewModel.setLimitPlan(RemoteLimitPlan(mode: "ask")) }
+            } label: {
+                Label("Si se acaba la cuota: \(effective?.summary ?? "")", systemImage: "arrow.triangle.2.circlepath")
+            }
+        }
+    }
+
+    private func pick(_ title: String, _ selected: Bool, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            if selected { Label(title, systemImage: "checkmark") } else { Text(title) }
+        }
     }
 }
 
