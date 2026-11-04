@@ -37,6 +37,7 @@ enum SelfTest {
             case "mcpserve" where rest.count >= 2: await mcpServe(seconds: Double(rest[1]) ?? 120, full: rest.count > 2 && rest[2] == "full")
             case "prwatch": prWatch()
             case "followscroll": await followScroll()
+            case "background" where rest.count >= 2: await background(cwd: rest[1])
             case "commitmsg" where rest.count >= 2: await commitMessage(dir: rest[1])
             case "turnchanges" where rest.count >= 2: await turnChanges(dir: rest[1])
             case "workspaceui" where rest.count >= 3: await workspaceUI(dir: rest[1], out: rest[2])
@@ -99,6 +100,8 @@ enum SelfTest {
             case .notice(let n): out("NOTICE \(n)")
             case .failure(let f): out("\nFAILURE \(f.kind) \(f.message.prefix(400))")
             case .turnFinished: out("\nTURN FINISHED"); done = true
+            case .backgroundTasks(let tasks): out("BACKGROUND \(tasks.map(\.description))")
+            case .turnStarted(let reason): out("TURN STARTED BY THE AGENT \(reason ?? "")")
             }
         }
         do { try session.start() } catch { out("START ERROR \(error.localizedDescription)"); return }
@@ -572,6 +575,10 @@ enum SelfTest {
                     Text(item.text).font(.body)
                     TurnFooter(item: item, runtime: rt, showUsage: true)
                 }.environment(store).padding(20).frame(width: 560), scheme: scheme, to: "\(prefix)-footer-\(name).png", wait: 0.6)
+                await render(VStack(alignment: .leading, spacing: 12) {
+                    Text("Duo: estoy repitiendo con el arreglo los 6 tests de UI. Te aviso en cuanto tenga el resultado.").font(.body)
+                    WaitingIndicator(tasks: [BackgroundTask(id: "b1", description: "Run the 6 UI tests with the fix", startedAt: Date().addingTimeInterval(-370))])
+                }.environment(store).padding(20).frame(width: 560), scheme: scheme, to: "\(prefix)-waiting-\(name).png", wait: 0.6)
                 await render(DiffSheet(title: "Cambios de este turno", path: wt, from: before, to: after, runtime: rt, turnItem: item)
                     .environment(store).frame(width: 1040, height: 600), scheme: scheme, to: "\(prefix)-diff-\(name).png", wait: 1.5)
                 await render(CommitSheet(thread: thread, runtime: rt).environment(store).frame(width: 640), scheme: scheme, to: "\(prefix)-commit-\(name).png", wait: 1.5)
@@ -671,6 +678,41 @@ enum SelfTest {
         out("mensaje (\(String(format: "%.1f", Date().timeIntervalSince(start))) s):\n---\n\(message)\n---")
         let pr = CommitWriter.pullRequest(from: message, thread: thread, store: store)
         out("PR: \(pr.title)\n\(pr.body)\n---")
+    }
+
+    /// A Claude agent that leaves a command running in the background: the thread shows it as waiting, and
+    /// when the command ends the agent's own turn shows as working and is recorded like any other.
+    ///   --selftest background <cwd>   (RELEVO_TEST_CONFIG_DIR = Claude config folder)
+    static func background(cwd: String) async {
+        let store = AppStore.shared
+        let account = Account(kind: .claude, name: "Claude test", configDir: ProcessInfo.processInfo.environment["RELEVO_TEST_CONFIG_DIR"])
+        store.accounts = [account]
+        let project = Project(name: "background-test", path: cwd)
+        store.projects = [project]
+        let thread = ThreadModel(projectId: project.id, mode: .full, accountId: account.id, model: "haiku")
+        store.threads = [thread]
+        let rt = store.runtime(for: thread)
+        rt.send("Ejecuta en segundo plano (run_in_background) el comando `sleep 15; echo HECHO-BG` y termina tu turno diciendo solo «lanzado». Cuando el comando termine, responde solo con su salida.")
+        var sawWaiting = false, sawAgentTurn = false
+        let deadline = Date().addingTimeInterval(120)
+        var wasRunning = true
+        while Date() < deadline {
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            if !rt.isRunning, !rt.backgroundTasks.isEmpty, !sawWaiting {
+                sawWaiting = true
+                out("esperando: \(rt.backgroundTasks.map(\.description)) · trabajando=\(rt.isRunning)")
+            }
+            if rt.isRunning, !wasRunning, sawWaiting {
+                sawAgentTurn = true
+                out("el agente retoma solo: trabajando=true · aviso «\(thread.items.last { $0.kind == .notice }?.text ?? "-")»")
+            }
+            wasRunning = rt.isRunning
+            if sawAgentTurn, !rt.isRunning { break }
+        }
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        let replies = thread.items.filter { $0.kind == .assistant }.map { String($0.text.prefix(40)) }
+        out("respuestas: \(replies) · en segundo plano ahora: \(rt.backgroundTasks.count) · turnos con consumo: \(thread.items.filter { $0.usage != nil }.count)")
+        rt.closeSession()
     }
 
     /// The transcript's follow-the-last-line behaviour in a real (offscreen) window:  --selftest followscroll

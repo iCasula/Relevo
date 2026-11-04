@@ -171,6 +171,10 @@ struct ThreadRow: View {
                         .font(.caption)
                         .foregroundStyle(.tint)
                         .symbolEffect(.rotate, options: .repeat(.continuous))
+                } else if thread.isWaiting == true {
+                    Label("Esperando a una tarea en segundo plano", systemImage: "clock")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
         }

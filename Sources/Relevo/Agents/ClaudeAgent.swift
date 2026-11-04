@@ -24,6 +24,10 @@ final class ClaudeAgent: AgentSession {
     private var pendingControl: [String: (JSONObject?, String?) -> Void] = [:]
     private var controlCounter = 0
     private var turnActive = false
+    /// Background tasks by id, with when they were first seen (the CLI doesn't say when they started).
+    private var backgroundTasks: [String: BackgroundTask] = [:]
+    /// The background task whose completion will wake the agent up (for the note in the transcript).
+    private var finishedTask: String?
     private var pendingLimit: AgentFailure?
     private var closed = false
     private var gotOutput = false
@@ -171,6 +175,24 @@ final class ClaudeAgent: AgentSession {
             if o.str("subtype") == "init", let sid = o.str("session_id") {
                 sessionId = sid
                 onEvent?(.sessionStarted(sid))
+                // Every turn starts with an init. One we didn't ask for: the CLI woke itself up
+                // (a background task finished) and works on its own until its `result`.
+                if !turnActive {
+                    turnActive = true
+                    onEvent?(.turnStarted(reason: finishedTask.map { "Terminó en segundo plano: \($0). El agente retoma." }))
+                }
+                finishedTask = nil
+            } else if o.str("subtype") == "background_tasks_changed" {
+                var now: [String: BackgroundTask] = [:]
+                for t in o.objs("tasks") {
+                    guard let id = t.str("task_id") else { continue }
+                    let description = t.str("description") ?? t.str("task_type") ?? "tarea"
+                    now[id] = BackgroundTask(id: id, description: description, startedAt: backgroundTasks[id]?.startedAt ?? Date())
+                }
+                backgroundTasks = now
+                onEvent?(.backgroundTasks(now.values.sorted { $0.startedAt < $1.startedAt }))
+            } else if o.str("subtype") == "task_notification" {
+                if let id = o.str("task_id") { finishedTask = backgroundTasks[id]?.description ?? o.str("description") ?? "una tarea" }
             } else if o.str("subtype") == "api_retry" {
                 onEvent?(.status("Reintentando la llamada a la API…"))
             } else if o.str("subtype") == "compact_boundary" {

@@ -76,6 +76,8 @@ struct ThreadDetailView: View {
                 }
                 if viewModel.isRunning {
                     WorkingRow(text: viewModel.runtime?.statusLine)
+                } else if let tasks = viewModel.runtime?.backgroundTasks, !tasks.isEmpty {
+                    WaitingRow(tasks: tasks)
                 }
             }
             .padding(.horizontal, 16)
@@ -157,6 +159,42 @@ private struct WorkingRow: View {
                 .foregroundStyle(.secondary)
         }
         .padding(.vertical, 4)
+    }
+}
+
+/// The agent isn't working, it's waiting for something it left running (tests, a build…), and will pick up
+/// on its own when it finishes.
+private struct WaitingRow: View {
+    let tasks: [RemoteBackgroundTask]
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 30)) { context in
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: "clock")
+                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(tasks.count == 1 ? "Esperando a una tarea en segundo plano" : "Esperando a \(tasks.count) tareas en segundo plano")
+                        .font(.callout.weight(.medium))
+                        .foregroundStyle(.secondary)
+                    ForEach(tasks) { task in
+                        Text("\(task.description) · \(Self.elapsed(since: task.startedAt, now: context.date))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Text("El agente no está trabajando: retomará solo cuando termine.")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .padding(.vertical, 4)
+        }
+    }
+
+    static func elapsed(since start: Date, now: Date) -> String {
+        let minutes = Int(now.timeIntervalSince(start) / 60)
+        if minutes < 1 { return "ahora mismo" }
+        if minutes < 60 { return "\(minutes) min" }
+        return "\(minutes / 60) h \(minutes % 60) min"
     }
 }
 

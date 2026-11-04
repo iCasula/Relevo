@@ -103,6 +103,10 @@ RELEVO_DATA_DIR=/tmp/relevo-copy .build/debug/Relevo --selftest usagereport     
 RELEVO_DATA_DIR=/tmp/relevo-copy .build/debug/Relevo --selftest usageui /tmp/usage                     # window PNGs, light and dark
 ```
 
+## Background tasks
+
+When a Claude agent leaves something running after its turn (tests, a build, a server, with Claude Code's background commands), the thread says it's **waiting**, not working: "Esperando a una tarea en segundo plano", with what and for how long, on the Mac (transcript and sidebar) and the iPhone. When the task ends the agent picks up on its own; Relevo shows that turn as working, notes why it started, and records its usage and changes like any other. Closing the agent's session (relaying it to another subscription, for instance) ends its background tasks too, and the thread says so.
+
 ## Worktrees, parallel agents and reviewing changes
 
 - **A worktree per thread** (⌥⌘N, or the project's context menu): the thread gets its own folder under `~/.relevo/worktrees/<project>/` and its own branch `relevo/t-xxxxxx`, from the project's current commit (uncommitted changes in the project stay there). Several agents can then work on the same repository without stepping on each other. The **Git** toolbar menu merges the branch back into the one it came from (aborting on conflicts), opens the folder, or removes the worktree.
@@ -133,6 +137,8 @@ Settings copies the command for Claude Code (`claude mcp add --transport http re
 RELEVO_MCP_TOKEN=test .build/debug/Relevo --selftest mcp # initialize, tools, a call, read-only refusal, wrong token
 .build/debug/Relevo --selftest turnchanges /tmp/tc       # a real agent's turn: changes recorded, restored, agent told, undone
 .build/debug/Relevo --selftest prwatch                   # the PR watcher's decisions over a sequence of PR states
+.build/debug/Relevo --selftest background /tmp/bg        # a Claude agent waiting on a background command, then resuming on its own
+.build/debug/Relevo --selftest followscroll              # the transcript follows the last line and lets go when you scroll up
 .build/debug/Relevo --selftest commitmsg /tmp/cm         # commit message and PR body from the utility model
 .build/debug/Relevo --selftest workspaceui /tmp/ui /tmp/ui/ws   # diff, commit, comparison, actions and settings rendered to PNGs
 RELEVO_MCP_TOKEN=test .build/debug/Relevo --selftest mcpserve 120 [full]   # keep the MCP server up for a real client

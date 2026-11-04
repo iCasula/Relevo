@@ -122,9 +122,12 @@ public struct RemoteThreadSummary: Codable, Hashable, Identifiable, Sendable {
     /// Subscription of the latest segment (who answered last).
     public var accountId: UUID?
     public var preview: String?
+    /// Waiting for background tasks it left running (not working). Older Macs don't send it.
+    public var isWaiting: Bool?
 
     public init(id: UUID, projectId: UUID, title: String, updatedAt: Date, isRunning: Bool, needsApproval: Bool,
-                accountId: UUID?, preview: String?) {
+                accountId: UUID?, preview: String?, isWaiting: Bool? = nil) {
+        self.isWaiting = isWaiting
         self.id = id
         self.projectId = projectId
         self.title = title
@@ -342,10 +345,15 @@ public struct RemoteRuntime: Codable, Hashable, Sendable {
     public var usage: [RemoteWindow]?
     /// Pay-per-use balance or other note when there are no windows (e.g. "Saldo: 28,52 USD").
     public var usageNote: String?
+    /// What the agent left running after its turn (tests, a build…): it isn't working, it's waiting,
+    /// and picks up on its own when they finish. Older Macs don't send it.
+    public var backgroundTasks: [RemoteBackgroundTask]?
 
     public init(isRunning: Bool, statusLine: String?, limit: RemoteLimit?, suggestion: RemoteSuggestion?, mode: RemoteMode,
                 selectedAccountId: UUID?, selectedModel: String?, selectedEffort: String?, relayCandidates: [RemoteCandidate],
-                queued: [RemoteQueuedMessage]? = nil, queuePaused: Bool? = nil, usage: [RemoteWindow]? = nil, usageNote: String? = nil) {
+                queued: [RemoteQueuedMessage]? = nil, queuePaused: Bool? = nil, usage: [RemoteWindow]? = nil, usageNote: String? = nil,
+                backgroundTasks: [RemoteBackgroundTask]? = nil) {
+        self.backgroundTasks = backgroundTasks
         self.queued = queued
         self.queuePaused = queuePaused
         self.usage = usage
@@ -359,6 +367,19 @@ public struct RemoteRuntime: Codable, Hashable, Sendable {
         self.selectedModel = selectedModel
         self.selectedEffort = selectedEffort
         self.relayCandidates = relayCandidates
+    }
+}
+
+/// A command or agent the CLI keeps running in the background after its turn.
+public struct RemoteBackgroundTask: Codable, Hashable, Identifiable, Sendable {
+    public var id: String
+    public var description: String
+    public var startedAt: Date
+
+    public init(id: String, description: String, startedAt: Date) {
+        self.id = id
+        self.description = description
+        self.startedAt = startedAt
     }
 }
 

@@ -49,7 +49,8 @@ enum CompanionMapper {
             isRunning: store.existingRuntime(t.id)?.isRunning ?? false,
             needsApproval: pendingApproval(t, store: store) != nil,
             accountId: t.segments.last?.accountId ?? t.selectedAccountId,
-            preview: preview.map { String($0.replacingOccurrences(of: "\n", with: " ").prefix(140)) }
+            preview: preview.map { String($0.replacingOccurrences(of: "\n", with: " ").prefix(140)) },
+            isWaiting: store.existingRuntime(t.id).map { !$0.isRunning && !$0.backgroundTasks.isEmpty }
         )
     }
 
@@ -133,7 +134,8 @@ enum CompanionMapper {
             queued: rt.queue.map { RemoteQueuedMessage(id: $0.id, text: $0.text) },
             queuePaused: rt.queuePaused,
             usage: usage.map { RemoteWindow(id: $0.id, label: $0.label, percent: $0.percent, resetsAt: $0.resetsAt, detail: $0.detail) },
-            usageNote: usage.isEmpty ? status?.note : nil
+            usageNote: usage.isEmpty ? status?.note : nil,
+            backgroundTasks: rt.backgroundTasks.map { RemoteBackgroundTask(id: $0.id, description: $0.description, startedAt: $0.startedAt) }
         )
     }
 

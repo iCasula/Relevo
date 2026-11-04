@@ -34,6 +34,14 @@ struct AgentFailure: LocalizedError {
     var errorDescription: String? { message }
 }
 
+/// Something the CLI keeps running after its turn ended (Claude Code's background commands and agents):
+/// the agent isn't working, it's waiting for it, and will pick up on its own when it finishes.
+struct BackgroundTask: Equatable, Identifiable {
+    var id: String
+    var description: String
+    var startedAt: Date
+}
+
 enum AgentEvent {
     case sessionStarted(String)
     case textDelta(key: String, text: String)
@@ -55,6 +63,10 @@ enum AgentEvent {
     case notice(String)
     case failure(AgentFailure)
     case turnFinished
+    /// What the CLI is running in the background now (the whole list each time).
+    case backgroundTasks([BackgroundTask])
+    /// The agent started a turn by itself, e.g. because a background task finished.
+    case turnStarted(reason: String?)
 }
 
 @MainActor

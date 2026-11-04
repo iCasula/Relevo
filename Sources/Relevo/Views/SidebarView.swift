@@ -183,6 +183,9 @@ struct ThreadRow: View {
                 ProgressView().controlSize(.mini)
             } else if store.existingRuntime(thread.id)?.limit != nil {
                 Image(systemName: "hourglass").font(.caption2).foregroundStyle(.orange)
+            } else if let tasks = store.existingRuntime(thread.id)?.backgroundTasks, !tasks.isEmpty {
+                Image(systemName: "clock").font(.caption2).foregroundStyle(.secondary)
+                    .help("Esperando a \(tasks.count == 1 ? "una tarea" : "\(tasks.count) tareas") en segundo plano: " + tasks.map(\.description).joined(separator: ", "))
             } else {
                 Text(Formatters.relative(thread.updatedAt))
                     .font(.caption2)

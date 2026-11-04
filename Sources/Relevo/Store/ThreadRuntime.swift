@@ -19,6 +19,8 @@ final class ThreadRuntime {
     var expandedItems = Set<String>()
     /// Messages sent from this Mac's composer: the transcript goes back to the last line on each one.
     var composerSends = 0
+    /// What the agent left running after its turn (it isn't working, it's waiting; it picks up on its own).
+    var backgroundTasks: [BackgroundTask] = []
 
     struct QueuedMessage: Identifiable, Equatable {
         let id = UUID()
@@ -322,6 +324,31 @@ final class ThreadRuntime {
         return plan
     }
 
+    /// A turn the agent started by itself (a background task finished): the same bookkeeping as one you
+    /// send, so it shows as working, can be stopped, and its usage and changes are recorded.
+    private func beginAgentTurn(accountId: UUID) {
+        limit = nil
+        isRunning = true
+        turnSerial += 1
+        turnStartIndex = thread.items.count
+        meter = TurnMeter(startIndex: thread.items.count, accountId: accountId, model: thread.segments.last?.model ?? thread.selectedModel ?? "",
+                          request: nil, switchInfo: nil)
+        turnFailed = false
+        turnFailureKind = nil
+        stoppedByUser = false
+        stopSource = nil
+        awaitingDispatch = false
+        startWatchdog()
+        statusLine = "Retomando…"
+        let serial = turnSerial
+        turnBefore = nil
+        Task { @MainActor in
+            let before = await self.snapshot("\(serial)-before")
+            if self.turnSerial == serial, self.isRunning { self.turnBefore = before }
+        }
+        store.save(thread)
+    }
+
     private func dispatch(_ text: String, account: Account, model: String) {
         limit = nil
         lastDispatch = (text, account.id, model)
@@ -486,6 +513,12 @@ final class ThreadRuntime {
     }
 
     func closeSession() {
+        // The CLI's background tasks are its children: closing it ends them too.
+        if session != nil, !backgroundTasks.isEmpty {
+            let names = backgroundTasks.map { "«\($0.description)»" }.joined(separator: ", ")
+            append(ChatItem(id: UUID().uuidString, kind: .notice, text: "Se ha cancelado lo que el agente tenía en segundo plano: \(names)"))
+            backgroundTasks = []
+        }
         session?.close()
         session = nil
         sessionAccountId = nil
@@ -584,6 +617,12 @@ final class ThreadRuntime {
             append(ChatItem(id: UUID().uuidString, kind: .notice, text: text, accountId: accountId))
         case .failure(let failure):
             handleFailure(failure, accountId: accountId)
+        case .backgroundTasks(let tasks):
+            backgroundTasks = tasks
+        case .turnStarted(let reason):
+            guard !isRunning else { break }
+            if let reason { append(ChatItem(id: UUID().uuidString, kind: .notice, text: reason, accountId: accountId)) }
+            beginAgentTurn(accountId: accountId)
         case .turnFinished:
             isRunning = false
             statusLine = nil
