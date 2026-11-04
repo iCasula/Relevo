@@ -90,6 +90,10 @@ struct ThreadDetailView: View {
         }
         .defaultScrollAnchor(.bottom)
         .scrollDismissesKeyboard(.interactively)
+        // A tap anywhere in the conversation puts the keyboard away (links and buttons still work).
+        .simultaneousGesture(TapGesture().onEnded {
+            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        })
         // Follow new output only while you're at the bottom, so reading older messages isn't interrupted.
         .onScrollGeometryChange(for: Bool.self) { geometry in
             geometry.contentOffset.y + geometry.containerSize.height >= geometry.contentSize.height - 60

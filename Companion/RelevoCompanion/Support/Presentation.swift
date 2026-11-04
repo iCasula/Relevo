@@ -28,6 +28,15 @@ extension RemoteAccount {
         model(id)?.name ?? ((id?.isEmpty ?? true) ? "Predeterminado" : id!)
     }
 
+    /// For tight spots: "Predeterminado (Opus 5.5)" → "Opus 5.5".
+    func shortModelName(_ id: String?) -> String {
+        let name = modelName(id)
+        if name.hasPrefix("Predeterminado ("), name.hasSuffix(")") {
+            return String(name.dropFirst("Predeterminado (".count).dropLast())
+        }
+        return name
+    }
+
     /// Short status shown next to the name in pickers ("agotada", "sin sesión"…).
     var availabilityNote: String? {
         guard let s = status else { return nil }

@@ -85,7 +85,7 @@ final class ThreadViewModel {
 
     var subtitle: String {
         guard let account = selectedAccount else { return "" }
-        return "\(account.name) · \(account.modelName(runtime?.selectedModel))"
+        return "\(account.name) · \(account.shortModelName(runtime?.selectedModel))"
     }
 
     /// While the agent works, sending queues the message on the Mac for when the turn ends —

@@ -30,7 +30,11 @@ struct RelevoCompanionApp: App {
                     }
                 }
                 #if DEBUG
-                .task { DemoActivity.startIfRequested(client.liveActivities) }
+                .task {
+                    DemoActivity.startIfRequested(client.liveActivities)
+                    // Simulator testing: `-openThread <id>` opens that thread, like the Live Activity's link.
+                    if let raw = UserDefaults.standard.string(forKey: "openThread"), let id = UUID(uuidString: raw) { router.open(thread: id) }
+                }
                 #endif
         }
     }
