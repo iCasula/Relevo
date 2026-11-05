@@ -5,8 +5,10 @@ import RelevoProtocol
 
 struct ThreadDetailView: View {
     @State private var viewModel: ThreadViewModel
-    /// On the last line, moving with new output; off once you scroll up to read.
-    @State private var following = true
+    /// The last line is in view (the scroll view keeps it there as output arrives; see `FollowsBottom`).
+    @State private var atBottom = true
+    /// Bumped to go to the last line: on sending, or from the arrow button.
+    @State private var jump = 0
     @AppStorage("showTurnUsage") private var showTurnUsage = true
 
     init(client: CompanionClient, threadId: UUID) {
@@ -53,6 +55,7 @@ struct ThreadDetailView: View {
     private var transcript: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 14) {
+                ChatTopSpacer()
                 if viewModel.hiddenCount > 0 {
                     Text("\(viewModel.hiddenCount) mensajes anteriores están solo en el Mac")
                         .font(.caption)
@@ -83,23 +86,23 @@ struct ThreadDetailView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
         }
-        .followsBottom($following)
+        .followsBottom(atBottom: $atBottom, jump: jump)
         .scrollDismissesKeyboard(.interactively)
         // A tap anywhere in the conversation puts the keyboard away (links and buttons still work).
         .simultaneousGesture(TapGesture().onEnded {
             UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
         })
         // Sending always brings you back to the last line.
-        .onChange(of: viewModel.sentCount) { following = true }
+        .onChange(of: viewModel.sentCount) { jump += 1 }
         .overlay(alignment: .bottomTrailing) {
             ZStack {
-                if !following {
-                    JumpToBottomButton { following = true }
+                if !atBottom {
+                    JumpToBottomButton { jump += 1 }
                         .padding(.trailing, 16)
                         .padding(.bottom, 10)
                 }
             }
-            .animation(.snappy(duration: 0.2), value: following)
+            .animation(.snappy(duration: 0.2), value: atBottom)
         }
         .overlay {
             if viewModel.isLoading {

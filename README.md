@@ -153,7 +153,7 @@ RELEVO_MCP_TOKEN=test .build/debug/Relevo --selftest mcp # initialize, tools, a 
 .build/debug/Relevo --selftest background /tmp/bg        # a Claude agent waiting on a background command, then resuming on its own
 .build/debug/Relevo --selftest limitplan /tmp/lp         # simulated limits: list in order, most quota, nothing left, wait and carry on
 .build/debug/Relevo --selftest models                    # each subscription's saved model list against what its provider gives now
-.build/debug/Relevo --selftest followscroll              # the transcript follows the last line and lets go when you scroll up
+.build/debug/Relevo --selftest followscroll              # the transcript follows the last line and lets go when you scroll up (RELEVO_BOTTOM_INSET=150 for a composer below)
 .build/debug/Relevo --selftest commitmsg /tmp/cm         # commit message and PR body from the utility model
 .build/debug/Relevo --selftest workspaceui /tmp/ui /tmp/ui/ws   # diff, commit, comparison, actions and settings rendered to PNGs
 RELEVO_MCP_TOKEN=test .build/debug/Relevo --selftest mcpserve 120 [full]   # keep the MCP server up for a real client

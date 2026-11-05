@@ -842,9 +842,22 @@ enum SelfTest {
         }
         store.threads = [thread]
         let rt = store.runtime(for: thread)
-        let hosting = NSHostingView(rootView: TranscriptView(thread: thread, runtime: rt).environment(store).frame(width: 760, height: 520))
+        // RELEVO_TOP_INSET: like the window toolbar the transcript scrolls under in the real app.
+        let topInset = CGFloat(Double(ProcessInfo.processInfo.environment["RELEVO_TOP_INSET"] ?? "") ?? 0)
+        let bottomInset = CGFloat(Double(ProcessInfo.processInfo.environment["RELEVO_BOTTOM_INSET"] ?? "") ?? 0)
+        let hosting = NSHostingView(rootView: TranscriptView(thread: thread, runtime: rt).safeAreaPadding(.top, topInset)
+            .safeAreaInset(edge: .bottom, spacing: 0) { Color.clear.frame(height: bottomInset) }
+            .environment(store).frame(width: 760, height: 520))
         // On screen (animations only run there) but invisible and click-through.
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 520), styleMask: .borderless, backing: .buffered, defer: false)
+        // A titled window with a toolbar the content scrolls under, as in the app (RELEVO_TOOLBAR_WINDOW=0: borderless).
+        let realWindow = ProcessInfo.processInfo.environment["RELEVO_TOOLBAR_WINDOW"] != "0"
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 520),
+                              styleMask: realWindow ? [.titled, .fullSizeContentView, .resizable] : .borderless, backing: .buffered, defer: false)
+        if realWindow {
+            let toolbar = NSToolbar(identifier: "selftest")
+            window.toolbar = toolbar
+            window.toolbarStyle = .unified
+        }
         window.alphaValue = 0.01
         window.ignoresMouseEvents = true
         window.level = .init(rawValue: NSWindow.Level.normal.rawValue - 1)
@@ -858,7 +871,10 @@ enum SelfTest {
         }
         await wait(1)
         guard let sv = scrollView(hosting), let doc = sv.documentView else { out("sin NSScrollView"); return }
-        func distance() -> Int { Int(doc.frame.height - sv.contentView.bounds.height - sv.contentView.bounds.origin.y) }
+        func distance() -> Int {
+            let clip = sv.contentView
+            return Int(doc.frame.height + clip.contentInsets.bottom - clip.bounds.height - clip.bounds.origin.y)
+        }
         func offset() -> Int { Int(sv.contentView.bounds.origin.y) }
         out("1 al abrir: distancia al final=\(distance())")
         thread.items.append(ChatItem(id: "s", kind: .assistant, text: ""))
@@ -884,18 +900,56 @@ enum SelfTest {
         rt.composerSends += 1
         await wait(0.8)
         out("6 envío desde el composer: distancia=\(distance())")
+        // A loop would keep moving it: sample the offset for a while.
+        var samples: [Int] = []
+        for _ in 0..<40 { samples.append(offset()); await wait(0.05) }
+        let reversals = zip(samples, samples.dropFirst()).map { $1 - $0 }.filter { $0 != 0 }
+        let flips = zip(reversals, reversals.dropFirst()).filter { ($0 > 0) != ($1 > 0) }.count
+        out("  quieto después: \(Set(samples).count == 1 ? "sí" : "NO, se mueve (\(Set(samples).count) posiciones, \(flips) cambios de sentido)")")
         thread.items.append(ChatItem(id: "n2", kind: .assistant, text: String(repeating: "Y sigue siguiendo. ", count: 12)))
         await wait(0.5)
         out("7 nueva respuesta: distancia=\(distance())")
         sv.contentView.scroll(to: NSPoint(x: 0, y: max(0, sv.contentView.bounds.origin.y - 300)))
         sv.reflectScrolledClipView(sv.contentView)
         await wait(0.3)
-        sv.contentView.scroll(to: NSPoint(x: 0, y: doc.frame.height - sv.contentView.bounds.height))
+        sv.contentView.scroll(to: NSPoint(x: 0, y: doc.frame.height + sv.contentView.contentInsets.bottom - sv.contentView.bounds.height))
         sv.reflectScrolledClipView(sv.contentView)
         await wait(0.3)
         thread.items.append(ChatItem(id: "n3", kind: .assistant, text: String(repeating: "Bajé yo solo hasta el final. ", count: 12)))
         await wait(0.5)
         out("8 subo y vuelvo a bajar a mano, llega otra: distancia=\(distance())")
+        // As in the bug report: wheel up a long way, then back to the end with the arrow (or by sending).
+        for _ in 0..<60 {
+            if let cg = CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 1, wheel1: 12, wheel2: 0, wheel3: 0),
+               let event = NSEvent(cgEvent: cg) { sv.scrollWheel(with: event) }
+            await wait(0.01)
+        }
+        await wait(0.4)
+        let up = offset()
+        rt.composerSends += 1
+        await wait(0.9)
+        var still: [Int] = []
+        for _ in 0..<40 { still.append(offset()); await wait(0.05) }
+        out("9 rueda hasta arriba (offset \(up)) y vuelta al final: distancia=\(distance()) · quieto: \(Set(still).count == 1 ? "sí" : "NO (\(Set(still).count) posiciones)")")
+        if let shot = ProcessInfo.processInfo.environment["RELEVO_SCROLL_SHOT"] {
+            // Like a mouse wheel, fast: line-based wheel events straight to the scroll view.
+            for burst in 0..<3 {
+                for _ in 0..<40 {
+                    if let cg = CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 1, wheel1: 12, wheel2: 0, wheel3: 0),
+                       let event = NSEvent(cgEvent: cg) {
+                        sv.scrollWheel(with: event)
+                    }
+                    await wait(0.01)
+                }
+                await wait(0.4)
+                out("  rueda hacia arriba (\(burst + 1)): offset=\(offset()) doc=\(Int(doc.frame.height))")
+            }
+            if let rep = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) {
+                hosting.cacheDisplay(in: hosting.bounds, to: rep)
+                try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: shot))
+                out("arriba del todo: \(shot)")
+            }
+        }
         window.orderOut(nil)
     }
 

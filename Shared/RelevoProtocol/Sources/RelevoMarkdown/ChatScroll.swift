@@ -1,16 +1,22 @@
 import SwiftUI
 
-/// Chat-style scrolling, the same on the Mac and the iPhone: the conversation stays on its last line while
-/// you're there (new output, a growing reply, the keyboard or a resized window keep it pinned), lets go as
-/// soon as you scroll up to read, and picks up again when you scroll back to the bottom. Setting `following`
-/// to true from outside (you sent a message, or tapped the arrow) goes back to the last line.
+/// Chat-style scrolling, the same on the Mac and the iPhone, done by the scroll view itself: with a bottom
+/// default anchor it starts on the last line, stays there while replies stream in or the keyboard and window
+/// change size, and leaves you where you are when you've scrolled up to read.
+///
+/// The one catch: that anchoring stops working when the scroll view has a top safe-area inset (the Mac's
+/// toolbar, the iPhone's navigation bar), so the scroll view ignores it and `ChatTopSpacer` keeps the first
+/// message clear of the bar instead.
 @available(macOS 15, iOS 18, *)
 public struct FollowsBottom: ViewModifier {
-    @Binding var following: Bool
-    @State private var position = ScrollPosition(edge: .bottom)
-    @State private var userScrolling = false
-    /// Where the content is now (to move the position off "bottom" without moving anything).
-    @State private var offset: CGFloat = 0
+    /// True while the last line is in view: show a "go to the end" button when it isn't.
+    @Binding var atBottom: Bool
+    /// Changing it goes to the last line (you sent a message, or tapped the button).
+    let jump: Int
+    /// Empty except right after asking for the end: a position left on "bottom" would be applied again
+    /// whenever the content changes size, pulling you back down while you scroll up.
+    @State private var position = ScrollPosition(idType: Int.self)
+    @State private var topInset: CGFloat = 0
 
     /// How close to the end still counts as "at the bottom".
     static let slack: CGFloat = 24
@@ -19,67 +25,63 @@ public struct FollowsBottom: ViewModifier {
 
     public func body(content: Content) -> some View {
         content
+            .defaultScrollAnchor(.bottom)
             .scrollPosition($position)
-            .defaultScrollAnchor(.bottom, for: .initialOffset)
-            .defaultScrollAnchor(following ? .bottom : nil, for: .sizeChanges)
-            .onScrollPhaseChange { _, phase in
-                switch phase {
-                case .tracking, .interacting, .decelerating: userScrolling = true
-                default: userScrolling = false
-                }
+            .environment(\.chatTopInset, topInset)
+            .onScrollGeometryChange(for: CGFloat.self) { g in
+                g.contentSize.height + g.contentInsets.bottom - g.visibleRect.maxY
+            } action: { _, distance in
+                if Self.debug { print("followsBottom distance=\(Int(distance)) topInset=\(Int(topInset))") }
+                let bottom = distance <= Self.slack
+                if bottom != atBottom { atBottom = bottom }
             }
-            .onScrollGeometryChange(for: BottomProbe.self) { g in
-                // The offset starts at -insets.top (under the navigation bar) and the container excludes the
-                // insets, so the end is at contentHeight - containerHeight - insets.top (measured on an iPhone:
-                // content 9039, container 587, insets 113/152 → 8339; on the Mac the insets are 0).
-                BottomProbe(offset: g.contentOffset.y, contentHeight: g.contentSize.height,
-                            frame: g.containerSize.height + g.contentInsets.top * 1_000 + g.contentInsets.bottom * 1_000_000,
-                            distance: g.contentSize.height - g.containerSize.height - g.contentInsets.top - g.contentOffset.y)
-            } action: { old, new in
-                offset = new.offset
-                if new.distance <= Self.slack {
-                    if !following { following = true }
-                    return
-                }
-                guard following else { return }
-                // Moved up by you (a drag, the trackpad, or a mouse wheel, which has no scroll phases), not by
-                // content arriving or the keyboard and composer resizing the view: stop following.
-                let scrolledUp = new.offset < old.offset - 0.5 && abs(new.contentHeight - old.contentHeight) < 0.5 && new.frame == old.frame
-                if userScrolling || scrolledUp { following = false }
-            }
-            .onChange(of: following) { wasFollowing, isFollowing in
-                if isFollowing && !wasFollowing { scrollToBottom() }
-            }
+            .ignoresSafeArea(.container, edges: .top)
+            .onGeometryChange(for: CGFloat.self) { $0.safeAreaInsets.top } action: { topInset = $0 }
+            .onChange(of: jump) { scrollToBottom() }
     }
 
-    /// The position may still read "bottom" from before (scrolling with a mouse wheel doesn't always update it),
-    /// and setting the same value does nothing: so it's first moved off that value, without moving the content,
-    /// and the bottom is asked for on the next pass.
+    /// Goes to the end, then empties the position again so it doesn't keep pulling there.
     private func scrollToBottom() {
-        position.scrollTo(y: offset)
+        position = ScrollPosition(idType: Int.self)
         DispatchQueue.main.async {
             withAnimation(.easeOut(duration: 0.25)) { position.scrollTo(edge: .bottom) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { position = ScrollPosition(idType: Int.self) }
         }
     }
 }
 
-private struct BottomProbe: Equatable {
-    var offset: CGFloat
-    var contentHeight: CGFloat
-    /// Container height and insets: when they change (keyboard, composer), the offset moves without you.
-    var frame: CGFloat
-    var distance: CGFloat
-}
-
 @available(macOS 15, iOS 18, *)
 public extension View {
-    /// See `FollowsBottom`.
-    func followsBottom(_ following: Binding<Bool>) -> some View {
-        modifier(FollowsBottom(following: following))
+    /// See `FollowsBottom`. Put a `ChatTopSpacer` first in the scroll content.
+    func followsBottom(atBottom: Binding<Bool>, jump: Int) -> some View {
+        modifier(FollowsBottom(atBottom: atBottom, jump: jump))
     }
 }
 
-/// Shown while the conversation isn't following: back to the last line.
+private struct ChatTopInsetKey: EnvironmentKey {
+    static let defaultValue: CGFloat = 0
+}
+
+extension EnvironmentValues {
+    var chatTopInset: CGFloat {
+        get { self[ChatTopInsetKey.self] }
+        set { self[ChatTopInsetKey.self] = newValue }
+    }
+}
+
+/// First thing in a `followsBottom` scroll view's content: the room the bar above takes, so the first message
+/// isn't under it (the scroll view runs under the bar; see `FollowsBottom`).
+public struct ChatTopSpacer: View {
+    @Environment(\.chatTopInset) private var inset
+
+    public init() {}
+
+    public var body: some View {
+        Color.clear.frame(height: inset)
+    }
+}
+
+/// Shown while the last line isn't in view: back to it.
 public struct JumpToBottomButton: View {
     let action: () -> Void
 

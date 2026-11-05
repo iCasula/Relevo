@@ -201,8 +201,10 @@ struct TranscriptView: View {
     let runtime: ThreadRuntime
     var showTools = true
     @AppStorage("showTurnUsage") private var showTurnUsage = true
-    /// On the last line, moving with new output; off once you scroll up to read.
-    @State private var following = true
+    /// The last line is in view (the scroll view keeps it there as output arrives; see `FollowsBottom`).
+    @State private var atBottom = true
+    /// Bumped to go to the last line: on sending, or from the arrow button.
+    @State private var jump = 0
 
     private enum Row: Identifiable {
         case item(ChatItem)
@@ -242,6 +244,7 @@ struct TranscriptView: View {
         let headers = authorHeaders()
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 14) {
+                ChatTopSpacer()
                 ForEach(rows) { row in
                     switch row {
                     case .item(let item):
@@ -275,7 +278,7 @@ struct TranscriptView: View {
             .padding(.bottom, 8)
             .frame(maxWidth: .infinity)
         }
-        .followsBottom($following)
+        .followsBottom(atBottom: $atBottom, jump: jump)
         // Paths and images in replies open in Quick Look (folders in Finder) instead of the browser.
         .environment(\.openURL, OpenURLAction { url in
             guard let path = FileReference.path(from: url) else { return .systemAction }
@@ -283,16 +286,16 @@ struct TranscriptView: View {
             return .handled
         })
         // Sending from the composer always brings you back to the last line.
-        .onChange(of: runtime.composerSends) { following = true }
+        .onChange(of: runtime.composerSends) { jump += 1 }
         .overlay(alignment: .bottomTrailing) {
             ZStack {
-                if !following {
-                    JumpToBottomButton { following = true }
+                if !atBottom {
+                    JumpToBottomButton { jump += 1 }
                         .padding(.trailing, 22)
                         .padding(.bottom, 12)
                 }
             }
-            .animation(.snappy(duration: 0.2), value: following)
+            .animation(.snappy(duration: 0.2), value: atBottom)
         }
     }
 
