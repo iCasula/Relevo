@@ -363,7 +363,7 @@ export async function probe({ bin, env, cwd }) {
   });
   if (auth) {
     status.email = auth.email ?? null;
-    if (auth.loggedIn === false) { status.loggedIn = false; status.error = 'Sin sesión: ejecuta «relevo-host login» en el host'; return status; }
+    if (auth.loggedIn === false) { status.loggedIn = false; status.error = 'Sin sesión: ejecuta «relevo-host login claude» en el host'; return status; }
   }
   await new Promise((resolve) => {
     const p = spawn(bin, ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'], { env, cwd, stdio: ['pipe', 'pipe', 'pipe'] });

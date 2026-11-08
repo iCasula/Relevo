@@ -63,7 +63,7 @@ extension SelfTest {
         guard let snap = snapshot else { return }
         let account = snap.accounts.first
         print("host «\(snap.macName)»: \(snap.accounts.count) cuentas, \(snap.projects.count) proyectos, \(snap.threads.count) hilos")
-        if let account {
+        for account in snap.accounts {
             let s = account.status
             print("  \(account.name): sesión \(s?.loggedIn.map { $0 ? "sí" : "no" } ?? "?"), plan \(s?.plan ?? "-"), \(s?.windows.map { "\($0.label) \(Int($0.percent)) %" }.joined(separator: ", ") ?? "-"), modelos \(account.models.map(\.id))\(s?.error.map { " · \($0)" } ?? "")")
         }
