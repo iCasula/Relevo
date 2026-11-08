@@ -13,6 +13,14 @@ const CLIENT_INFO = { clientInfo: { name: 'relevo', title: 'Relevo', version: '1
 
 const cap = (s, n = 4000) => (s.length > n ? s.slice(0, n) + '\n…' : s);
 
+/** `/usr/bin/bash -lc 'cat hola.txt'` → `cat hola.txt`: Codex wraps every command in a login shell. */
+export function shellCommand(command) {
+  if (typeof command !== 'string') return command;
+  const m = /^(?:\S*\/)?(?:ba|z)?sh -l?c (['"])([\s\S]*)\1$/.exec(command.trim());
+  if (!m) return command;
+  return m[1] === "'" ? m[2].replaceAll(`'\\''`, `'`) : m[2].replace(/\\(["\\$`])/g, '$1');
+}
+
 function toDate(v) {
   if (v == null) return null;
   if (typeof v === 'number') return v > 1e12 ? v / 1000 : v;
@@ -242,7 +250,7 @@ export class CodexSession extends EventEmitter {
   _itemStarted(item) {
     if (!item.id) return;
     switch (item.type) {
-      case 'commandExecution': this.emit('toolStarted', item.id, 'Shell', item.command ?? 'comando', { command: item.command }); break;
+      case 'commandExecution': this.emit('toolStarted', item.id, 'Shell', shellCommand(item.command) ?? 'comando', { command: item.command }); break;
       case 'fileChange': {
         const paths = (item.changes ?? []).map((c) => c.path).filter(Boolean).map((p) => p.split('/').pop());
         this.emit('toolStarted', item.id, 'Edición', paths.length ? `Editar ${paths.join(', ')}` : 'Editar ficheros');
@@ -292,7 +300,7 @@ export class CodexSession extends EventEmitter {
     const respond = (choice) => this.rpc?.respond(id, { decision: choice });
     if (method === 'item/commandExecution/requestApproval') {
       const detail = [p.reason, p.cwd && `En ${p.cwd}`].filter(Boolean).join('\n');
-      this.emit('approval', { key: p.approvalId ?? p.itemId ?? String(id), title: `Ejecutar: ${p.command ?? 'comando'}`, detail, options, questions: null, respond });
+      this.emit('approval', { key: p.approvalId ?? p.itemId ?? String(id), title: `Ejecutar: ${shellCommand(p.command) ?? 'comando'}`, detail, options, questions: null, respond });
     } else if (method === 'item/fileChange/requestApproval') {
       const detail = [p.reason, p.grantRoot && `Permitir escritura en ${p.grantRoot}`].filter(Boolean).join('\n');
       this.emit('approval', { key: p.itemId ?? String(id), title: 'Aplicar cambios en ficheros', detail, options, questions: null, respond });

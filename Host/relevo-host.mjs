@@ -25,7 +25,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { Host, PROVIDERS } from './lib/host.mjs';
 
 function which(name) {
@@ -91,6 +91,8 @@ switch (command) {
     const stop = () => { for (const s of host.agents.values()) s.close(true); process.exit(0); };
     process.on('SIGTERM', stop);
     process.on('SIGINT', stop);
+    // `relevo-host login` sends it so the iPhone sees the new session without waiting for the next probe.
+    process.on('SIGHUP', () => { host.log('SIGHUP: probing the accounts again'); host.refreshUsage(); });
     break;
   }
   case 'pair': {
@@ -106,7 +108,15 @@ switch (command) {
     const args = agent === 'codex' ? ['login', '--device-auth'] : ['auth', 'login'];
     console.log(`${PROVIDERS[agent].name} login for this host (${agent === 'codex' ? cfg.codexHome : cfg.claudeConfigDir}).`);
     const child = spawn(p.bin, args, { env: cfg.agentEnv, stdio: 'inherit' });
-    child.on('exit', (code) => process.exit(code ?? 0));
+    child.on('exit', (code) => {
+      if (code === 0) {
+        // Only the service's main process: `systemctl kill` would also signal the agents it runs.
+        const show = spawnSync('systemctl', ['--user', 'show', '-p', 'MainPID', '--value', 'relevo-host'], { encoding: 'utf8' });
+        const pid = Number(show.stdout?.trim());
+        if (pid > 0) { try { process.kill(pid, 'SIGHUP'); console.log('The running service will pick up the new session.'); } catch {} }
+      }
+      process.exit(code ?? 0);
+    });
     break;
   }
   case 'status': {

@@ -51,6 +51,9 @@ relevo-host update   # latest Host/ from GitHub (main), then restarts the servic
 journalctl --user -u relevo-host -f
 ```
 
+After a login the running service checks the accounts again, so the iPhone shows the session straight away
+(it also does when the iPhone connects, for any account signed out or not checked in the last two minutes).
+
 ## Disk
 
 - A turn doesn't start when the data folder has less than `RELEVO_MIN_FREE_GB_DATA` (1 GB) free or the

@@ -17,6 +17,7 @@ const MAX_STORED_ITEMS = 1500;
 const SENT_ITEMS = 400;
 const IDLE_CLOSE_MS = 15 * 60_000;
 const PROBE_EVERY_MS = 10 * 60_000;
+const STALE_AFTER_S = 120;
 const CODEX_SESSIONS_DAYS = 30;
 const SKIP_DIRS = new Set(['$RECYCLE.BIN', 'System Volume Information', 'lost+found']);
 
@@ -207,6 +208,7 @@ export class Host {
       peer.send({ addresses: { hosts: localAddresses(), port: this.config.port } });
       this._sendSnapshot(peer, true);
       this._sendActivity(peer, true);
+      this._refreshStale();
       return;
     }
     if (!peer.greeted) return;
@@ -519,6 +521,8 @@ export class Host {
     });
     s.on('turnStarted', () => { r.isRunning = true; r.turnItems = []; r.statusLine = `${account.name} retoma por su cuenta…`; this._changed(t); });
     s.on('turnFinished', () => {
+      // A turn that ran means the account is signed in, whatever the last probe said.
+      if (account.status?.loggedIn === false && !r.limit) this._refreshAccount(account);
       r.isRunning = false;
       r.statusLine = null;
       r.finishedAt = Date.now();
@@ -574,6 +578,13 @@ export class Host {
 
   refreshUsage() {
     return Promise.all(this.accounts.map((a) => this._refreshAccount(a)));
+  }
+
+  /** When the iPhone connects: accounts signed out (maybe since logged in over ssh) or not probed lately. */
+  _refreshStale() {
+    for (const a of this.accounts) {
+      if (a.status?.loggedIn === false || !a.status?.updatedAt || now() - a.status.updatedAt > STALE_AFTER_S) this._refreshAccount(a);
+    }
   }
 
   async _refreshAccount(a) {
