@@ -3,8 +3,8 @@
 // on the iPhone, next to the Mac app. Usage:
 //   relevo-host.mjs [serve]   start serving (systemd runs this)
 //   relevo-host.mjs pair      print the pairing link for the iPhone
-//   relevo-host.mjs login     sign in to Claude Code for this host (interactive)
-//   relevo-host.mjs status    login, limits and models, without calling a model
+//   relevo-host.mjs login [claude|codex]   sign in for this host (interactive; Codex uses a device code)
+//   relevo-host.mjs status    login, limits and models of each agent, without calling a model
 //   relevo-host.mjs update    replace the program with the latest version on GitHub and restart the service
 //
 // Environment (all optional):
@@ -14,6 +14,9 @@
 //   RELEVO_PORT        TCP port (default 47820)
 //   RELEVO_CLAUDE      path to the `claude` CLI (default: ~/.local/bin/claude or PATH)
 //   RELEVO_CLAUDE_CONFIG  Claude Code config folder for this host (default $RELEVO_HOST_DATA/claude-config)
+//   RELEVO_CODEX       path to the `codex` CLI (default: ~/.local/bin/codex or PATH)
+//   RELEVO_CODEX_HOME  Codex's folder for this host (default $RELEVO_HOST_DATA/codex-home)
+//   RELEVO_PROVIDERS   agents to offer, in order (default "claude,codex"; those without a CLI are left out)
 //   RELEVO_MAX_AGENTS  agent processes alive at once (default 2)
 //   RELEVO_MIN_FREE_GB_DATA / RELEVO_MIN_FREE_GB_PROJECTS   refuse to start a turn below this (default 1 / 2)
 //   RELEVO_FAKE_AGENT=1  echo agent for tests (no Claude calls)
@@ -23,8 +26,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { Host } from './lib/host.mjs';
-import { probe } from './lib/claude.mjs';
+import { Host, PROVIDERS } from './lib/host.mjs';
 
 function which(name) {
   for (const dir of (process.env.PATH ?? '').split(':')) {
@@ -37,17 +39,25 @@ function which(name) {
 function config() {
   const env = process.env;
   const dataDir = path.resolve(env.RELEVO_HOST_DATA ?? path.join(os.homedir(), '.relevo-host'));
-  const local = path.join(os.homedir(), '.local/bin/claude');
+  const cli = (name, override) => {
+    if (override) return override;
+    const local = path.join(os.homedir(), '.local/bin', name);
+    return fs.existsSync(local) ? local : which(name);
+  };
+  const bins = { claude: cli('claude', env.RELEVO_CLAUDE), codex: cli('codex', env.RELEVO_CODEX) };
   const c = {
     dataDir,
     threadsDir: path.join(dataDir, 'threads'),
     claudeConfigDir: path.resolve(env.RELEVO_CLAUDE_CONFIG ?? path.join(dataDir, 'claude-config')),
+    codexHome: path.resolve(env.RELEVO_CODEX_HOME ?? path.join(dataDir, 'codex-home')),
     tmpDir: path.join(dataDir, 'tmp'),
     cacheDir: path.join(dataDir, 'cache'),
     projectsRoot: path.resolve(env.RELEVO_PROJECTS ?? path.join(dataDir, 'projects')),
     name: env.RELEVO_HOST_NAME ?? os.hostname(),
     port: Number(env.RELEVO_PORT ?? 47820),
-    claudeBin: env.RELEVO_CLAUDE ?? (fs.existsSync(local) ? local : which('claude') ?? 'claude'),
+    providers: (env.RELEVO_PROVIDERS ?? 'claude,codex').split(',').map((p) => p.trim())
+      .filter((p) => PROVIDERS[p] && (bins[p] || env.RELEVO_FAKE_AGENT === '1'))
+      .map((provider) => ({ provider, bin: bins[provider] ?? provider })),
     maxAgents: Number(env.RELEVO_MAX_AGENTS ?? 2),
     minFreeDataBytes: Number(env.RELEVO_MIN_FREE_GB_DATA ?? 1) * 1e9,
     minFreeProjectsBytes: Number(env.RELEVO_MIN_FREE_GB_PROJECTS ?? 2) * 1e9,
@@ -58,6 +68,7 @@ function config() {
   c.agentEnv = {
     ...env,
     CLAUDE_CONFIG_DIR: c.claudeConfigDir,
+    CODEX_HOME: c.codexHome,
     TMPDIR: c.tmpDir,
     XDG_CACHE_HOME: c.cacheDir,
     npm_config_cache: path.join(c.cacheDir, 'npm'),
@@ -76,7 +87,7 @@ switch (command) {
   case 'serve': {
     const host = new Host(cfg);
     host.listen();
-    host.log(`data ${cfg.dataDir} · projects ${cfg.projectsRoot} · claude ${cfg.claudeBin}${cfg.fakeAgent ? ' (fake agent)' : ''}`);
+    host.log(`data ${cfg.dataDir} · projects ${cfg.projectsRoot} · ${cfg.providers.map((p) => `${p.provider} ${p.bin}`).join(' · ')}${cfg.fakeAgent ? ' (fake agent)' : ''}`);
     const stop = () => { for (const s of host.agents.values()) s.close(true); process.exit(0); };
     process.on('SIGTERM', stop);
     process.on('SIGINT', stop);
@@ -88,16 +99,22 @@ switch (command) {
     break;
   }
   case 'login': {
-    fs.mkdirSync(cfg.claudeConfigDir, { recursive: true });
-    console.log(`Claude Code login for this host (config in ${cfg.claudeConfigDir}).`);
-    const p = spawn(cfg.claudeBin, ['auth', 'login'], { env: cfg.agentEnv, stdio: 'inherit' });
-    p.on('exit', (code) => process.exit(code ?? 0));
+    const agent = process.argv[3] ?? cfg.providers[0]?.provider;
+    const p = cfg.providers.find((x) => x.provider === agent);
+    if (!p) { console.error(`Unknown or missing agent: ${agent}. Available: ${cfg.providers.map((x) => x.provider).join(', ')}`); process.exit(2); }
+    for (const dir of [cfg.claudeConfigDir, cfg.codexHome]) fs.mkdirSync(dir, { recursive: true });
+    const args = agent === 'codex' ? ['login', '--device-auth'] : ['auth', 'login'];
+    console.log(`${PROVIDERS[agent].name} login for this host (${agent === 'codex' ? cfg.codexHome : cfg.claudeConfigDir}).`);
+    const child = spawn(p.bin, args, { env: cfg.agentEnv, stdio: 'inherit' });
+    child.on('exit', (code) => process.exit(code ?? 0));
     break;
   }
   case 'status': {
-    fs.mkdirSync(cfg.claudeConfigDir, { recursive: true });
-    const s = await probe({ bin: cfg.claudeBin, env: cfg.agentEnv, cwd: cfg.dataDir });
-    console.log(JSON.stringify({ ...s, models: s.models?.map((m) => m.id) }, null, 2));
+    for (const dir of [cfg.claudeConfigDir, cfg.codexHome]) fs.mkdirSync(dir, { recursive: true });
+    for (const { provider, bin } of cfg.providers) {
+      const s = await PROVIDERS[provider].probe({ bin, env: cfg.agentEnv, cwd: cfg.dataDir });
+      console.log(`${provider}: ${JSON.stringify({ ...s, models: s.models?.map((m) => m.id) }, null, 2)}`);
+    }
     break;
   }
   case 'update': {

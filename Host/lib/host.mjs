@@ -9,13 +9,28 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { createCompanionServer } from './transport.mjs';
 import { ClaudeSession, FakeSession, probe, fakeProbe } from './claude.mjs';
+import { CodexSession, codexProbe } from './codex.mjs';
+import { handoffText } from './handoff.mjs';
 
 const PROTOCOL_VERSION = 1;
 const MAX_STORED_ITEMS = 1500;
 const SENT_ITEMS = 400;
 const IDLE_CLOSE_MS = 15 * 60_000;
 const PROBE_EVERY_MS = 10 * 60_000;
+const CODEX_SESSIONS_DAYS = 30;
 const SKIP_DIRS = new Set(['$RECYCLE.BIN', 'System Volume Information', 'lost+found']);
+
+/** Providers this host can run. Each account is one provider with its own CLI login on this machine. */
+export const PROVIDERS = {
+  claude: {
+    kind: 'claude', name: 'Claude', agentName: 'Claude Code', symbol: 'asterisk', tint: '#D97857', Session: ClaudeSession, probe,
+    models: [{ id: 'default', name: 'Predeterminado' }, { id: 'opus', name: 'Opus' }, { id: 'sonnet', name: 'Sonnet' }, { id: 'haiku', name: 'Haiku' }],
+  },
+  codex: {
+    kind: 'codex', name: 'Codex', agentName: 'Codex', symbol: 'hexagon', tint: '#12A380', Session: CodexSession, probe: codexProbe,
+    models: [{ id: 'default', name: 'Predeterminado' }],
+  },
+};
 
 const uuid = () => crypto.randomUUID().toUpperCase();
 const now = () => Date.now() / 1000;
@@ -25,6 +40,7 @@ const uuidFrom = (s) => {
 };
 /** Drops null/undefined fields so optionals are simply absent, as Swift encodes them. */
 const clean = (o) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== null && v !== undefined));
+const remoteWindow = (w) => clean({ id: w.id, label: w.label, percent: w.percent, resetsAt: w.resetsAt, detail: w.detail });
 
 /** Private to this user: state.json holds the pairing secret and threads hold transcripts. */
 function writeJSONAtomic(file, value) {
@@ -36,6 +52,19 @@ function writeJSONAtomic(file, value) {
 
 function freeBytes(dir) {
   try { const s = fs.statfsSync(dir); return s.bavail * s.bsize; } catch { return Infinity; }
+}
+
+/** Deletes files under `dir` not modified since `cutoff` (ms). */
+function prune(dir, cutoff) {
+  let entries = [];
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+  for (const e of entries) {
+    const p = path.join(dir, e.name);
+    try {
+      if (e.isDirectory()) prune(p, cutoff);
+      else if (fs.statSync(p).mtimeMs < cutoff) fs.rmSync(p, { force: true });
+    } catch {}
+  }
 }
 
 export function localAddresses() {
@@ -55,16 +84,10 @@ export class Host {
     this.agents = new Map(); // threadId -> session
     this.runtime = new Map(); // threadId -> live state
     this.projectsCache = { at: 0, list: [] };
-    for (const dir of [config.dataDir, config.threadsDir, config.claudeConfigDir, config.tmpDir, config.cacheDir, config.projectsRoot]) {
+    for (const dir of [config.dataDir, config.threadsDir, config.claudeConfigDir, config.codexHome, config.tmpDir, config.cacheDir, config.projectsRoot]) {
       fs.mkdirSync(dir, { recursive: true });
     }
     this._loadState();
-    this.account = {
-      id: this.state.accountId, kind: 'claude', name: 'Claude', agentName: 'Claude Code', symbol: 'asterisk', tint: '#D97857',
-      status: null, models: [{ id: 'default', name: 'Predeterminado' }, { id: 'opus', name: 'Opus' }, { id: 'sonnet', name: 'Sonnet' }, { id: 'haiku', name: 'Haiku' }],
-      refreshing: false,
-    };
-    if (this.state.models?.length) this.account.models = this.state.models;
     this._limitClaudeHousekeeping();
   }
 
@@ -76,9 +99,24 @@ export class Host {
     try { s = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
     s.serverId ??= `relevo-${crypto.randomBytes(4).toString('hex')}`;
     s.secret ??= crypto.randomBytes(32).toString('base64');
-    s.accountId ??= uuid();
+    // One account per provider; the first version had only Claude (`accountId`, `models`).
+    s.accounts ??= {};
+    if (s.accountId) { s.accounts.claude ??= s.accountId; delete s.accountId; }
+    s.models = Array.isArray(s.models) ? { claude: s.models } : (s.models ?? {});
     s.threads ??= [];
     this.state = s;
+
+    this.accounts = [];
+    for (const { provider, bin } of this.config.providers) {
+      const p = PROVIDERS[provider];
+      s.accounts[provider] ??= uuid();
+      this.accounts.push({
+        id: s.accounts[provider], provider, bin, ...p, status: null, refreshing: false,
+        models: s.models[provider]?.length ? s.models[provider] : p.models, defaultModel: 'default',
+      });
+    }
+    this.accountsById = new Map(this.accounts.map((a) => [a.id, a]));
+
     for (const meta of s.threads) {
       let stored = { items: [], totalItems: 0 };
       try { stored = JSON.parse(fs.readFileSync(path.join(this.config.threadsDir, `${meta.id}.json`), 'utf8')); } catch {}
@@ -87,17 +125,19 @@ export class Host {
         if (item.kind === 'tool' && item.toolState === 'running') item.toolState = 'failed';
         if (item.kind === 'approval' && !item.resolution) item.resolution = 'Sin respuesta (el host se reinició)';
       }
-      this.threads.set(meta.id, { ...meta, items: stored.items, totalItems: stored.totalItems ?? stored.items.length, queued: meta.queued ?? [] });
+      const t = { ...meta, items: stored.items, totalItems: stored.totalItems ?? stored.items.length, queued: meta.queued ?? [] };
+      if (!this.accountsById.has(t.accountId)) t.accountId = this.accounts[0]?.id;
+      this.threads.set(meta.id, t);
     }
     this._saveState();
   }
 
   _saveState() {
     this.state.threads = [...this.threads.values()].map((t) => {
-      const { items, totalItems, ...meta } = t;
+      const { items, totalItems, _saveTimer, ...meta } = t;
       return meta;
     });
-    this.state.models = this.account?.models;
+    for (const a of this.accounts ?? []) this.state.models[a.provider] = a.models;
     writeJSONAtomic(path.join(this.config.dataDir, 'state.json'), this.state);
   }
 
@@ -133,7 +173,7 @@ export class Host {
     this.server = createCompanionServer({
       serverId: this.state.serverId, secret: Buffer.from(this.state.secret, 'base64'), port: this.config.port,
     }, (peer) => this._accept(peer));
-    this.server.on('listening', () => this.log(`listening on :${this.config.port} as ${this.state.serverId} (${this.config.name})`));
+    this.server.on('listening', () => this.log(`listening on :${this.config.port} as ${this.state.serverId} (${this.config.name}) · ${this.accounts.map((a) => a.name).join(', ')}`));
     this.server.on('error', (e) => { this.log(`server error: ${e.message}`); process.exitCode = 1; });
     this.refreshUsage();
     setInterval(() => this.refreshUsage(), PROBE_EVERY_MS).unref();
@@ -171,6 +211,7 @@ export class Host {
     }
     if (!peer.greeted) return;
     const t = a.threadId ? this.threads.get(String(a.threadId).toUpperCase()) : null;
+    const accountId = a.accountId ? String(a.accountId).toUpperCase() : null;
     switch (name) {
       case 'subscribe':
         peer.subscribed = a.threadId ? String(a.threadId).toUpperCase() : null;
@@ -188,7 +229,8 @@ export class Host {
       case 'stop': if (t) this.stop(t); break;
       case 'approve': if (t) this._resolve(t, a.itemId, a.optionId, null); break;
       case 'answer': if (t) this._resolve(t, a.itemId, 'answer', a.answers ?? {}); break;
-      case 'select': if (t) { t.model = a.model; this.agents.get(t.id)?.setModel(a.model); this._changed(t); } break;
+      case 'select': if (t) this.select(t, accountId, a.model, false); break;
+      case 'relay': if (t) this.select(t, accountId, a.model, true); break;
       case 'setEffort': if (t) { t.effort = a.effort ?? null; this.agents.get(t.id)?.setEffort(t.effort); this._changed(t); } break;
       case 'setMode': if (t) { t.mode = a.mode; this.agents.get(t.id)?.setMode(a.mode); this._changed(t); } break;
       case 'newThread': {
@@ -199,7 +241,6 @@ export class Host {
       case 'refreshUsage': this.refreshUsage(); break;
       case 'fetchImage': peer.send({ image: { requestId: a.requestId, error: 'Este host todavía no sirve imágenes' } }); break;
       case 'openOnMac': peer.send({ toast: { _0: `«Abrir» no está disponible en ${this.config.name}` } }); break;
-      case 'relay': peer.send({ toast: { _0: `${this.config.name} solo tiene Claude por ahora` } }); break;
       default: break; // setDraft, suggestion, setLimitPlan, limitAction, registerLiveActivity: not in this host yet
     }
   }
@@ -221,12 +262,23 @@ export class Host {
     return list;
   }
 
+  _account(t) { return this.accountsById.get(t.accountId) ?? this.accounts[0]; }
+
+  /** The account a new thread starts on: the first signed in with quota left, in the configured order. */
+  _defaultAccount() {
+    return this.accounts.find((a) => a.status?.loggedIn !== false && !this._exhausted(a)) ?? this.accounts[0];
+  }
+
+  _exhausted(a) { return (a.status?.windows ?? []).some((w) => w.percent >= 99.5 && (w.resetsAt ?? Infinity) > now()); }
+
   createThread(projectId) {
     const project = this.projects().find((p) => p.id === projectId);
     if (!project) return null;
+    const account = this._defaultAccount();
     const t = {
       id: uuid(), projectId, projectPath: project.path, title: 'Nuevo hilo', createdAt: now(), updatedAt: now(),
-      model: 'default', effort: null, mode: 'autoEdit', sessionId: null, items: [], totalItems: 0, queued: [], queuePaused: false,
+      accountId: account?.id, model: 'default', effort: null, mode: 'autoEdit', sessionId: null, handoffPending: false,
+      items: [], totalItems: 0, queued: [], queuePaused: false,
     };
     this.threads.set(t.id, t);
     this._saveThread(t);
@@ -237,7 +289,7 @@ export class Host {
   _rt(t) {
     let r = this.runtime.get(t.id);
     if (!r) {
-      r = { isRunning: false, statusLine: null, limit: null, approvals: new Map(), keys: new Map(), dirty: new Set(), sendNow: null, finishedAt: null };
+      r = { isRunning: false, statusLine: null, limit: null, approvals: new Map(), keys: new Map(), dirty: new Set(), sendNow: null, finishedAt: null, pendingSwitch: null };
       this.runtime.set(t.id, r);
     }
     return r;
@@ -255,14 +307,11 @@ export class Host {
     return null;
   }
 
-  _touch(t, item) {
-    this._rt(t).dirty.add(item.id);
-  }
+  _touch(t, item) { this._rt(t).dirty.add(item.id); }
 
   send(t, text) {
     if (!text?.trim()) return;
-    const r = this._rt(t);
-    if (r.isRunning) {
+    if (this._rt(t).isRunning) {
       t.queued.push({ id: uuid(), text });
       this._changed(t);
       return;
@@ -288,6 +337,40 @@ export class Host {
     this._changed(t);
   }
 
+  /**
+   * Model or subscription for the thread. Another provider means a new agent that gets the thread's context
+   * with the next message (`relay` sends that message right away, to carry on with the task).
+   */
+  select(t, accountId, model, carryOn) {
+    const target = this.accountsById.get(accountId) ?? this._account(t);
+    const r = this._rt(t);
+    if (target.id === t.accountId) {
+      t.model = model || 'default';
+      this.agents.get(t.id)?.setModel(t.model);
+      this._changed(t);
+      if (carryOn && !r.isRunning) this._startTurn(t, 'Sigue con la tarea donde lo dejaste.');
+      return;
+    }
+    if (r.isRunning) {
+      r.pendingSwitch = { accountId: target.id, model, carryOn };
+      r.statusLine = `Cambiará a ${target.name} al terminar este turno`;
+      this._changed(t);
+      return;
+    }
+    this.agents.get(t.id)?.close();
+    this.agents.delete(t.id);
+    const from = this._account(t);
+    t.accountId = target.id;
+    t.model = model || 'default';
+    t.effort = null;
+    t.sessionId = null;
+    t.handoffPending = t.items.some((i) => i.kind === 'user');
+    r.limit = null;
+    this._append(t, { id: uuid(), kind: 'notice', text: `Relevo de ${from.name} a ${target.name}${t.model !== 'default' ? ` · ${t.model}` : ''}${t.handoffPending ? ': recibe el contexto del hilo con el siguiente mensaje' : ''}` });
+    this._changed(t);
+    if (carryOn && t.handoffPending) this._startTurn(t, 'Sigue con la tarea donde lo dejó el agente anterior.', true);
+  }
+
   _diskProblem(t) {
     const gb = (n) => (n / 1e9).toFixed(1);
     const data = freeBytes(this.config.dataDir), proj = freeBytes(t.projectPath ?? this.config.projectsRoot);
@@ -296,8 +379,9 @@ export class Host {
     return null;
   }
 
-  _startTurn(t, text) {
+  _startTurn(t, text, pendingRequest = false) {
     const r = this._rt(t);
+    const account = this._account(t);
     const problem = this._diskProblem(t);
     if (problem) {
       this._append(t, { id: uuid(), kind: 'error', text: `${problem} No arranco el agente para no llenar el disco.` });
@@ -306,6 +390,11 @@ export class Host {
     }
     if (!fs.existsSync(t.projectPath)) {
       this._append(t, { id: uuid(), kind: 'error', text: `La carpeta del proyecto ya no existe: ${t.projectPath}` });
+      this._changed(t);
+      return;
+    }
+    if (!account) {
+      this._append(t, { id: uuid(), kind: 'error', text: `No hay ningún agente configurado en ${this.config.name}.` });
       this._changed(t);
       return;
     }
@@ -319,13 +408,19 @@ export class Host {
       const first = text.trim().split('\n')[0];
       t.title = first.length > 60 ? `${first.slice(0, 57)}…` : first;
     }
+    let prompt = text;
+    if (t.handoffPending) {
+      const accounts = new Map(this.accounts.map((a) => [a.id, a]));
+      prompt = handoffText({ items: t.items, accounts, projectPath: t.projectPath, target: account, pendingRequest }) + text;
+      t.handoffPending = false;
+    }
     this._append(t, { id: uuid(), kind: 'user', text });
     r.isRunning = true;
     r.limit = null;
     r.turnItems = [];
-    r.statusLine = 'Claude está trabajando…';
+    r.statusLine = `${account.name} está trabajando…`;
     t.updatedAt = now();
-    this._agent(t).send(text);
+    this._agent(t).send(prompt);
     this._changed(t);
   }
 
@@ -344,8 +439,9 @@ export class Host {
   _agent(t) {
     let s = this.agents.get(t.id);
     if (s) return s;
-    const Session = this.config.fakeAgent ? FakeSession : ClaudeSession;
-    s = new Session({ bin: this.config.claudeBin, cwd: t.projectPath, env: this.config.agentEnv, model: t.model, effort: t.effort, mode: t.mode, resumeId: t.sessionId });
+    const account = this._account(t);
+    const Session = this.config.fakeAgent ? FakeSession : account.Session;
+    s = new Session({ bin: account.bin, cwd: t.projectPath, env: this.config.agentEnv, model: t.model, effort: t.effort, mode: t.mode, resumeId: t.sessionId });
     this.agents.set(t.id, s);
     const r = this._rt(t);
     const item = (key, make) => {
@@ -354,24 +450,27 @@ export class Host {
       if (!it) { it = this._append(t, make()); r.keys.set(key, it.id); r.turnItems?.push(it.id); }
       return it;
     };
+    const assistant = () => ({ id: uuid(), kind: 'assistant', text: '', accountId: account.id, model: t.model });
     s.on('session', (id) => { t.sessionId = id; this._saveThread(t); });
     s.on('status', (text) => { r.statusLine = text; this._changed(t, false); });
-    s.on('textDelta', (key, text) => {
-      const it = item(`a:${key}`, () => ({ id: uuid(), kind: 'assistant', text: '', accountId: this.account.id, model: t.model }));
-      it.text += text; this._touch(t, it); this._changed(t, false);
-    });
-    s.on('textFinal', (key, text) => {
-      const it = item(`a:${key}`, () => ({ id: uuid(), kind: 'assistant', text: '', accountId: this.account.id, model: t.model }));
-      it.text = text; this._touch(t, it); this._changed(t, false);
-    });
+    s.on('textDelta', (key, text) => { const it = item(`a:${key}`, assistant); it.text += text; this._touch(t, it); this._changed(t, false); });
+    s.on('textFinal', (key, text) => { const it = item(`a:${key}`, assistant); it.text = text; this._touch(t, it); this._changed(t, false); });
     s.on('reasoningDelta', (key, text) => {
       const it = item(`r:${key}`, () => ({ id: uuid(), kind: 'reasoning', text: '' }));
       it.text += text; this._touch(t, it); this._changed(t, false);
+    });
+    s.on('reasoningFinal', (key, text) => {
+      const it = item(`r:${key}`, () => ({ id: uuid(), kind: 'reasoning', text: '' }));
+      it.text = text; this._touch(t, it); this._changed(t, false);
     });
     s.on('toolStarted', (key, name, title, input) => {
       const it = item(`t:${key}`, () => ({ id: uuid(), kind: 'tool', text: title, title, toolName: name, toolState: 'running' }));
       if (input?.command && !it.output) it.output = `$ ${input.command}`;
       r.statusLine = title; this._touch(t, it); this._changed(t, false);
+    });
+    s.on('toolOutput', (key, text) => {
+      const it = item(`t:${key}`, () => ({ id: uuid(), kind: 'tool', text: 'Comando', toolState: 'running' }));
+      it.output = ((it.output ?? '') + text).slice(-4000); this._touch(t, it); this._changed(t, false);
     });
     s.on('toolFinished', (key, ok, output) => {
       const it = item(`t:${key}`, () => ({ id: uuid(), kind: 'tool', text: 'Herramienta', toolState: 'running' }));
@@ -390,20 +489,25 @@ export class Host {
     });
     s.on('notice', (text) => { this._append(t, { id: uuid(), kind: 'notice', text }); this._changed(t); });
     s.on('failure', (f) => {
-      this._append(t, { id: uuid(), kind: 'error', text: f.message, accountId: this.account.id });
+      this._append(t, { id: uuid(), kind: 'error', text: f.message, accountId: account.id });
       if (f.kind === 'auth') {
-        this.account.status = { ...(this.account.status ?? {}), loggedIn: false, error: 'Sin sesión: ejecuta «relevo-host login» en el host' };
-        this._append(t, { id: uuid(), kind: 'notice', text: `Inicia sesión en Claude en ${this.config.name}: ssh y «relevo-host login».` });
+        account.status = { ...(account.status ?? {}), loggedIn: false, error: `Sin sesión: ejecuta «relevo-host login ${account.provider}» en el host` };
+        this._append(t, { id: uuid(), kind: 'notice', text: `Inicia sesión en ${account.name} en ${this.config.name}: ssh y «relevo-host login ${account.provider}».` });
       }
       if (f.kind === 'limit' || f.kind === 'unavailable') {
-        r.limit = { accountId: this.account.id, message: f.message, resetsAt: f.resetsAt ?? null, isCapacity: f.kind === 'unavailable', isNoPlan: false };
+        r.limit = { accountId: account.id, message: f.message, resetsAt: f.resetsAt ?? null, isCapacity: f.kind === 'unavailable', isNoPlan: false };
       }
-      if (f.kind === 'sessionLost') t.sessionId = null;
+      if (f.kind === 'sessionLost') {
+        // The CLI lost its session: a fresh one gets the thread's context instead.
+        t.sessionId = null;
+        t.handoffPending = t.items.some((i) => i.kind === 'user');
+        this.agents.delete(t.id);
+      }
       if (t.queued.length) t.queuePaused = true;
       this._changed(t);
     });
     s.on('usage', ({ windows, plan }) => {
-      this.account.status = { ...(this.account.status ?? {}), loggedIn: true, windows, plan: plan ?? this.account.status?.plan ?? null, updatedAt: now() };
+      account.status = { ...(account.status ?? {}), loggedIn: true, windows, plan: plan ?? account.status?.plan ?? null, updatedAt: now() };
       this._broadcastSnapshot();
     });
     s.on('tokens', (u) => {
@@ -413,7 +517,7 @@ export class Host {
       target.usage = clean({ tokens: u.tokens, cacheShare: u.cacheShare, cost: u.cost, costEstimated: true, paid: false });
       this._touch(t, target);
     });
-    s.on('turnStarted', () => { r.isRunning = true; r.turnItems = []; r.statusLine = 'Claude retoma por su cuenta…'; this._changed(t); });
+    s.on('turnStarted', () => { r.isRunning = true; r.turnItems = []; r.statusLine = `${account.name} retoma por su cuenta…`; this._changed(t); });
     s.on('turnFinished', () => {
       r.isRunning = false;
       r.statusLine = null;
@@ -426,6 +530,12 @@ export class Host {
       r.keys.clear();
       t.updatedAt = now();
       this._changed(t);
+      if (r.pendingSwitch) {
+        const { accountId, model, carryOn } = r.pendingSwitch;
+        r.pendingSwitch = null;
+        this.select(t, accountId, model, carryOn);
+        return;
+      }
       if (r.sendNow) { const text = r.sendNow; r.sendNow = null; this._startTurn(t, text); return; }
       this._next(t);
       for (const other of this.threads.values()) if (other !== t && other.queued.length && !this._rt(other).isRunning && !other.queuePaused) this._next(other);
@@ -455,24 +565,27 @@ export class Host {
       it.resolution = option?.label ?? optionId;
       respond(optionId, null);
     }
-    r.statusLine = 'Claude está trabajando…';
+    r.statusLine = `${this._account(t).name} está trabajando…`;
     this._touch(t, it);
     this._changed(t);
   }
 
   // MARK: - Limits and housekeeping
 
-  async refreshUsage() {
-    if (this.account.refreshing) return;
-    this.account.refreshing = true;
+  refreshUsage() {
+    return Promise.all(this.accounts.map((a) => this._refreshAccount(a)));
+  }
+
+  async _refreshAccount(a) {
+    if (a.refreshing) return;
+    a.refreshing = true;
     this._broadcastSnapshot();
-    const env = this.config.agentEnv;
-    const result = this.config.fakeAgent ? fakeProbe() : await probe({ bin: this.config.claudeBin, env, cwd: this.config.dataDir });
-    this.account.refreshing = false;
-    if (result.models) this.account.models = result.models;
-    this.account.status = {
+    const result = this.config.fakeAgent ? fakeProbe() : await a.probe({ bin: a.bin, env: this.config.agentEnv, cwd: this.config.dataDir });
+    a.refreshing = false;
+    if (result.models) a.models = result.models;
+    a.status = {
       loggedIn: result.loggedIn, plan: result.plan, email: result.email, windows: result.windows ?? [],
-      error: result.error, note: null, updatedAt: now(),
+      error: result.error, note: result.note ?? null, updatedAt: now(),
     };
     this._saveState();
     this._broadcastSnapshot();
@@ -481,33 +594,38 @@ export class Host {
   _housekeeping() {
     // Idle agent processes hold memory: close them; the next message resumes the same session.
     for (const [id, s] of this.agents) {
-      const r = this._rt(this.threads.get(id) ?? { id });
-      if (s.alive && !s.turnActive && !r.approvals.size && Date.now() - s.lastActive > IDLE_CLOSE_MS) s.close(true);
+      const t = this.threads.get(id);
+      if (!t) continue;
+      if (s.alive && !s.turnActive && !this._rt(t).approvals.size && Date.now() - s.lastActive > IDLE_CLOSE_MS) s.close(true);
     }
     // Agents' temporary files live on the data disk; remove what's older than a day.
-    const cutoff = Date.now() - 24 * 3600_000;
+    const dayAgo = Date.now() - 24 * 3600_000;
     try {
       for (const name of fs.readdirSync(this.config.tmpDir)) {
         const p = path.join(this.config.tmpDir, name);
-        const st = fs.statSync(p);
-        if (st.mtimeMs < cutoff) fs.rmSync(p, { recursive: true, force: true });
+        if (fs.statSync(p).mtimeMs < dayAgo) fs.rmSync(p, { recursive: true, force: true });
       }
     } catch {}
+    // Codex keeps every session's rollout; old ones only matter for resuming threads untouched for a month.
+    if (Date.now() - (this.lastPrune ?? 0) > 6 * 3600_000) {
+      this.lastPrune = Date.now();
+      prune(path.join(this.config.codexHome, 'sessions'), Date.now() - CODEX_SESSIONS_DAYS * 86_400_000);
+      prune(path.join(this.config.codexHome, 'log'), Date.now() - 7 * 86_400_000);
+    }
   }
 
   // MARK: - Remote objects
 
-  _remoteAccount() {
-    const a = this.account, s = a.status;
+  _remoteAccount(a) {
+    const s = a.status;
     return clean({
       id: a.id, kind: a.kind, name: a.name, agentName: a.agentName, symbol: a.symbol, tint: a.tint, usesAPIKey: false,
       status: s ? clean({
         loggedIn: s.loggedIn, plan: s.plan, email: s.email, error: s.error, note: s.note,
-        windows: (s.windows ?? []).map((w) => clean({ id: w.id, label: w.label, percent: w.percent, resetsAt: w.resetsAt, detail: w.detail })),
-        noPlan: false, exhausted: (s.windows ?? []).some((w) => w.percent >= 99.5 && (w.resetsAt ?? Infinity) > now()), updatedAt: s.updatedAt,
+        windows: (s.windows ?? []).map(remoteWindow), noPlan: false, exhausted: this._exhausted(a), updatedAt: s.updatedAt,
       }) : null,
       models: a.models.map((m) => clean({ id: m.id, name: m.name, detail: m.detail, efforts: m.efforts, defaultEffort: m.defaultEffort })),
-      defaultModel: 'default', refreshing: a.refreshing,
+      defaultModel: a.defaultModel, refreshing: a.refreshing,
     });
   }
 
@@ -522,20 +640,26 @@ export class Host {
         const last = [...t.items].reverse().find((i) => i.kind === 'assistant' || i.kind === 'user');
         return clean({
           id: t.id, projectId: t.projectId, title: t.title, updatedAt: t.updatedAt, isRunning: r.isRunning,
-          needsApproval: r.approvals.size > 0, accountId: this.account.id, preview: last?.text?.slice(0, 160) ?? null, isWaiting: false,
+          needsApproval: r.approvals.size > 0, accountId: t.accountId, preview: last?.text?.slice(0, 160) ?? null, isWaiting: false,
         });
       });
-    return { macName: this.config.name, accounts: [this._remoteAccount()], projects, threads, autoRelay: false, pushReady: false };
+    return {
+      macName: this.config.name, accounts: this.accounts.map((a) => this._remoteAccount(a)), projects, threads,
+      autoRelay: false, pushReady: false,
+    };
   }
 
   _runtime(t) {
     const r = this._rt(t);
+    const account = this._account(t);
+    const candidates = this.accounts
+      .filter((a) => a !== account && a.status?.loggedIn !== false && !this._exhausted(a))
+      .map((a) => ({ accountId: a.id, model: a.defaultModel }));
     return clean({
       isRunning: r.isRunning, statusLine: r.statusLine, limit: r.limit ? clean(r.limit) : null, mode: t.mode,
-      selectedAccountId: this.account.id, selectedModel: t.model, selectedEffort: t.effort, relayCandidates: [],
+      selectedAccountId: account?.id, selectedModel: t.model, selectedEffort: t.effort, relayCandidates: candidates,
       queued: t.queued.map((q) => ({ id: q.id, text: q.text })), queuePaused: t.queuePaused,
-      usage: (this.account.status?.windows ?? []).map((w) => clean({ id: w.id, label: w.label, percent: w.percent, resetsAt: w.resetsAt, detail: w.detail })),
-      backgroundTasks: [],
+      usage: (account?.status?.windows ?? []).map(remoteWindow), backgroundTasks: [],
     });
   }
 
@@ -553,14 +677,14 @@ export class Host {
     const phase = waiting.length ? 'needsYou' : running.length ? 'working' : recent.length ? 'finished' : 'idle';
     let approval = null;
     if (waiting[0]) {
-      const r = this._rt(waiting[0]);
-      const [itemId] = r.approvals.keys();
+      const [itemId] = this._rt(waiting[0]).approvals.keys();
       const it = this._item(waiting[0], itemId);
       if (it) approval = clean({ itemId, title: it.title ?? it.text, detail: it.output, options: it.options ?? [] });
     }
+    const account = focus ? this._account(focus) : null;
     return clean({
-      phase, threadId: focus?.id, threadTitle: focus?.title ?? '', accountName: focus ? 'Claude' : null,
-      symbol: focus ? this.account.symbol : null, tint: focus ? this.account.tint : null, model: focus?.model,
+      phase, threadId: focus?.id, threadTitle: focus?.title ?? '', accountName: account?.name,
+      symbol: account?.symbol, tint: account?.tint, model: focus?.model,
       statusLine: focus ? this._rt(focus).statusLine : null, approval, running: running.length, waiting: waiting.length, updatedAt: now(),
     });
   }

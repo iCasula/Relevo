@@ -2,12 +2,12 @@ import Foundation
 import Network
 import RelevoProtocol
 
-/// `Relevo --selftest remotehost <pairing link> [prompt] [mode]`: talks to a Relevo host (the Mac app or the
-/// headless host) exactly as the iPhone does, over a direct address, and checks that every message decodes.
+/// `Relevo --selftest remotehost <pairing link> [prompt] [mode] [relay]`: talks to a Relevo host (the Mac app or
+/// the headless host) exactly as the iPhone does, over a direct address, and checks that every message decodes.
 /// With a prompt it opens a thread in the first project, sends it, approves what the agent asks and waits for
-/// the reply.
+/// the reply. With `relay` it then hands the thread to the host's next subscription and checks it carries on.
 extension SelfTest {
-    static func remoteHost(link: String, prompt: String?, mode: String?) async {
+    static func remoteHost(link: String, prompt: String?, mode: String?, relay: Bool = false) async {
         var failures = 0
         func check(_ ok: Bool, _ what: String) {
             print((ok ? "ok   " : "FAIL ") + what)
@@ -83,7 +83,7 @@ extension SelfTest {
         check(await wait(10) { thread?.runtime.isRunning == true || thread?.items.contains { $0.kind == .assistant } == true }, "turn started")
 
         var approved = Set<String>()
-        let finished = await wait(180) {
+        func turnDone() async -> Bool { await wait(180) {
             if let t = thread {
                 for item in t.items where item.kind == .approval && item.resolution == nil && !approved.contains(item.id) {
                     approved.insert(item.id)
@@ -94,8 +94,20 @@ extension SelfTest {
                 }
             }
             return thread?.runtime.isRunning == false && thread?.items.contains { $0.kind == .assistant || $0.kind == .error } == true
+        } }
+        check(await turnDone(), "turn finished (\(patches) patches)")
+        if relay {
+            let next = snapshot?.accounts.first { $0.id != account.id && $0.status?.loggedIn != false }
+            if let next, thread?.runtime.relayCandidates.contains(where: { $0.accountId == next.id }) == true {
+                let before = thread?.items.count ?? 0
+                channel.send(ClientMessage.relay(threadId: threadId, accountId: next.id, model: next.defaultModel))
+                check(await wait(10) { thread?.runtime.selectedAccountId == next.id && thread?.runtime.isRunning == true }, "relay to \(next.name) started a turn")
+                check(await turnDone() && thread?.items.dropFirst(before).contains { $0.kind == .assistant && $0.accountId == next.id && !$0.text.isEmpty } == true,
+                      "\(next.name) carried on in the same thread")
+            } else {
+                check(false, "a second subscription signed in to relay to")
+            }
         }
-        check(finished, "turn finished (\(patches) patches)")
         if let t = thread {
             for item in t.items {
                 let text = item.kind == .tool ? "\(item.title ?? item.text) [\(item.toolState?.rawValue ?? "-")]" : item.text
