@@ -14,6 +14,7 @@ struct ThreadListView: View {
         NavigationStack(path: $viewModel.path) {
             content
                 .navigationTitle("Hilos")
+                .navigationSubtitle(hosts.count > 1 ? viewModel.client.pairing?.name ?? "" : "")
                 .navigationDestination(for: UUID.self) { id in
                     ThreadDetailView(client: viewModel.client, threadId: id)
                 }
@@ -23,6 +24,8 @@ struct ThreadListView: View {
         .onChange(of: router.threadToOpen, initial: true) { openPendingThread() }
         .onChange(of: viewModel.hasSnapshot) { openPendingThread() }
     }
+
+    private var hosts: [PairingInfo] { viewModel.client.hosts }
 
     private func openPendingThread() {
         guard viewModel.hasSnapshot, let id = router.threadToOpen else { return }
@@ -34,7 +37,7 @@ struct ThreadListView: View {
     private var content: some View {
         if !viewModel.hasSnapshot {
             ContentUnavailableView {
-                Label("Conectando con el Mac", systemImage: "macbook.and.iphone")
+                Label("Conectando con \(viewModel.client.pairing?.name ?? "el Mac")", systemImage: "macbook.and.iphone")
             } description: {
                 ConnectionStatusRow(state: viewModel.client.state, macName: viewModel.client.pairing?.name ?? "el Mac",
                                     retry: viewModel.retry)
@@ -72,7 +75,7 @@ struct ThreadListView: View {
                 if viewModel.sections.isEmpty {
                     if viewModel.searchText.isEmpty {
                         ContentUnavailableView("Sin proyectos", systemImage: "folder",
-                                               description: Text("Añade un proyecto en Relevo para Mac y aparecerá aquí."))
+                                               description: Text("Añade un proyecto en \(viewModel.client.snapshot?.macName ?? "el Mac") y aparecerá aquí."))
                     } else {
                         ContentUnavailableView.search(text: viewModel.searchText)
                     }
@@ -96,6 +99,27 @@ struct ThreadListView: View {
                 Label("Nuevo hilo", systemImage: "square.and.pencil")
             }
             .disabled(viewModel.projects.isEmpty || !viewModel.client.isConnected)
+        }
+        if hosts.count > 1 {
+            // Several hosts (the Mac, a home server…): switch between them here.
+            ToolbarItem(placement: .topBarLeading) {
+                Menu {
+                    ForEach(hosts, id: \.serverId) { host in
+                        Button {
+                            viewModel.client.switchHost(to: host.serverId)
+                        } label: {
+                            if host.serverId == viewModel.client.pairing?.serverId {
+                                Label(host.name, systemImage: "checkmark")
+                            } else {
+                                Text(host.name)
+                            }
+                        }
+                    }
+                } label: {
+                    Label(viewModel.client.pairing?.name ?? "Host", systemImage: "server.rack")
+                        .labelStyle(.titleAndIcon)
+                }
+            }
         }
         if viewModel.runningCount > 0 && viewModel.client.isConnected {
             ToolbarItem(placement: .topBarLeading) {

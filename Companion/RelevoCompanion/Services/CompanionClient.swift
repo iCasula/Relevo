@@ -15,7 +15,10 @@ final class CompanionClient {
         case offline(String)
     }
 
+    /// The host in use: a Mac or a headless Relevo host (e.g. a home server).
     private(set) var pairing: PairingInfo?
+    /// Every paired host; one is in use at a time.
+    private(set) var hosts: [PairingInfo] = []
     private(set) var state: ConnectionState = .unpaired
     private(set) var snapshot: RemoteSnapshot?
     /// Transcripts of the threads opened on this device (the subscribed one is kept live).
@@ -40,7 +43,9 @@ final class CompanionClient {
     @ObservationIgnored private let imageCache = NSCache<NSString, NSData>()
 
     init() {
-        pairing = PairingStore.load()
+        let stored = PairingStore.loadAll()
+        hosts = stored.hosts
+        pairing = hosts.first { $0.serverId == stored.active } ?? hosts.first
         state = pairing == nil ? .unpaired : .offline("Sin conectar")
         liveActivities.onRegistration = { [weak self] registration in
             guard let self, self.isConnected else { return }
@@ -52,32 +57,66 @@ final class CompanionClient {
 
     // MARK: - Pairing
 
+    /// Adds a host (or updates one paired again) and switches to it.
     func pair(with info: PairingInfo) {
-        PairingStore.save(info)
+        if let i = hosts.firstIndex(where: { $0.serverId == info.serverId }) { hosts[i] = info } else { hosts.append(info) }
+        use(info)
+    }
+
+    /// Switches to another paired host: its threads, limits and Live Activity replace the current one's.
+    func switchHost(to serverId: String) {
+        guard serverId != pairing?.serverId, let info = hosts.first(where: { $0.serverId == serverId }) else { return }
+        use(info)
+    }
+
+    private func use(_ info: PairingInfo) {
+        if pairing?.serverId != info.serverId { liveActivities.endAll() }
         pairing = info
         snapshot = nil
         threads = [:]
+        activityState = nil
+        subscribed = nil
+        persist()
         reconnect()
     }
 
-    /// Fixed address used when the Mac can't be found on the local network (e.g. through Tailscale).
+    /// Saves a change to the host in use (address set by hand, addresses learnt from it).
+    private func update(_ info: PairingInfo) {
+        if let i = hosts.firstIndex(where: { $0.serverId == info.serverId }) { hosts[i] = info }
+        pairing = info
+        persist()
+    }
+
+    private func persist() {
+        PairingStore.saveAll(hosts, active: pairing?.serverId)
+    }
+
+    /// Fixed address used when the host can't be found on the local network (e.g. through Tailscale).
     func setManualAddress(host: String?, port: UInt16?) {
         guard var info = pairing else { return }
         let trimmed = host?.trimmingCharacters(in: .whitespaces)
         info.host = trimmed?.isEmpty == false ? trimmed : nil
         info.port = port
-        PairingStore.save(info)
-        pairing = info
+        update(info)
         reconnect()
     }
 
+    /// Forgets the host in use; the next paired one (if any) takes over.
     func unpair() {
         liveActivities.endAll()
         disconnect()
-        PairingStore.clear()
-        pairing = nil
+        hosts.removeAll { $0.serverId == pairing?.serverId }
         snapshot = nil
         threads = [:]
+        activityState = nil
+        if let next = hosts.first {
+            pairing = next
+            persist()
+            reconnect()
+            return
+        }
+        PairingStore.clear()
+        pairing = nil
         state = .unpaired
     }
 
@@ -223,8 +262,7 @@ final class CompanionClient {
         guard info.addresses != sorted || info.port != newPort else { return }
         info.addresses = sorted
         info.port = newPort
-        PairingStore.save(info)
-        pairing = info
+        update(info)
     }
 
     private static func describe(_ error: NWError) -> String {

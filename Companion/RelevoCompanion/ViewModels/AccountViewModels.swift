@@ -32,6 +32,16 @@ final class SettingsViewModel {
         port = client.pairing?.port.map(String.init) ?? ""
     }
 
+    /// The address fields follow the host in use.
+    func reloadAddress() {
+        host = client.pairing?.host ?? ""
+        port = client.pairing?.port.map(String.init) ?? ""
+    }
+
+    var hosts: [PairingInfo] { client.hosts }
+    var activeHostId: String? { client.pairing?.serverId }
+    func switchHost(to id: String) { client.switchHost(to: id) }
+
     var macName: String { client.snapshot?.macName ?? client.pairing?.name ?? "Mac" }
 
     var liveActivitiesEnabled: Bool {

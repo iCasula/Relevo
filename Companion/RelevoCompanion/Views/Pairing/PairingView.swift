@@ -32,6 +32,9 @@ struct PairingView: View {
                         StepRow(number: 1, text: "En el Mac, abre Relevo › Ajustes › iPhone y activa el control desde el iPhone.")
                         StepRow(number: 2, text: "Escanea el código con la Cámara del iPhone o desde aquí.")
                         StepRow(number: 3, text: "El iPhone y el Mac deben estar en la misma red Wi‑Fi (o en tu VPN).")
+                        Text("¿Un servidor sin pantalla con relevo-host? Ejecuta «relevo-host pair» en él y pega aquí el enlace.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
                     }
                     .padding(20)
                     .frame(maxWidth: .infinity, alignment: .leading)
