@@ -22,6 +22,8 @@ struct RootView: View {
             ActivityPreviewGallery()
         } else if UserDefaults.standard.bool(forKey: "previewMarkdown") {
             ScrollView { MarkdownView(MarkdownSample.text).padding() }
+        } else if let variant = UserDefaults.standard.string(forKey: "previewComposer") {
+            ComposerMockupScreen(variant: variant, running: UserDefaults.standard.bool(forKey: "previewComposerRunning"))
         } else {
             main
         }
