@@ -38,8 +38,9 @@ final class AntigravityProvider: Provider {
 
     @MainActor func quickCompletion(account: Account, system: String, prompt: String) async -> String? {
         guard let launch = Binaries.launch(for: account) else { return nil }
-        let out = await ProcessRunner.capture(launch, ["--output-format", "stream-json", "--model", "gemini-3.8-flash-low",
-                                                       "--mode", "plan", "--disable-slash-commands", "-p=\(system)\n\n\(prompt)"], timeout: 45).out
+        let args = ["--output-format", "stream-json", "--model", "gemini-3.8-flash-low",
+                    "--mode", "plan", "--disable-slash-commands", "-p=\(system)\n\n\(prompt)"]
+        guard case .output(let out, _) = await AntigravityRuns.background(account, launch, args, timeout: 45) else { return nil }
         return out.split(separator: "\n").compactMap { JSONUtil.parse(String($0)) }
             .last { $0.str("event") == "result" }?.obj("result")?.str("response")
     }
@@ -53,26 +54,30 @@ final class AntigravityProvider: Provider {
         AntigravityAgent(account: account, cwd: cwd, model: model, mode: mode, resumeId: resumeId)
     }
 
-    /// `agy -p=/usage` (no model call) + `agy models`.
+    /// `agy -p=/usage` (no model call), then `agy models`. One after the other: two agy processes refreshing
+    /// an expired token at once corrupt the saved login.
     @MainActor func probe(_ account: Account) async -> AccountProbe {
         guard let launch = Binaries.launch(for: account) else {
             return AccountProbe(status: AccountStatus(error: "Antigravity CLI (`agy`) no encontrada"))
         }
-        let home = launch.environment["HOME"] ?? NSHomeDirectory()
-        async let usageOut = ProcessRunner.capture(launch, ["-p=/usage"])
-        async let modelsOut = ProcessRunner.capture(launch, ["models"])
-        let (usage, models) = await (usageOut, modelsOut)
-        var status = AccountStatus(loggedIn: true, plan: "Antigravity", email: Self.email(home: home))
-        status.windows = AntigravityUsage.parse(usage.out)
-        if status.windows.isEmpty {
-            let err = (usage.err + usage.out).trimmingCharacters(in: .whitespacesAndNewlines)
-            if err.lowercased().contains("sign in") || err.lowercased().contains("not logged") || LimitDetector.isAuth(err) {
-                status = AccountStatus(loggedIn: false, error: "Inicia sesión en Antigravity")
-            } else {
-                status.error = err.isEmpty ? "No se pudo leer el uso" : String(err.suffix(200))
-            }
+        let signedOut = AccountProbe(status: AccountStatus(loggedIn: false, error: "Inicia sesión en Antigravity"))
+        let home = AntigravityRuns.home(of: launch)
+        guard case .output(let usageOut, let usageErr) = await AntigravityRuns.background(account, launch, ["-p=/usage"]) else {
+            return signedOut
         }
-        let list = AntigravityUsage.parseModels(models.out)
+        var status = AccountStatus(loggedIn: true, plan: "Antigravity", email: Self.email(home: home))
+        status.windows = AntigravityUsage.parse(usageOut)
+        if status.windows.isEmpty {
+            let err = (usageErr + usageOut).trimmingCharacters(in: .whitespacesAndNewlines)
+            if err.lowercased().contains("sign in") || err.lowercased().contains("not logged") || LimitDetector.isAuth(err) {
+                return signedOut
+            }
+            status.error = err.isEmpty ? "No se pudo leer el uso" : String(err.suffix(200))
+        }
+        var list: [ModelOption] = []
+        if case .output(let modelsOut, _) = await AntigravityRuns.background(account, launch, ["models"]) {
+            list = AntigravityUsage.parseModels(modelsOut)
+        }
         return AccountProbe(status: status, models: list.isEmpty ? nil : list)
     }
 

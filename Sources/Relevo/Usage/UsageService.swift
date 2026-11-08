@@ -21,11 +21,12 @@ enum UsageService {
 
 /// Runs a CLI to completion and captures its output (used for read-only probes).
 enum ProcessRunner {
-    static func capture(_ launch: Launch, _ args: [String], timeout: TimeInterval = 40) async -> (out: String, err: String) {
-        await Task.detached { run(launch, args, timeout: timeout) }.value
+    /// `abortWhen`: stop the process as soon as its stderr shows this text (e.g. a CLI waiting for a sign-in).
+    static func capture(_ launch: Launch, _ args: [String], timeout: TimeInterval = 40, abortWhen: String? = nil) async -> (out: String, err: String) {
+        await Task.detached { run(launch, args, timeout: timeout, abortWhen: abortWhen) }.value
     }
 
-    private static func run(_ launch: Launch, _ args: [String], timeout: TimeInterval) -> (out: String, err: String) {
+    private static func run(_ launch: Launch, _ args: [String], timeout: TimeInterval, abortWhen: String?) -> (out: String, err: String) {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: launch.executable)
         p.arguments = launch.prefixArgs + args
@@ -40,7 +41,16 @@ enum ProcessRunner {
         var errData = Data()
         let group = DispatchGroup()
         group.enter()
-        DispatchQueue.global().async { errData = err.fileHandleForReading.readDataToEndOfFile(); group.leave() }
+        DispatchQueue.global().async {
+            let handle = err.fileHandleForReading
+            while true {
+                let chunk = handle.availableData
+                if chunk.isEmpty { break }
+                errData.append(chunk)
+                if let abortWhen, p.isRunning, String(decoding: errData.suffix(8192), as: UTF8.self).contains(abortWhen) { p.terminate() }
+            }
+            group.leave()
+        }
         let outData = out.fileHandleForReading.readDataToEndOfFile()
         group.wait()
         p.waitUntilExit()

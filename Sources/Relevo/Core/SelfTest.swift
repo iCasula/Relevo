@@ -37,6 +37,7 @@ enum SelfTest {
             case "mcpserve" where rest.count >= 2: await mcpServe(seconds: Double(rest[1]) ?? 120, full: rest.count > 2 && rest[2] == "full")
             case "prwatch": prWatch()
             case "followscroll": await followScroll()
+            case "agylogin": await agyLogin()
             case "background" where rest.count >= 2: await background(cwd: rest[1])
             case "limitplan" where rest.count >= 2: await limitPlan(cwd: rest[1])
             case "models": await modelLists()

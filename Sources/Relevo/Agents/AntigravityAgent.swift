@@ -52,6 +52,33 @@ final class AntigravityAgent: AgentSession {
         streamedSteps.removeAll()
         anyText = false
         onEvent?(.status("Gemini está trabajando…"))
+        let home = AntigravityRuns.home(of: launch)
+        let account = account, turnNumber = turn
+        startTask = Task { [weak self] in
+            let start = await AntigravityRuns.beginTurn(account, home: home)
+            guard let self, !self.closed, self.turn == turnNumber, self.turnActive else {
+                // Stopped before agy started: give back what the gate handed out.
+                if case .go(let holdsGate) = start {
+                    AntigravityRuns.endTurn(home: home)
+                    if holdsGate { await AntigravityGate.shared.unlock(home) }
+                }
+                return
+            }
+            self.startTask = nil
+            switch start {
+            case .signedOut:
+                self.report(AgentFailure(kind: .auth, message: "La sesión de Antigravity no es válida, y Relevo no abre el navegador por su cuenta."))
+                self.turnActive = false
+                self.onEvent?(.turnFinished)
+            case .go(let holdsGate):
+                self.launchTurn(launch, text: text, skipPermissions: skipPermissions, home: home, holdsGate: holdsGate)
+            }
+        }
+    }
+
+    private var startTask: Task<Void, Never>?
+
+    private func launchTurn(_ launch: Launch, text: String, skipPermissions: Bool, home: String, holdsGate: Bool) {
         var args = launch.prefixArgs + ["--output-format", "stream-json"]
         if !model.isEmpty { args += ["--model", model] }
         if let effort, !effort.isEmpty { args += ["--effort", effort] }
@@ -66,6 +93,7 @@ final class AntigravityAgent: AgentSession {
         let p = LineProcess(executable: launch.executable, arguments: args, cwd: cwd, environment: launch.environment)
         p.onLine = { [weak self] line in self?.handle(line) }
         p.onExit = { [weak self, weak p] code in
+            AntigravityRuns.endTurn(home: home)
             guard let self, let p, p === self.proc else { return }
             self.exited(code, p.stderrTail)
         }
@@ -73,7 +101,10 @@ final class AntigravityAgent: AgentSession {
             try p.start()
             p.closeInput()
             proc = p
+            if holdsGate { AntigravityRuns.releaseAfterRefresh(home: home) { [weak p] in p?.isRunning ?? false } }
         } catch {
+            AntigravityRuns.endTurn(home: home)
+            if holdsGate { Task { await AntigravityGate.shared.unlock(home) } }
             turnActive = false
             onEvent?(.failure(AgentFailure(kind: .other, message: error.localizedDescription)))
             onEvent?(.turnFinished)
@@ -83,10 +114,21 @@ final class AntigravityAgent: AgentSession {
     func setModel(_ model: String) { self.model = model }
     func setMode(_ mode: PermissionMode) { self.mode = mode }
     func setEffort(_ effort: String?) { self.effort = effort }
-    func interrupt() { proc?.interruptSignal() }
+
+    func interrupt() {
+        if let proc {
+            proc.interruptSignal()
+        } else if startTask != nil {
+            // Still waiting for the gate: the turn ends without agy ever starting.
+            startTask = nil
+            turnActive = false
+            onEvent?(.turnFinished)
+        }
+    }
 
     func close() {
         closed = true
+        startTask = nil
         proc?.terminate()
         proc = nil
     }
