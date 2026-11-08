@@ -53,6 +53,8 @@ public enum SuggestionAction: String, Codable, Sendable {
 /// Mac → iPhone.
 public enum ServerMessage: Codable, Sendable {
     case welcome(name: String, version: Int)
+    /// Where else the Mac can be reached (its IPv4 addresses and listening port), sent after `welcome`.
+    case addresses(hosts: [String], port: UInt16)
     case snapshot(RemoteSnapshot)
     case thread(RemoteThread)
     case threadPatch(RemoteThreadPatch)

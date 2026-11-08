@@ -37,10 +37,10 @@ enum CompanionCredentials {
 
     static func pairing(port: UInt16?, host: String?) -> PairingInfo {
         let c = current()
-        return PairingInfo(serverId: c.serverId, name: macName, secret: c.secret, port: port, host: host)
+        return PairingInfo(serverId: c.serverId, name: macName, secret: c.secret, port: port, host: host, addresses: localAddresses())
     }
 
-    /// IPv4 addresses of this Mac (Wi-Fi, Ethernet, VPNs such as Tailscale), for the manual-address hint.
+    /// IPv4 addresses of this Mac (Wi-Fi, Ethernet, VPNs such as Tailscale): sent to the iPhone and shown as a hint.
     static func localAddresses() -> [String] {
         var result: [String] = []
         var ifaddr: UnsafeMutablePointer<ifaddrs>?

@@ -19,6 +19,9 @@ struct SettingsView: View {
                             .foregroundStyle(viewModel.state == .connected ? .green : .secondary)
                             .multilineTextAlignment(.trailing)
                     }
+                    if let route = viewModel.route {
+                        LabeledContent("Conectado por", value: route)
+                    }
                     LabeledContent("Relevo automático", value: viewModel.autoRelay ? "Activado" : "Desactivado")
                     Button("Reconectar", systemImage: "arrow.clockwise", action: viewModel.reconnect)
                 }
@@ -56,7 +59,11 @@ struct SettingsView: View {
                 } header: {
                     Text("Fuera de casa")
                 } footer: {
-                    Text("En la misma Wi‑Fi el iPhone encuentra el Mac solo. Para conectarte desde fuera, usa una VPN como Tailscale y pon la dirección del Mac.")
+                    if let addresses = viewModel.knownAddresses {
+                        Text("Con una VPN que llegue a la red del Mac (WireGuard, Tailscale…), el iPhone prueba solo sus direcciones: \(addresses). Pon aquí otra solo si tu VPN usa una distinta.")
+                    } else {
+                        Text("En la misma Wi‑Fi el iPhone encuentra el Mac solo. Conéctate una vez en casa para que aprenda sus direcciones; después también llegará por una VPN (WireGuard, Tailscale…). O pon aquí la dirección del Mac.")
+                    }
                 }
 
                 Section {

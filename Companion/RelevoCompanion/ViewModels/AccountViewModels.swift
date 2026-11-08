@@ -45,6 +45,18 @@ final class SettingsViewModel {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "–"
     }
 
+    /// How the current connection reaches the Mac.
+    var route: String? {
+        guard client.state == .connected, let via = client.connectedVia else { return nil }
+        return via == "red local" ? "Red local" : via
+    }
+
+    /// The Mac's addresses this iPhone knows (they update by themselves on every connection).
+    var knownAddresses: String? {
+        guard let list = client.pairing?.addresses, !list.isEmpty else { return nil }
+        return list.joined(separator: ", ")
+    }
+
     var stateDescription: String {
         switch client.state {
         case .connected: "Conectado"

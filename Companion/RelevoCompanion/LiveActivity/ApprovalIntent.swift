@@ -53,22 +53,25 @@ enum QuickCommand {
 
     static func send(_ message: ClientMessage) async throws {
         guard let pairing = PairingStore.load() else { throw Failure.unpaired }
-        var endpoints: [NWEndpoint] = [.service(name: pairing.serverId, type: CompanionTransport.serviceType, domain: "local.", interface: nil)]
-        if let host = pairing.host {
-            endpoints.append(.hostPort(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: pairing.port ?? CompanionTransport.defaultPort) ?? .any))
+        // Every route at once (Bonjour, the Mac's addresses through a VPN…); the first to deliver wins.
+        // The Mac ignores a repeated answer to a permission that's already settled.
+        let attempts = pairing.endpoints.map { OneShot(message: message, endpoint: $0.endpoint, pairing: pairing) }
+        attempts.forEach { $0.start() }
+        let deadline = Date().addingTimeInterval(6)
+        while Date() < deadline, !attempts.contains(where: { $0.result == true }), !attempts.allSatisfy({ $0.result == false }) {
+            try? await Task.sleep(for: .milliseconds(100))
         }
-        for endpoint in endpoints {
-            if await OneShot(message: message, endpoint: endpoint, pairing: pairing).run() { return }
-        }
-        throw Failure.unreachable
+        let delivered = attempts.contains { $0.result == true }
+        attempts.forEach { $0.finish() }
+        if !delivered { throw Failure.unreachable }
     }
 }
 
-/// hello → wait for welcome → send the command → close. Gives up after a few seconds.
+/// hello → wait for welcome → send the command; `result` says whether it got through.
 @MainActor
 private final class OneShot {
     private let channel: MessageChannel
-    private var result: Bool?
+    private(set) var result: Bool?
 
     init(message: ClientMessage, endpoint: NWEndpoint, pairing: PairingInfo) {
         let parameters = CompanionTransport.parameters(secret: pairing.secret, identity: pairing.serverId)
@@ -91,11 +94,7 @@ private final class OneShot {
         }
     }
 
-    func run() async -> Bool {
-        channel.start()
-        let deadline = Date().addingTimeInterval(6)
-        while result == nil, Date() < deadline { try? await Task.sleep(for: .milliseconds(100)) }
-        channel.cancel()
-        return result ?? false
-    }
+    func start() { channel.start() }
+
+    func finish() { channel.cancel() }
 }

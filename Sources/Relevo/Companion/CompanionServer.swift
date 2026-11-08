@@ -187,6 +187,7 @@ final class CompanionPeer {
             greeted = true
             server?.peerIdentified(self)
             send(.welcome(name: CompanionCredentials.macName, version: CompanionCoding.version))
+            if let port = server?.port { send(.addresses(hosts: CompanionCredentials.localAddresses(), port: port)) }
             observeSnapshot()
             return
         }

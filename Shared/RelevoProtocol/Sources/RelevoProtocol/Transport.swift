@@ -19,6 +19,8 @@ public enum CompanionTransport {
         // Network.framework offers PSK cipher suites on TLS 1.2.
         sec_protocol_options_set_min_tls_protocol_version(sec, .TLSv12)
         sec_protocol_options_set_max_tls_protocol_version(sec, .TLSv12)
+        // Every connection proves the current key: a resumed session would let an unpaired iPhone back in.
+        sec_protocol_options_set_tls_resumption_enabled(sec, false)
 
         let tcp = NWProtocolTCP.Options()
         tcp.enableKeepalive = true
@@ -36,6 +38,26 @@ public enum CompanionTransport {
 
     private static func dispatchData(_ data: Data) -> DispatchData {
         data.withUnsafeBytes { DispatchData(bytes: $0) }
+    }
+}
+
+public extension PairingInfo {
+    /// Every way to reach the Mac, tried at the same time: Bonjour (same network), the address set by hand,
+    /// and the Mac's own addresses (through a VPN such as WireGuard, where Bonjour doesn't reach).
+    var endpoints: [(endpoint: NWEndpoint, label: String)] {
+        var list: [(NWEndpoint, String)] = [(.service(name: serverId, type: CompanionTransport.serviceType, domain: "local.", interface: nil), "red local")]
+        var seen = Set<String>()
+        for address in [host].compactMap({ $0 }) + (addresses ?? []) where seen.insert(address).inserted {
+            if let endpoint = Self.directEndpoint(address, port: port ?? CompanionTransport.defaultPort) { list.append((endpoint, address)) }
+        }
+        return list
+    }
+
+    /// A URL endpoint (`wss://host:port/`): the WebSocket client aborts the handshake when given a bare
+    /// IP address as `.hostPort`, and IP addresses are what a VPN usually gives.
+    static func directEndpoint(_ address: String, port: UInt16) -> NWEndpoint? {
+        let host = address.contains(":") && !address.hasPrefix("[") ? "[\(address)]" : address
+        return URL(string: "wss://\(host):\(port)/").map { .url($0) }
     }
 }
 

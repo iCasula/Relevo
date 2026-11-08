@@ -1171,8 +1171,14 @@ enum SelfTest {
         out("PAIRING \(pairing.url.absoluteString.prefix(60))…")
         guard let parsed = PairingInfo(url: pairing.url), parsed.secret == pairing.secret else { out("PAIRING URL no se puede leer"); return }
 
-        for (label, secret) in [("clave correcta", parsed.secret), ("clave incorrecta", Data(repeating: 7, count: 32))] {
-            let endpoint = NWEndpoint.service(name: parsed.serverId, type: CompanionTransport.serviceType, domain: "local.", interface: nil)
+        out("DIRECCIONES en el código: \(parsed.addresses ?? [])")
+        let bonjour = NWEndpoint.service(name: parsed.serverId, type: CompanionTransport.serviceType, domain: "local.", interface: nil)
+        var cases: [(String, Data, NWEndpoint)] = [("clave correcta", parsed.secret, bonjour), ("clave incorrecta", Data(repeating: 7, count: 32), bonjour)]
+        // What an iPhone on a VPN does: no Bonjour, straight to one of the Mac's addresses.
+        let direct = parsed.endpoints.filter { $0.label != "red local" }.map { ($0.label, $0.endpoint) }
+            + ["localhost", "127.0.0.1", "::1"].compactMap { a in PairingInfo.directEndpoint(a, port: server.port ?? port).map { (a, $0) } }
+        cases.insert(contentsOf: direct.map { ("dirección \($0.0)", parsed.secret, $0.1) }, at: 0)
+        for (label, secret, endpoint) in cases {
             let channel = MessageChannel(connection: NWConnection(to: endpoint, using: CompanionTransport.parameters(secret: secret, identity: parsed.serverId)))
             var got: [String] = []
             var threadItems: Int?
@@ -1190,6 +1196,7 @@ enum SelfTest {
                 guard let m = try? CompanionCoding.decode(ServerMessage.self, from: data) else { got.append("??"); return }
                 switch m {
                 case .welcome(let name, let v): got.append("welcome(\(name), v\(v))")
+                case .addresses(let hosts, let port): got.append("addresses(\(hosts.joined(separator: ",")):\(port))")
                 case .snapshot(let s):
                     got.append("snapshot(\(s.accounts.count) cuentas, \(s.projects.count) proyectos, \(s.threads.count) hilos)")
                     if let first = s.threads.first, threadItems == nil {

@@ -66,7 +66,7 @@ struct CompanionSettings: View {
                     TextField("Dirección fija", text: Binding(get: { store.settings.companionHost ?? "" },
                                                               set: { v in store.updateSettings { $0.companionHost = v.isEmpty ? nil : v } }),
                               prompt: Text("p. ej. 100.64.0.12 o mac.tailnet.ts.net"))
-                    Text("En la misma Wi‑Fi el iPhone encuentra el Mac solo. Para conectarte desde fuera, usa una VPN como Tailscale y pon aquí su dirección; después vuelve a escanear el código. Direcciones de este Mac: \(CompanionCredentials.localAddresses().joined(separator: ", ")).")
+                    Text("En la misma Wi‑Fi el iPhone encuentra el Mac solo, y aprende sus direcciones (\(CompanionCredentials.localAddresses().joined(separator: ", "))) para llegar también a través de una VPN que alcance esta red, como WireGuard. Pon aquí otra dirección solo si tu VPN usa una distinta (p. ej. la de Tailscale) y vuelve a escanear el código.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

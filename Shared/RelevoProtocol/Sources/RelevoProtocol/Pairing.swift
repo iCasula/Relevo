@@ -1,7 +1,7 @@
 import Foundation
 
 /// What the iPhone needs to find and trust a Mac: shown by the Mac as a QR code / link
-/// `relevocompanion://pair?v=1&id=…&name=…&key=…&port=…`.
+/// `relevocompanion://pair?v=1&id=…&name=…&key=…&port=…&addrs=…`.
 public struct PairingInfo: Codable, Hashable, Sendable {
     public static let scheme = "relevocompanion"
 
@@ -14,13 +14,17 @@ public struct PairingInfo: Codable, Hashable, Sendable {
     public var port: UInt16?
     /// Optional fixed address (e.g. a Tailscale IP) for connecting outside the local network.
     public var host: String?
+    /// The Mac's own IPv4 addresses, refreshed on every connection. Bonjour doesn't cross a VPN such as
+    /// WireGuard, but these addresses do when the VPN routes the Mac's network.
+    public var addresses: [String]?
 
-    public init(serverId: String, name: String, secret: Data, port: UInt16?, host: String?) {
+    public init(serverId: String, name: String, secret: Data, port: UInt16?, host: String?, addresses: [String]? = nil) {
         self.serverId = serverId
         self.name = name
         self.secret = secret
         self.port = port
         self.host = host
+        self.addresses = addresses
     }
 
     public var url: URL {
@@ -35,6 +39,7 @@ public struct PairingInfo: Codable, Hashable, Sendable {
         ]
         if let port { items.append(URLQueryItem(name: "port", value: String(port))) }
         if let host, !host.isEmpty { items.append(URLQueryItem(name: "host", value: host)) }
+        if let addresses, !addresses.isEmpty { items.append(URLQueryItem(name: "addrs", value: addresses.joined(separator: ","))) }
         c.queryItems = items
         return c.url!
     }
@@ -47,7 +52,8 @@ public struct PairingInfo: Codable, Hashable, Sendable {
             return nil
         }
         self.init(serverId: id, name: value("name") ?? "Mac", secret: secret,
-                  port: value("port").flatMap { UInt16($0) }, host: value("host"))
+                  port: value("port").flatMap { UInt16($0) }, host: value("host"),
+                  addresses: value("addrs")?.split(separator: ",").map(String.init).filter { !$0.isEmpty })
     }
 
     static func base64URL(_ data: Data) -> String {

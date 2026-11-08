@@ -27,8 +27,12 @@ final class CompanionClient {
 
     @ObservationIgnored private var channel: MessageChannel?
     @ObservationIgnored private var isActive = false
+    /// How the current connection reached the Mac ("red local" or an address).
+    private(set) var connectedVia: String?
     @ObservationIgnored private var failures = 0
-    @ObservationIgnored private var endpointIndex = 0
+    @ObservationIgnored private var attempts: [MessageChannel] = []
+    @ObservationIgnored private var attemptErrors: [NWError] = []
+    @ObservationIgnored private var generation = 0
     @ObservationIgnored private var retryTask: Task<Void, Never>?
     @ObservationIgnored private var subscribed: UUID?
     @ObservationIgnored private var pendingCreations: [UUID: CheckedContinuation<UUID?, Never>] = [:]
@@ -94,53 +98,100 @@ final class CompanionClient {
     func reconnect() {
         disconnect()
         failures = 0
-        endpointIndex = 0
         connect()
     }
 
+    /// Tries every way to reach the Mac at once and keeps the first that answers: Bonjour on the same
+    /// network, or one of its addresses through a VPN (WireGuard, Tailscale…), where Bonjour doesn't reach.
     private func connect() {
-        guard isActive, channel == nil, let pairing else { return }
+        guard isActive, channel == nil, attempts.isEmpty, let pairing else { return }
         retryTask?.cancel()
         state = .connecting
-        let endpoints = Self.endpoints(for: pairing)
-        let endpoint = endpoints[endpointIndex % endpoints.count]
-        let parameters = CompanionTransport.parameters(secret: pairing.secret, identity: pairing.serverId)
-        let channel = MessageChannel(connection: NWConnection(to: endpoint, using: parameters))
-        self.channel = channel
+        attemptErrors = []
+        generation += 1
+        let thisGeneration = generation
+        for (endpoint, label) in pairing.endpoints {
+            let parameters = CompanionTransport.parameters(secret: pairing.secret, identity: pairing.serverId)
+            let attempt = MessageChannel(connection: NWConnection(to: endpoint, using: parameters))
+            attempts.append(attempt)
+            attempt.onStateChange = { [weak self, weak attempt] state in
+                guard let self, let attempt, self.attempts.contains(where: { $0 === attempt }) else { return }
+                switch state {
+                case .ready: self.adopt(attempt, via: label)
+                case .failed(let error): self.drop(attempt, error: error)
+                case .waiting(let error):
+                    // Refused or wrong key: this address won't work. Others (no route yet…) get until the timeout.
+                    if case .tls = error { self.drop(attempt, error: error) }
+                    if case .posix(let code) = error, code == .ECONNREFUSED { self.drop(attempt, error: error) }
+                default: break
+                }
+            }
+            attempt.onClose = { [weak self, weak attempt] in
+                guard let self, let attempt, self.attempts.contains(where: { $0 === attempt }) else { return }
+                self.drop(attempt, error: nil)
+            }
+            attempt.start()
+        }
 
-        channel.onStateChange = { [weak self, weak channel] state in
-            guard let self, let channel, self.channel === channel else { return }
-            switch state {
-            case .ready:
-                channel.send(ClientMessage.hello(device: UIDevice.current.name, version: CompanionCoding.version))
-                if let subscribed = self.subscribed { channel.send(ClientMessage.subscribe(threadId: subscribed)) }
-            case .failed(let error):
-                self.fail(Self.describe(error))
-            case .waiting(let error):
-                if case .tls = error { self.fail(Self.describe(error)) }
-            default:
-                break
+        // Bonjour lookups that never resolve and unroutable addresses just wait: give up after a few seconds.
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(8))
+            guard let self, self.generation == thisGeneration else { return }
+            if self.channel == nil, !self.attempts.isEmpty {
+                for attempt in self.attempts { attempt.cancel() }
+                self.attempts = []
+                self.allAttemptsFailed()
+            } else if self.channel != nil, self.state == .connecting {
+                self.fail("El Mac no responde")
             }
         }
-        channel.onClose = { [weak self, weak channel] in
-            guard let self, let channel, self.channel === channel else { return }
+    }
+
+    private func adopt(_ winner: MessageChannel, via label: String) {
+        for attempt in attempts where attempt !== winner { attempt.cancel() }
+        attempts = []
+        channel = winner
+        connectedVia = label
+        winner.onStateChange = { [weak self, weak winner] state in
+            guard let self, let winner, self.channel === winner else { return }
+            if case .failed(let error) = state { self.fail(Self.describe(error)) }
+        }
+        winner.onClose = { [weak self, weak winner] in
+            guard let self, let winner, self.channel === winner else { return }
             self.fail("El Mac ha cerrado la conexión")
         }
-        channel.onMessage = { [weak self] data in self?.receive(data) }
-        channel.start()
+        winner.onMessage = { [weak self] data in self?.receive(data) }
+        winner.send(ClientMessage.hello(device: UIDevice.current.name, version: CompanionCoding.version))
+        if let subscribed { winner.send(ClientMessage.subscribe(threadId: subscribed)) }
+    }
 
-        // Bonjour lookups that never resolve just wait: give up after a few seconds and try the next address.
-        Task { [weak self, weak channel] in
-            try? await Task.sleep(for: .seconds(8))
-            guard let self, let channel, self.channel === channel, self.state == .connecting else { return }
-            self.fail(pairing.host == nil ? "No encuentro el Mac en esta red" : "No llego al Mac")
+    private func drop(_ attempt: MessageChannel, error: NWError?) {
+        attempt.cancel()
+        attempts.removeAll { $0 === attempt }
+        if let error { attemptErrors.append(error) }
+        if attempts.isEmpty, channel == nil { allAttemptsFailed() }
+    }
+
+    /// The most telling reason among the attempts: a wrong key beats a refused connection beats "not found".
+    private func allAttemptsFailed() {
+        let reason: String
+        if let tls = attemptErrors.first(where: { if case .tls = $0 { true } else { false } }) {
+            reason = Self.describe(tls)
+        } else if let refused = attemptErrors.first(where: { if case .posix(.ECONNREFUSED) = $0 { true } else { false } }) {
+            reason = Self.describe(refused)
+        } else {
+            reason = (pairing?.endpoints.count ?? 0) > 1 ? "No llego al Mac (¿está dormido o fuera de la VPN?)" : "No encuentro el Mac en esta red"
         }
+        fail(reason)
     }
 
     private func disconnect() {
         retryTask?.cancel()
+        for attempt in attempts { attempt.cancel() }
+        attempts = []
         channel?.cancel()
         channel = nil
+        connectedVia = nil
         if pairing != nil, state != .unpaired { state = .offline("Sin conectar") }
         for continuation in pendingCreations.values { continuation.resume(returning: nil) }
         pendingCreations.removeAll()
@@ -151,13 +202,11 @@ final class CompanionClient {
     private func fail(_ reason: String) {
         channel?.cancel()
         channel = nil
+        connectedVia = nil
         state = .offline(reason)
-        guard isActive, let pairing else { return }
-        endpointIndex += 1
-        let endpointCount = Self.endpoints(for: pairing).count
-        // Try the other address right away; back off once every address failed.
-        if endpointIndex % endpointCount == 0 { failures += 1 }
-        let delay = endpointIndex % endpointCount == 0 ? min(20, 1.5 * pow(2, Double(min(failures, 4)))) : 0.2
+        guard isActive, pairing != nil else { return }
+        failures += 1
+        let delay = min(20, 1.5 * pow(2, Double(min(failures - 1, 4))))
         retryTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(delay))
             guard !Task.isCancelled else { return }
@@ -165,13 +214,17 @@ final class CompanionClient {
         }
     }
 
-    private static func endpoints(for pairing: PairingInfo) -> [NWEndpoint] {
-        var list: [NWEndpoint] = [.service(name: pairing.serverId, type: CompanionTransport.serviceType, domain: "local.", interface: nil)]
-        if let host = pairing.host {
-            let port = NWEndpoint.Port(rawValue: pairing.port ?? CompanionTransport.defaultPort) ?? .any
-            list.append(.hostPort(host: NWEndpoint.Host(host), port: port))
-        }
-        return list
+    /// The Mac's current addresses, so the next connection through a VPN knows where to go.
+    private func learn(addresses: [String], port: UInt16) {
+        guard var info = pairing else { return }
+        let sorted = addresses.sorted()
+        // A port typed by hand (e.g. a forwarded one) stays; otherwise follow the Mac's.
+        let newPort = info.host == nil ? port : info.port
+        guard info.addresses != sorted || info.port != newPort else { return }
+        info.addresses = sorted
+        info.port = newPort
+        PairingStore.save(info)
+        pairing = info
     }
 
     private static func describe(_ error: NWError) -> String {
@@ -191,8 +244,9 @@ final class CompanionClient {
         case .welcome:
             state = .connected
             failures = 0
-            endpointIndex = 0
             channel?.send(ClientMessage.registerLiveActivity(liveActivities.registration))
+        case .addresses(let hosts, let port):
+            learn(addresses: hosts, port: port)
         case .snapshot(let snapshot):
             self.snapshot = snapshot
         case .thread(let thread):
