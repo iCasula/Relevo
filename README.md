@@ -219,7 +219,8 @@ Use `RELEVO_DATA_DIR=/tmp/x` to keep your real data untouched, and `RELEVO_SNAPS
 - The Mac advertises a Bonjour service (`_relevo._tcp`, default port 47820) only when **Settings › iPhone › Allow controlling Relevo from the iPhone** is on (off by default: from the phone you can run agents with full access).
 - Pairing: the Mac generates a 256-bit secret (Keychain) and shows it as a QR code / `relevocompanion://pair?...` link. Scan it with the iPhone Camera (or inside the app) and the app stores it in the iPhone Keychain. **Desvincular iPhones…** on the Mac regenerates the secret and unpairs every phone.
 - Transport: TLS 1.2 with a pre-shared key derived from that secret (HMAC-SHA256), so only a paired device can complete the handshake and all traffic is encrypted, with WebSocket framing for JSON messages (Network.framework on both ends).
-- Outside your Wi-Fi, use a VPN such as Tailscale and set the Mac's address in Settings › iPhone (Mac) or Settings › Away from home (iPhone).
+- Outside your Wi-Fi, use a VPN that reaches the Mac's network (WireGuard, Tailscale…). The Mac puts its addresses in the pairing link and sends them again on every connection, and the iPhone tries Bonjour and every known address at once (direct addresses go as `wss://host:port/` URL endpoints: Network.framework's WebSocket client aborts with a bare IP as host and port). Set another address only if your VPN uses a different one: Settings › iPhone (Mac) or Settings › Away from home (iPhone).
+- **Several hosts.** The iPhone keeps every paired host (a Mac, or a server running [`Host/`](Host/README.md)) and uses one at a time: switch from the server button in Threads or from Settings › Hosts, and add one with "Añadir otro host".
 
 **Code layout.**
 
@@ -243,6 +244,8 @@ cd Companion && xcodegen generate && open RelevoCompanion.xcodeproj   # run on y
 ```
 
 **Mac signing.** `scripts/build-app.sh` signs with the identity in `RELEVO_SIGN_IDENTITY` or the untracked `.signing-identity` file (e.g. the SHA-1 of your "Apple Development" certificate from `security find-identity -v -p codesigning`). With a stable identity the Keychain recognises every rebuild as the same app, so "Always Allow" is asked only once; ad-hoc signing makes it ask again after each build.
+
+**Headless host.** [`Host/`](Host/README.md) is a small Node program (no dependencies) that serves the same protocol from a machine without a screen, such as a Linux mini PC that stays on when the Mac is off, running Claude Code there. `--selftest remotehost <pairing link> [prompt] [mode]` talks to any host as the iPhone does and checks that every message decodes.
 
 Headless checks of the Mac side: `--selftest companion` (pairs, connects over Bonjour + TLS-PSK, checks a wrong key is rejected and that a command comes back as a patch) and `--selftest serve [port] [seconds]` (only the server with in-memory credentials, prints a pairing link for the simulator). Debug builds of the iPhone app accept `-pairURL <link>`, `-tab limits|settings` and `-openThread <uuid>` launch arguments for simulator testing.
 

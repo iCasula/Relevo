@@ -38,6 +38,8 @@ enum SelfTest {
             case "prwatch": prWatch()
             case "followscroll": await followScroll()
             case "agylogin": await agyLogin()
+            case "remotehost" where rest.count >= 2:
+                await remoteHost(link: rest[1], prompt: rest.count > 2 ? rest[2] : nil, mode: rest.count > 3 ? rest[3] : nil)
             case "background" where rest.count >= 2: await background(cwd: rest[1])
             case "limitplan" where rest.count >= 2: await limitPlan(cwd: rest[1])
             case "models": await modelLists()
