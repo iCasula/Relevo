@@ -5,6 +5,7 @@
 //   relevo-host.mjs pair      print the pairing link for the iPhone
 //   relevo-host.mjs login     sign in to Claude Code for this host (interactive)
 //   relevo-host.mjs status    login, limits and models, without calling a model
+//   relevo-host.mjs update    replace the program with the latest version on GitHub and restart the service
 //
 // Environment (all optional):
 //   RELEVO_HOST_DATA   data folder: state, transcripts, Claude Code config, temp and caches (default ~/.relevo-host)
@@ -16,6 +17,7 @@
 //   RELEVO_MAX_AGENTS  agent processes alive at once (default 2)
 //   RELEVO_MIN_FREE_GB_DATA / RELEVO_MIN_FREE_GB_PROJECTS   refuse to start a turn below this (default 1 / 2)
 //   RELEVO_FAKE_AGENT=1  echo agent for tests (no Claude calls)
+//   RELEVO_REPO        GitHub repository `update` downloads from (default iCasula/Relevo, branch main)
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -98,7 +100,37 @@ switch (command) {
     console.log(JSON.stringify({ ...s, models: s.models?.map((m) => m.id) }, null, 2));
     break;
   }
+  case 'update': {
+    // Only Host/ from the repository's latest commit: no git checkout and nothing outside the data folder.
+    const repo = process.env.RELEVO_REPO ?? 'iCasula/Relevo';
+    const appDir = path.dirname(new URL(import.meta.url).pathname);
+    fs.mkdirSync(cfg.tmpDir, { recursive: true });
+    const work = fs.mkdtempSync(path.join(cfg.tmpDir, 'update-'));
+    try {
+      const res = await fetch(`https://codeload.github.com/${repo}/tar.gz/refs/heads/main`);
+      if (!res.ok) throw new Error(`GitHub: HTTP ${res.status}`);
+      const archive = path.join(work, 'main.tar.gz');
+      fs.writeFileSync(archive, Buffer.from(await res.arrayBuffer()));
+      const tar = spawn('tar', ['-xzf', archive, '-C', work, '--wildcards', '*/Host/relevo-host.mjs', '*/Host/lib/*'], { stdio: 'inherit' });
+      if (await new Promise((r) => tar.on('exit', r)) !== 0) throw new Error('tar failed');
+      const [top] = fs.readdirSync(work).filter((n) => n !== 'main.tar.gz');
+      const src = path.join(work, top, 'Host');
+      fs.cpSync(path.join(src, 'lib'), path.join(appDir, 'lib'), { recursive: true });
+      fs.copyFileSync(path.join(src, 'relevo-host.mjs'), path.join(appDir, 'relevo-host.mjs'));
+      console.log(`Updated from ${repo} (${top}).`);
+    } catch (e) {
+      console.error(`Update failed: ${e.message}`);
+      process.exitCode = 1;
+    } finally {
+      fs.rmSync(work, { recursive: true, force: true });
+    }
+    if (!process.exitCode) {
+      const r = spawn('systemctl', ['--user', 'restart', 'relevo-host'], { stdio: 'inherit' });
+      r.on('exit', (code) => console.log(code === 0 ? 'Service restarted.' : 'Restart it with: systemctl --user restart relevo-host'));
+    }
+    break;
+  }
   default:
-    console.error('usage: relevo-host.mjs [serve|pair|login|status]');
+    console.error('usage: relevo-host.mjs [serve|pair|login|status|update]');
     process.exit(2);
 }

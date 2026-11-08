@@ -25,7 +25,8 @@ so the service runs without a login. No `npm install`: the program is four files
 
 ## Install or update
 
-From the Mac, over ssh:
+Once, from a computer with this repository (over ssh); after that the server updates itself with
+`relevo-host update`, and the iPhone talks to it directly:
 
 ```sh
 Host/deploy/install.sh user@server /path/on/a/data/disk/relevo-host /path/to/projects [name]
@@ -43,6 +44,7 @@ Then on the server:
 relevo-host login    # Claude Code sign-in for this host (its own config folder)
 relevo-host pair     # pairing link: open it on the iPhone, paste it in the app, or turn it into a QR code
 relevo-host status   # login, plan, limits and models, without calling a model
+relevo-host update   # latest Host/ from GitHub (main), then restarts the service
 journalctl --user -u relevo-host -f
 ```
 
