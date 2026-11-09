@@ -155,17 +155,23 @@ enum AntigravityHome {
     private static var prepared = Set<String>()
     private static let lock = NSLock()
 
+    /// With its own HOME there is no keychain for agy to save into: every token refresh (hourly) showed macOS's
+    /// «Llavero no encontrado» dialog until agy gave up after 5 s and used its token file. agy goes straight to
+    /// the file when it believes it runs over SSH (it then also leaves the browser alone and just prints the URL).
+    static let noKeychain = ["SSH_CONNECTION": "127.0.0.1 0 127.0.0.1 0", "RELEVO_AGY_NO_KEYCHAIN": "1"]
+
     static func prepare(_ dir: String) -> [String: String] {
         let real = NSHomeDirectory()
-        let env = ["HOME": dir, "BASH_ENV": "\(dir)/.relevo-bash-env", "RELEVO_REAL_HOME": real]
+        let env = ["HOME": dir, "BASH_ENV": "\(dir)/.relevo-bash-env", "RELEVO_REAL_HOME": real].merging(noKeychain) { $1 }
         lock.lock(); defer { lock.unlock() }
         guard !prepared.contains(dir) else { return env }
         let fm = FileManager.default
         try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
         let restore = """
         # Relevo: only `agy` uses this folder as HOME (its Google session lives here, isolated from yours).
-        # Commands launched by the agent get your real HOME back.
+        # Commands launched by the agent get your real HOME back, and lose the SSH marker meant only for agy.
         export HOME=\(shellQuote(real))
+        [ -n "$RELEVO_AGY_NO_KEYCHAIN" ] && unset SSH_CONNECTION RELEVO_AGY_NO_KEYCHAIN
         """
         try? (restore + "\nexport ZDOTDIR=\"$HOME\"\n[ -f \"$HOME/.zshenv\" ] && . \"$HOME/.zshenv\"\n")
             .write(toFile: "\(dir)/.zshenv", atomically: true, encoding: .utf8)

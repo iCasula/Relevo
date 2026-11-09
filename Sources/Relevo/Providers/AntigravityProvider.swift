@@ -85,7 +85,7 @@ final class AntigravityProvider: Provider {
         guard let launch = Binaries.launch(for: account) else { store.flash(info.missingBinaryHelp); return }
         let isolated = account.configDir?.isEmpty == false
         TerminalLauncher.run(Binaries.commandLine(launch, extraArgs: []),
-                             title: "Iniciar sesión en Antigravity (Gemini)\(isolated ? " · cuenta aislada de Relevo; tu agy de siempre no se toca" : ""). Cuando veas el prompt, sal con /exit o Ctrl+C.")
+                             title: "Iniciar sesión en Antigravity (Gemini)\(isolated ? " · cuenta aislada de Relevo; tu agy de siempre no se toca. Abre con ⌘-clic el enlace que muestra" : ""). Cuando veas el prompt, sal con /exit o Ctrl+C.")
     }
 
     /// Account email from the local session file (`id_token_email`, or the email claim of `id_token`).

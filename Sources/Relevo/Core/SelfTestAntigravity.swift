@@ -103,6 +103,23 @@ extension SelfTest {
         check(ranAt.map { $0 >= refreshedAt } == true, "background run goes once the token is fresh")
         AntigravityRuns.endTurn(home: home)
 
+        // 5. agy sees the SSH marker that keeps it off the keychain; the commands it runs don't.
+        let isolated = "\(root)/isolated"
+        let env = AntigravityHome.prepare(isolated)
+        check(env["SSH_CONNECTION"] != nil && env["HOME"] == isolated, "agy runs with its own HOME and the SSH marker")
+        for shell in ["/bin/zsh", "/bin/bash"] {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: shell)
+            p.arguments = ["-c", #"printf '%s|%s' "$HOME" "${SSH_CONNECTION:-none}""#]
+            p.environment = ["PATH": "/usr/bin:/bin"].merging(env) { $1 }
+            let pipe = Pipe()
+            p.standardOutput = pipe
+            try? p.run()
+            p.waitUntilExit()
+            let out = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            check(out == "\(NSHomeDirectory())|none", "\((shell as NSString).lastPathComponent) commands: real HOME, no SSH marker (\(out))")
+        }
+
         print(failures == 0 ? "TODO OK" : "\(failures) FALLOS")
     }
 }
