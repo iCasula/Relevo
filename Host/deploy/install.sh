@@ -14,7 +14,7 @@ TARGET=$1 BASE=$2 PROJECTS=$3 NAME=${4:-}
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 
 ssh "$TARGET" "mkdir -p '$BASE/app' '$BASE/data' '$PROJECTS'"
-rsync -a --delete --exclude '._*' --exclude '.DS_Store' "$HERE/relevo-host.mjs" "$HERE/lib" "$TARGET:$BASE/app/"
+rsync -a --delete --exclude '._*' --exclude '.DS_Store' "$HERE/relevo-host.mjs" "$HERE/lib" "$HERE/ui" "$HERE/VERSION" "$TARGET:$BASE/app/"
 
 ssh "$TARGET" sh -s -- "$BASE" "$PROJECTS" "$NAME" <<'REMOTE'
 set -eu
@@ -48,7 +48,9 @@ After=network-online.target
 
 [Service]
 ExecStart=$BASE/relevo-host serve
-Restart=on-failure
+Restart=always
+# relevo-host supervises its worker: restarts it after an update and puts the old version back if it fails.
+Environment=RELEVO_SUPERVISE=1
 RestartSec=5
 Nice=5
 Environment=PATH=$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin

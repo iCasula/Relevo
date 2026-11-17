@@ -1,5 +1,6 @@
-# Publishing a version: bump Host/VERSION, commit, then `git tag vX.Y.Z && git push origin vX.Y.Z`.
-# This creates the GitHub release with the Windows installer; installed hosts see the tag as an update.
+# Publishing a version: bump Host/VERSION, commit, `git tag vX.Y.Z && git push origin vX.Y.Z`, wait for this
+# workflow, then sign on your machine: `node Host/deploy/release.mjs sign vX.Y.Z`. Installed hosts only offer
+# and install releases with a valid signature (the key never leaves the publisher's machine).
 name: Release
 
 on:
@@ -14,19 +15,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Check the version
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check
         run: |
           if [ "$(tr -d '[:space:]' < Host/VERSION)" != "${GITHUB_REF_NAME#v}" ]; then
-            echo "::warning::Host/VERSION ($(cat Host/VERSION)) doesn't match the tag ${GITHUB_REF_NAME}"
+            echo "::error::Host/VERSION ($(cat Host/VERSION)) doesn't match the tag ${GITHUB_REF_NAME}"; exit 1
           fi
-          for f in Host/relevo-host.mjs Host/lib/*.mjs Host/ui/*.mjs; do node --check "$f"; done
+          node --test 'Host/test/*.test.mjs'
 
       - name: Package
         run: |
-          mkdir -p dist/relevo-host
-          cp -R Host/relevo-host.mjs Host/lib Host/ui Host/deploy Host/VERSION Host/README.md dist/relevo-host/
-          (cd dist && zip -qr "Relevo-Host-${GITHUB_REF_NAME}.zip" relevo-host)
+          node Host/deploy/release.mjs build "$GITHUB_REF_NAME" dist
+          mkdir -p dist/zip/relevo-host
+          cp -R Host/relevo-host.mjs Host/lib Host/ui Host/deploy Host/VERSION Host/README.md dist/zip/relevo-host/
+          (cd dist/zip && zip -qr "../Relevo-Host-${GITHUB_REF_NAME}.zip" relevo-host)
           cp Host/deploy/Instalar-Relevo.cmd dist/
 
       - name: Publish
@@ -36,7 +44,8 @@ jobs:
           cat > notes.md <<NOTES
           **Windows:** descarga \`Instalar-Relevo.cmd\` y ábrelo (doble clic). Instala Relevo como servicio y la app de escritorio, y pide permisos de administrador. Si Windows avisa de que protegió el equipo: «Más información» › «Ejecutar de todas formas».
 
-          **Ya instalado:** la app avisa de la versión nueva (Hosts › Actualizaciones), o \`relevo-host update\`.
+          **Ya instalado:** la app avisa de la versión nueva (Hosts › Actualizaciones), o \`relevo-host update\`. Solo se instala cuando la release está firmada (\`manifest.sig\`).
           NOTES
           gh release create "$GITHUB_REF_NAME" dist/Instalar-Relevo.cmd "dist/Relevo-Host-${GITHUB_REF_NAME}.zip" \
+            "dist/relevo-host-${GITHUB_REF_NAME}.tar.gz" dist/manifest.json \
             --title "Relevo ${GITHUB_REF_NAME}" --notes-file notes.md --generate-notes

@@ -4,6 +4,7 @@
 
 import { applyServerMessage, emptyHostData, Client, uuid } from './state.mjs';
 import { markdown, inline, esc } from './markdown.mjs';
+import { showMenu, openDialog, confirmDialog, promptDialog, chooseFolder, diffHTML, linkify } from './dialogs.mjs';
 
 // MARK: - State
 
@@ -13,7 +14,12 @@ const app = {
   view: { kind: 'empty' }, // { kind: 'thread', host, thread } | { kind: 'limits' } | { kind: 'hosts' }
   ws: null,
   live: false,
-  drafts: new Map(),
+  drafts: new Map(load('drafts', [])),
+  older: new Map(), // host/thread → items before the transcript the host sent
+  requests: new Map(), // requestId → resolve, for replies (`reply`, `image`)
+  logins: new Map(), // requestId → handler of `loginOutput`
+  images: new Map(), // host/thread/path → data URL (or null while loading)
+  filter: '',
   expanded: new Set(),
   showTools: load('showTools', false),
   collapsed: new Set(load('collapsedProjects', [])),
@@ -114,6 +120,27 @@ function post(event) {
 }
 const sendTo = (hostId, message) => post({ type: 'client', host: hostId, message });
 
+/** Features a host has beyond the shared protocol (the Node host lists them; the Mac doesn't). */
+const has = (hostId, feature) => snapshotOf(hostId)?.hostFeatures?.includes(feature) ?? false;
+
+/** Sends a request with a fresh requestId and resolves the host's reply ({ ok, error, … }). */
+function request(hostId, message, timeout = 90_000) {
+  const [name] = Object.keys(message);
+  const requestId = uuid();
+  message[name] = { ...message[name], requestId };
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => { app.requests.delete(requestId); resolve({ ok: false, error: 'El host no ha respondido a tiempo' }); }, timeout);
+    app.requests.set(requestId, (reply) => { clearTimeout(timer); app.requests.delete(requestId); resolve(reply); });
+    sendTo(hostId, message);
+  });
+}
+
+let draftsTimer = 0;
+function saveDrafts() {
+  clearTimeout(draftsTimer);
+  draftsTimer = setTimeout(() => save('drafts', [...app.drafts].filter(([, v]) => v.trim()).slice(-50)), 500);
+}
+
 function adopt(h) {
   const data = emptyHostData();
   data.snapshot = h.snapshot;
@@ -175,14 +202,16 @@ function onServer(hostId, msg) {
       if (app.view.kind === 'thread' && app.view.host === hostId && app.view.thread === a._0.id) renderMain();
       break;
     case 'created': {
-      if (!app.pendingCreate.has(a.requestId)) break;
+      const resolve = app.pendingCreate.get(a.requestId);
+      if (!resolve) break;
       app.pendingCreate.delete(a.requestId);
-      openThread(hostId, a.threadId);
-      setTimeout(() => document.getElementById('draft')?.focus(), 50);
+      resolve(a.threadId);
       break;
     }
     case 'toast': toast(a._0); break;
-    case 'image': if (a.error) toast(a.error); break;
+    case 'image':
+    case 'reply': app.requests.get(a.requestId)?.(a); break;
+    case 'loginOutput': app.logins.get(a.requestId)?.(a); break;
     default: break;
   }
 }
@@ -237,7 +266,7 @@ const openThread = (hostId, threadId) => setView({ kind: 'thread', host: hostId,
 function viewFromHash() {
   const parts = location.hash.replace(/^#\/?/, '').split('/').map(decodeURIComponent);
   if (parts.length === 2 && host(parts[0])) return { kind: 'thread', host: parts[0], thread: parts[1] };
-  if (parts[0] === 'limits' || parts[0] === 'hosts') return { kind: parts[0] };
+  if (['limits', 'hosts', 'usage', 'settings'].includes(parts[0])) return { kind: parts[0] };
   return { kind: 'empty' };
 }
 function restoreFromHash() { app.view = viewFromHash(); }
@@ -246,11 +275,21 @@ window.addEventListener('hashchange', () => {
   if (v.kind !== app.view.kind || v.thread !== app.view.thread || v.host !== app.view.host) setView(v);
 });
 
-function newThread(hostId, projectId) {
+/** Creates a thread on the host; resolves its id (null if the host didn't). */
+function createThread(hostId, projectId) {
   const requestId = uuid();
-  app.pendingCreate.set(requestId, hostId);
-  sendTo(hostId, Client.newThread(projectId, requestId));
-  setTimeout(() => { if (app.pendingCreate.delete(requestId)) toast('El host no ha creado el hilo'); }, 8000);
+  return new Promise((resolve) => {
+    app.pendingCreate.set(requestId, resolve);
+    sendTo(hostId, Client.newThread(projectId, requestId));
+    setTimeout(() => { if (app.pendingCreate.delete(requestId)) resolve(null); }, 8000);
+  });
+}
+
+async function newThread(hostId, projectId) {
+  const id = await createThread(hostId, projectId);
+  if (!id) { toast('El host no ha creado el hilo'); return; }
+  openThread(hostId, id);
+  setTimeout(() => document.getElementById('draft')?.focus(), 50);
 }
 
 // MARK: - Rendering
@@ -270,28 +309,33 @@ function renderSidebar() {
   for (const [id, h] of app.hosts) {
     const { info, data } = h;
     const snap = data.snapshot;
-    out.push(`<section class="host"><div class="host-head"><span class="dot ${info.state}"></span><span class="name" title="${esc(nameOf(h))}">${esc(nameOf(h))}${info.local ? ' · este equipo' : ''}</span></div>`);
+    out.push(`<section class="host"><div class="host-head"><span class="dot ${info.state}"></span><span class="name" title="${esc(nameOf(h))}">${esc(nameOf(h))}${info.local ? ' · este equipo' : ''}</span>`
+      + (has(id, 'projects') ? `<button class="icon-btn small" data-add-project="${esc(id)}" title="Añadir proyecto">+</button>` : '') + '</div>');
     if (info.state !== 'connected') out.push(`<div class="host-reason">${esc(info.state === 'connecting' ? 'Conectando…' : info.reason ?? 'Sin conectar')}</div>`);
     if (snap) {
       if (!snap.projects.length) out.push('<div class="side-empty">Sin proyectos: crea carpetas en la de proyectos del host.</div>');
       for (const p of [...snap.projects].sort((a, b) => a.name.localeCompare(b.name))) {
         const key = `${id}/${p.id}`;
         const collapsed = app.collapsed.has(key);
-        out.push(`<div class="project${collapsed ? ' collapsed' : ''}"><button class="project-name" data-toggle-project="${esc(key)}" title="${esc(p.path)}">${esc(p.name)}</button>`
+        const q = app.filter.toLowerCase();
+        const threads = snap.threads.filter((t) => t.projectId === p.id && (!q || t.title.toLowerCase().includes(q) || (t.preview ?? '').toLowerCase().includes(q) || p.name.toLowerCase().includes(q)))
+          .sort((a, b) => b.updatedAt - a.updatedAt);
+        if (q && !threads.length) continue;
+        out.push(`<div class="project${collapsed && !q ? ' collapsed' : ''}"><button class="project-name" data-toggle-project="${esc(key)}" title="${esc(p.path)}">${esc(p.name)}</button>`
+          + `<button class="icon-btn small hover" data-project-menu="${esc(p.id)}" data-host="${esc(id)}" title="Más acciones">⋯</button>`
           + `<button class="icon-btn" data-new-thread="${esc(p.id)}" data-host="${esc(id)}" title="Nuevo hilo en ${esc(p.name)}">+</button></div>`);
-        if (collapsed) continue;
-        const threads = snap.threads.filter((t) => t.projectId === p.id).sort((a, b) => b.updatedAt - a.updatedAt);
-        const shown = app.showAll.has(key) ? threads : threads.slice(0, 6);
+        if (collapsed && !q) continue;
+        const shown = app.showAll.has(key) || q ? threads : threads.slice(0, 6);
         for (const t of shown) {
           const active = app.view.kind === 'thread' && app.view.host === id && app.view.thread === t.id;
           const acct = snap.accounts.find((a) => a.id === t.accountId);
           const badge = t.needsApproval ? '<span class="badge approval">!</span>'
             : t.isRunning ? '<span class="spinner" title="Trabajando"></span>'
               : t.isWaiting ? '<span class="badge wait" title="Esperando tareas en segundo plano">…</span>' : '';
-          out.push(`<button class="thread${active ? ' active' : ''}" data-open-thread="${esc(t.id)}" data-host="${esc(id)}" title="${esc(t.preview ?? t.title)}">`
+          out.push(`<button class="thread${active ? ' active' : ''}" data-open-thread="${esc(t.id)}" data-host="${esc(id)}" data-project="${esc(p.id)}" title="${esc(t.preview ?? t.title)}">`
             + `<span class="tdot" style="background:${esc(acct?.tint ?? 'var(--faint)')}"></span><span class="ttitle">${esc(t.title)}</span>${badge}<span class="time">${relTime(t.updatedAt)}</span></button>`);
         }
-        if (threads.length > 6) out.push(`<button class="more" data-show-all="${esc(key)}">${app.showAll.has(key) ? 'Ver menos' : `Ver los ${threads.length}`}</button>`);
+        if (threads.length > 6 && !q) out.push(`<button class="more" data-show-all="${esc(key)}">${app.showAll.has(key) ? 'Ver menos' : `Ver los ${threads.length}`}</button>`);
       }
     }
     out.push('</section>');
@@ -318,6 +362,8 @@ function renderMain() {
   if (v.kind === 'thread') updateThreadView();
   else if (v.kind === 'limits') main.innerHTML = limitsHTML();
   else if (v.kind === 'hosts') renderHostsView(main);
+  else if (v.kind === 'usage') renderUsageView(main);
+  else if (v.kind === 'settings') renderSettingsView(main);
   else main.innerHTML = emptyHTML();
 }
 
@@ -338,6 +384,7 @@ function buildThreadView(main) {
   main.innerHTML = `
     <header class="thread-head">
       <div class="titles"><h1 id="t-title"></h1><div class="sub" id="t-sub"></div></div>
+      <div class="head-actions" id="t-actions"></div>
       <label class="toggle" title="Mostrar cada llamada a herramienta en vez de resumirlas"><input type="checkbox" id="show-tools"> Herramientas</label>
     </header>
     <div class="transcript" id="transcript"><div class="hidden-note" id="t-hidden"></div><div class="items" id="t-items"></div></div>
@@ -367,6 +414,7 @@ function buildThreadView(main) {
     effort: main.querySelector('#sel-effort'), mode: main.querySelector('#sel-mode'), plan: main.querySelector('#sel-plan'),
     meters: main.querySelector('#t-meters'), stop: main.querySelector('#btn-stop'), now: main.querySelector('#btn-now'),
     send: main.querySelector('#btn-send'), hint: main.querySelector('#t-hint'), tools: main.querySelector('#show-tools'),
+    actions: main.querySelector('#t-actions'),
     signatures: {},
   };
   rowCache = new Map();
@@ -378,6 +426,7 @@ function buildThreadView(main) {
   let draftTimer = 0;
   threadEls.draft.oninput = () => {
     app.drafts.set(draftKey, threadEls.draft.value);
+    saveDrafts();
     autosize();
     updateComposer();
     clearTimeout(draftTimer);
@@ -439,6 +488,7 @@ function sendDraft(now) {
   sendTo(hostId, now ? Client.sendNow(threadId, text) : Client.send(threadId, text));
   threadEls.draft.value = '';
   app.drafts.delete(`${hostId}/${threadId}`);
+  saveDrafts();
   threadEls.stick = true;
   autosize();
   updateComposer();
@@ -452,6 +502,10 @@ function updateThreadView() {
   const project = h.data.snapshot?.projects.find((p) => p.id === summary?.projectId);
   threadEls.title.textContent = thread?.title ?? summary?.title ?? 'Hilo';
   threadEls.sub.textContent = [nameOf(h), project?.name, account ? `${account.name} · ${modelName(account, runtime?.selectedModel)}` : null].filter(Boolean).join(' · ');
+  const actions = [has(hostId, 'git') ? '<button class="btn small" data-git title="Cambios en el proyecto, diff y commit">Cambios</button>' : '',
+    '<button class="btn small" data-thread-usage title="Tokens y coste de este hilo">Consumo</button>',
+    `<button class="btn small" data-thread-menu title="Más acciones">⋯</button>`].join('');
+  if (threadEls.actions.dataset.html !== actions) { threadEls.actions.innerHTML = actions; threadEls.actions.dataset.html = actions; }
   const stick = threadEls.stick;
   renderTranscript(hostId, thread);
   threadEls.banners.innerHTML = bannersHTML(hostId, runtime);
@@ -493,17 +547,21 @@ function renderTranscript(hostId, thread) {
     threadEls.hidden.textContent = '';
     return;
   }
-  const hidden = Math.max(0, thread.totalItems - thread.items.length);
-  threadEls.hidden.textContent = hidden ? `${hidden} elementos anteriores no se muestran` : '';
+  const key = `${hostId}/${thread.id}`;
+  const older = app.older.get(key) ?? [];
+  const hidden = Math.max(0, thread.totalItems - thread.items.length - older.length);
+  const note = hidden ? `${hidden} elementos anteriores${has(hostId, 'history') ? ' · <button class="link" data-load-older>Cargar más</button>' : ' no se muestran'}` : '';
+  if (threadEls.hidden.dataset.html !== note) { threadEls.hidden.innerHTML = note; threadEls.hidden.dataset.html = note; }
+  const allItems = older.length ? [...older, ...thread.items] : thread.items;
   // The first assistant item of each turn shows who answered.
   const headers = new Set();
   let need = true;
-  for (const it of thread.items) {
+  for (const it of allItems) {
     if (it.kind === 'user' || it.kind === 'notice') need = true;
     else if (it.kind === 'assistant' && need) { headers.add(it.id); need = false; }
   }
   if (container.querySelector('.notice > .spinner')) container.innerHTML = '';
-  const rows = rowsOf(thread.items);
+  const rows = rowsOf(allItems);
   const next = new Map();
   let prev = null;
   for (const row of rows) {
@@ -522,8 +580,9 @@ function renderTranscript(hostId, thread) {
     if (want !== entry.el) container.insertBefore(entry.el, want);
     prev = entry.el;
   }
-  for (const [key, entry] of rowCache) if (!next.has(key)) entry.el.remove();
+  for (const [k, entry] of rowCache) if (!next.has(k)) entry.el.remove();
   rowCache = next;
+  hydrateImages(hostId, thread.id);
 }
 
 function groupHTML(row) {
@@ -549,7 +608,7 @@ function itemHTML(hostId, it, header) {
     case 'assistant': {
       const acct = accountOf(hostId, it.accountId);
       const head = header && acct ? `<div class="author">${glyph(acct)}${esc(acct.agentName ?? acct.name)}${it.model && it.model !== 'default' ? ` · ${esc(modelName(acct, it.model))}` : ''}</div>` : '';
-      return `<div class="msg assistant">${head}<div class="md">${markdown(it.text)}</div>${it.usage ? usageHTML(it.usage) : ''}</div>`;
+      return `<div class="msg assistant">${head}<div class="md">${markdown(it.text)}</div>${imagesHTML(hostId, it.text)}${it.usage ? usageHTML(it.usage) : ''}</div>`;
     }
     case 'reasoning':
       return `<div class="fold"><button class="fold-head" data-toggle="${esc(it.id)}"><span class="state-icon">💭</span><span class="label">${esc(firstLine(it.text) || 'Razonamiento')}</span><span class="chev${open ? ' open' : ''}"></span></button>`
@@ -787,7 +846,7 @@ function renderHostsView(main) {
       + (u.error ? `<p class="note bad">${esc(u.error)}</p>` : '')
       + `<div class="actions"><button class="btn" data-check-update${u.applying ? ' disabled' : ''}>Buscar actualizaciones</button>`
       + (u.available ? `<button class="btn primary" data-apply-update${u.applying ? ' disabled' : ''}>Actualizar a ${esc(u.latest)}</button>` : '')
-      + '</div><p class="note">Al actualizar, el servicio se reinicia y la ventana se recarga sola. Los hilos en curso se retoman después.</p></div>');
+      + '</div><p class="note">Al actualizar, el servicio se reinicia y la ventana se recarga sola. Los turnos que estén en marcha en este equipo se interrumpen: el hilo sigue cuando le escribas.</p></div>');
   }
   if ('Notification' in window && Notification.permission !== 'granted') {
     out.push('<div class="section-head"><h2>Avisos</h2></div><div class="stack"><p class="note">Avisos de Windows cuando un hilo termina o necesita tu respuesta y no lo estás mirando.</p>'
@@ -838,6 +897,14 @@ document.addEventListener('click', (e) => {
   else if (d.resumeQueue !== undefined) sendTo(hostId, Client.resumeQueue(threadId));
   else if (d.refresh) { sendTo(d.refresh, Client.refreshUsage()); toast('Comprobando la cuota…'); }
   else if (d.reconnect) post({ type: 'reconnect', host: d.reconnect });
+  else if (d.addProject) addProjectDialog(d.addProject);
+  else if (d.projectMenu) { const r = el.getBoundingClientRect(); projectMenu(d.host, d.projectMenu, r.left, r.bottom); }
+  else if (d.threadMenu !== undefined) { const r = el.getBoundingClientRect(); threadMenu(hostId, threadId, r.left, r.bottom); }
+  else if (d.git !== undefined) gitDialog(hostId, threadId);
+  else if (d.threadUsage !== undefined) threadUsageDialog(hostId, threadId);
+  else if (d.loadOlder !== undefined) loadOlder(hostId, threadId);
+  else if (d.image) imageViewer(d.image, d.imgHost, d.imgThread);
+  else if (d.login) loginDialog(d.loginHost, d.login);
   else if (d.checkUpdate !== undefined) { post({ type: 'checkUpdate' }); toast('Buscando actualizaciones…'); }
   else if (d.applyUpdate !== undefined) {
     const running = [...app.hosts.values()].filter((h) => h.info.local).flatMap((h) => h.data.snapshot?.threads ?? []).filter((t) => t.isRunning).length;
@@ -887,5 +954,440 @@ setInterval(() => {
 setInterval(renderSidebar, 60_000);
 document.addEventListener('visibilitychange', updateTitle);
 
+
+// MARK: - Projects and threads (menus and dialogs)
+
+const req = (hostId) => (message) => request(hostId, message);
+const copy = async (text, done = 'Copiado') => {
+  try { await navigator.clipboard.writeText(text); toast(done); } catch { toast('No he podido copiarlo'); }
+};
+/** VS Code opens local folders through its URL scheme (only for the host on this machine). */
+const vscodeURL = (p) => `vscode://file/${encodeURI(String(p).replaceAll('\\', '/')).replace(/^\/?/, '/').replace(/^\/([A-Za-z]:)/, '$1')}`;
+
+function projectMenu(hostId, projectId, x, y) {
+  const h = host(hostId);
+  const p = h?.data.snapshot?.projects.find((pr) => pr.id === projectId);
+  if (!p) return;
+  const items = [
+    { label: 'Nuevo hilo', action: () => newThread(hostId, projectId) },
+    { label: 'Comparar agentes…', action: () => compareDialog(hostId, projectId) },
+    '-',
+  ];
+  if (h.info.local) items.push({ label: 'Abrir en VS Code', action: () => { location.href = vscodeURL(p.path); } });
+  items.push({ label: 'Copiar ruta', action: () => copy(p.path, 'Ruta copiada') });
+  if (has(hostId, 'projects')) {
+    items.push('-',
+      { label: 'Quitar de Relevo…', action: async () => {
+        if (await confirmDialog({ title: `Quitar ${p.name}`, text: `Deja de aparecer en Relevo; la carpeta y sus hilos no se borran (vuelve a añadirla para recuperarlos).`, confirm: 'Quitar' })) {
+          const r = await request(hostId, { removeProject: { projectId, deleteThreads: false } });
+          toast(r.ok ? `${p.name} quitado` : r.error);
+        }
+      } },
+      { label: 'Quitar y borrar sus hilos…', danger: true, action: async () => {
+        if (await confirmDialog({ title: `Quitar ${p.name} y borrar sus hilos`, text: 'Los hilos de este proyecto se borran de Relevo para siempre. La carpeta del proyecto no se toca.', confirm: 'Borrar hilos', danger: true })) {
+          const r = await request(hostId, { removeProject: { projectId, deleteThreads: true } });
+          toast(r.ok ? `${p.name} quitado y sus hilos borrados` : r.error);
+        }
+      } });
+  }
+  showMenu(x, y, items);
+}
+
+function threadMenu(hostId, threadId, x, y) {
+  const t = snapshotOf(hostId)?.threads.find((th) => th.id === threadId);
+  if (!t) return;
+  const items = [{ label: 'Abrir', action: () => openThread(hostId, threadId) }];
+  if (has(hostId, 'threads')) {
+    items.push(
+      { label: 'Renombrar…', action: async () => {
+        const title = await promptDialog({ title: 'Renombrar hilo', label: 'Título', value: t.title });
+        if (title) { const r = await request(hostId, { renameThread: { threadId, title } }); if (!r.ok) toast(r.error); }
+      } },
+      { label: 'Regenerar título con IA', action: async () => {
+        toast('Pidiendo un título…');
+        const r = await request(hostId, { regenerateTitle: { threadId } });
+        toast(r.ok ? `Título: ${r.title}` : r.error);
+      } },
+      '-',
+      { label: 'Eliminar hilo…', danger: true, action: async () => {
+        if (!await confirmDialog({ title: 'Eliminar hilo', text: `«${t.title}» y su conversación se borran de Relevo para siempre. Los cambios en ficheros no se tocan.`, confirm: 'Eliminar', danger: true })) return;
+        const r = await request(hostId, { deleteThread: { threadId } });
+        if (!r.ok) { toast(r.error); return; }
+        if (app.view.thread === threadId) setView({ kind: 'empty' });
+      } });
+  }
+  showMenu(x, y, items);
+}
+
+document.addEventListener('contextmenu', (e) => {
+  const thread = e.target.closest('.thread[data-open-thread]');
+  if (thread) { e.preventDefault(); threadMenu(thread.dataset.host, thread.dataset.openThread, e.clientX, e.clientY); return; }
+  const project = e.target.closest('.project');
+  const menuBtn = project?.querySelector('[data-project-menu]');
+  if (menuBtn) { e.preventDefault(); projectMenu(menuBtn.dataset.host, menuBtn.dataset.projectMenu, e.clientX, e.clientY); }
+});
+
+document.getElementById('filter').addEventListener('input', (e) => { app.filter = e.target.value.trim(); renderSidebar(); });
+
+function addProjectDialog(hostId) {
+  const root = snapshotOf(hostId)?.hostSettings?.projectsRoot ?? '';
+  const d = openDialog({ title: `Añadir proyecto en ${nameOf(host(hostId))}`, body: `
+    <div class="choice-grid">
+      <section class="choice"><h3>Abrir carpeta existente</h3><p class="note">Cualquier carpeta del equipo: se añade tal cual, con sus ficheros y su git.</p>
+        <button class="btn primary" data-pick>Elegir carpeta…</button></section>
+      <section class="choice"><h3>Crear proyecto nuevo</h3><p class="note">Una carpeta nueva dentro de <code>${esc(root)}</code>.</p>
+        <label class="field"><span>Nombre</span><input type="text" data-name placeholder="mi-proyecto"></label>
+        <label class="check"><input type="checkbox" data-git checked> Iniciar un repositorio git</label>
+        <button class="btn" data-create>Crear</button></section>
+    </div>` });
+  d.el.querySelector('[data-pick]').onclick = async () => {
+    const path = await chooseFolder({ title: 'Elegir la carpeta del proyecto', request: req(hostId), confirm: 'Añadir esta carpeta' });
+    if (!path) return;
+    const r = await request(hostId, { addProject: { path } });
+    toast(r.ok ? 'Proyecto añadido' : r.error);
+    if (r.ok) d.close();
+  };
+  d.el.querySelector('[data-create]').onclick = async () => {
+    const name = d.el.querySelector('[data-name]').value.trim();
+    if (!name) { toast('Ponle un nombre'); return; }
+    const r = await request(hostId, { createProject: { name, git: d.el.querySelector('[data-git]').checked } });
+    toast(r.ok ? `Proyecto ${name} creado` : r.error);
+    if (r.ok) d.close();
+  };
+}
+
+/** The same request to several agents at once, each in its own thread, to compare (as the Mac's «Comparar»). */
+function compareDialog(hostId, projectId) {
+  const accounts = snapshotOf(hostId)?.accounts ?? [];
+  const options = accounts.flatMap((a) => a.models.filter((m) => !m.hidden).map((m) => ({ a, m })));
+  // The default model of the first two subscriptions.
+  const preselected = accounts.slice(0, 2).map((a) => options.findIndex((o) => o.a === a)).filter((i) => i >= 0);
+  const d = openDialog({ title: 'La misma tarea a varios agentes', wide: true, body: `
+    <p class="note">Cada agente trabaja en su propio hilo sobre la misma carpeta: mejor para preguntas, revisiones y planes que para cambios que choquen. Gasta cuota de cada suscripción.</p>
+    <label class="field"><span>Tarea</span><textarea rows="5" data-prompt placeholder="¿Qué quieres que hagan?"></textarea></label>
+    <div class="pick-list">${options.map(({ a, m }, i) => `<label class="check"><input type="checkbox" value="${i}"${preselected.includes(i) ? ' checked' : ''}> ${glyph(a, 16)} ${esc(a.name)} · ${esc(m.name)}${availability(a) ? ` <span class="note">(${esc(availability(a))})</span>` : ''}</label>`).join('')}</div>
+    <div class="actions end"><button class="btn" data-close-btn>Cancelar</button><button class="btn primary" data-launch>Lanzar</button></div>` });
+  d.el.querySelector('[data-close-btn]').onclick = d.close;
+  d.el.querySelector('[data-launch]').onclick = async () => {
+    const prompt = d.el.querySelector('[data-prompt]').value.trim();
+    const chosen = [...d.el.querySelectorAll('.pick-list input:checked')].map((i) => options[Number(i.value)]);
+    if (!prompt) { toast('Escribe la tarea'); return; }
+    if (chosen.length < 2 || chosen.length > 4) { toast('Elige entre 2 y 4 agentes'); return; }
+    d.close();
+    const ids = [];
+    for (const { a, m } of chosen) {
+      const id = await createThread(hostId, projectId);
+      if (!id) continue;
+      sendTo(hostId, Client.select(id, a.id, m.id));
+      sendTo(hostId, Client.send(id, prompt));
+      ids.push(id);
+    }
+    toast(`${ids.length} agentes trabajando`);
+    if (ids[0]) openThread(hostId, ids[0]);
+  };
+}
+
+// MARK: - Git
+
+async function gitDialog(hostId, threadId) {
+  const d = openDialog({ title: 'Cambios del proyecto', wide: true, body: `
+    <div class="git"><div class="git-files"><div class="note pad">Cargando…</div></div><div class="git-diff"></div></div>
+    <div class="git-commit">
+      <textarea rows="3" data-message placeholder="Mensaje del commit"></textarea>
+      <div class="actions"><button class="btn" data-ai>Escribir con IA</button><span class="note grow" data-branch></span>
+        <button class="btn" data-refresh>Actualizar</button><button class="btn" data-commit>Commit</button><button class="btn primary" data-push>Commit y push</button></div>
+      <pre class="out" data-output hidden></pre>
+    </div>` });
+  const $ = (s) => d.el.querySelector(s);
+  let selected = null;
+  const showDiff = async (path) => {
+    selected = path;
+    for (const b of d.el.querySelectorAll('.git-file')) b.classList.toggle('active', (b.dataset.path || null) === path);
+    $('.git-diff').innerHTML = '<div class="note pad">Cargando…</div>';
+    const r = await request(hostId, { gitDiff: { threadId, path } });
+    $('.git-diff').innerHTML = r.ok ? diffHTML(r.diff) : `<div class="note bad pad">${esc(r.error)}</div>`;
+  };
+  const load = async () => {
+    const r = await request(hostId, { gitStatus: { threadId } });
+    if (!r.ok) { $('.git-files').innerHTML = `<div class="note bad pad">${esc(r.error)}</div>`; return; }
+    const g = r.git;
+    if (!g.repo) {
+      $('.git-files').innerHTML = '<div class="note pad">Esta carpeta no es un repositorio git.</div>';
+      for (const b of d.el.querySelectorAll('.git-commit button')) b.disabled = true;
+      return;
+    }
+    $('[data-branch]').textContent = `Rama ${g.branch ?? '?'}${g.upstream ? ` → ${g.upstream}` : ''}${g.ahead ? ` · ${g.ahead} sin subir` : ''}${g.behind ? ` · ${g.behind} por bajar` : ''}`;
+    const total = g.files.reduce((n, f) => [n[0] + f.added, n[1] + f.removed], [0, 0]);
+    $('.git-files').innerHTML = g.files.length
+      ? `<button class="git-file" data-path=""><b>Todos (${g.files.length})</b><span class="nums"><i class="add">+${total[0]}</i> <i class="del">−${total[1]}</i></span></button>`
+        + g.files.map((f) => `<button class="git-file" data-path="${esc(f.path)}" title="${esc(f.path)}"><span class="kind ${f.kind}">${{ new: 'N', deleted: 'B', added: 'A', renamed: 'R' }[f.kind] ?? 'M'}</span><span class="fname">${esc(f.path)}</span><span class="nums">${f.binary ? 'binario' : `<i class="add">+${f.added}</i> <i class="del">−${f.removed}</i>`}</span></button>`).join('')
+      : '<div class="note pad">No hay cambios sin commit.</div>';
+    if (g.files.length) showDiff(selected); else $('.git-diff').innerHTML = '';
+  };
+  d.el.addEventListener('click', (e) => { const f = e.target.closest('.git-file'); if (f) showDiff(f.dataset.path || null); });
+  $('[data-refresh]').onclick = load;
+  $('[data-ai]').onclick = async (e) => {
+    e.target.disabled = true; e.target.textContent = 'Escribiendo…';
+    const r = await request(hostId, { gitMessage: { threadId } });
+    e.target.disabled = false; e.target.textContent = 'Escribir con IA';
+    if (r.ok) $('[data-message]').value = r.message; else toast(r.error);
+  };
+  const commit = async (push) => {
+    const message = $('[data-message]').value.trim();
+    if (!message) { toast('Escribe el mensaje del commit'); return; }
+    for (const b of d.el.querySelectorAll('.git-commit button')) b.disabled = true;
+    const r = await request(hostId, { gitCommit: { threadId, message, push } }, 180_000);
+    for (const b of d.el.querySelectorAll('.git-commit button')) b.disabled = false;
+    $('[data-output]').hidden = false;
+    $('[data-output]').textContent = r.ok ? r.output : r.error;
+    if (r.ok) { $('[data-message]').value = ''; toast(push ? 'Commit y push hechos' : 'Commit hecho'); }
+    load();
+  };
+  $('[data-commit]').onclick = () => commit(false);
+  $('[data-push]').onclick = () => commit(true);
+  load();
+}
+
+// MARK: - Usage
+
+function threadUsageDialog(hostId, threadId) {
+  const thread = host(hostId)?.data.threads.get(threadId);
+  const items = [...(app.older.get(`${hostId}/${threadId}`) ?? []), ...(thread?.items ?? [])].filter((i) => i.usage);
+  const byModel = new Map();
+  let total = 0, cost = 0;
+  for (const it of items) {
+    const acct = accountOf(hostId, it.accountId);
+    const k = `${acct?.name ?? '?'} · ${modelName(acct, it.model)}`;
+    const e = byModel.get(k) ?? { turns: 0, tokens: 0, cost: 0 };
+    e.turns++; e.tokens += it.usage.tokens; e.cost += it.usage.cost ?? 0;
+    byModel.set(k, e);
+    total += it.usage.tokens; cost += it.usage.cost ?? 0;
+  }
+  const last = items.at(-1)?.usage;
+  openDialog({ title: 'Consumo del hilo', body: items.length ? `
+    <div class="stats"><div><b>${items.length}</b><span>turnos</span></div><div><b>${tokens(total)}</b><span>tokens</span></div><div><b>${cost.toFixed(2)} $</b><span>coste (equiv. API)</span></div>
+      ${last?.context && last?.contextWindow ? `<div><b>${Math.round((last.context / last.contextWindow) * 100)} %</b><span>contexto ocupado</span></div>` : ''}</div>
+    <table class="table-plain"><thead><tr><th>Suscripción y modelo</th><th>Turnos</th><th>Tokens</th><th>Coste</th></tr></thead><tbody>
+      ${[...byModel].map(([k, e]) => `<tr><td>${esc(k)}</td><td>${e.turns}</td><td>${tokens(e.tokens)}</td><td>${e.cost.toFixed(2)} $</td></tr>`).join('')}
+    </tbody></table>` : '<p class="note">Aún no hay turnos con datos de tokens en este hilo.</p>' });
+}
+
+const usageState = { host: null, days: 30, report: null, loading: false, error: null };
+
+function renderUsageView(main) {
+  const hosts = [...app.hosts.entries()].filter(([id]) => has(id, 'usage'));
+  if (!usageState.host || !host(usageState.host)) usageState.host = hosts[0]?.[0] ?? null;
+  const r = usageState.report;
+  const out = [`<div class="view"><h1>Consumo</h1><p class="lead">Tokens y coste por modelo, día e hilo.</p>
+    <div class="toolbar"><select data-usage-host>${hosts.map(([id, h]) => `<option value="${esc(id)}"${id === usageState.host ? ' selected' : ''}>${esc(nameOf(h))}</option>`).join('')}</select>
+    <select data-usage-days>${[[7, '7 días'], [30, '30 días'], [90, '90 días'], [0, 'Todo']].map(([v, l]) => `<option value="${v}"${v === usageState.days ? ' selected' : ''}>${l}</option>`).join('')}</select>
+    <button class="btn" data-usage-refresh>Actualizar</button></div>`];
+  if (!hosts.length) out.push('<p class="note">Ningún host conectado da estadísticas de consumo (la app del Mac tiene las suyas).</p>');
+  else if (usageState.loading) out.push('<p class="note">Calculando…</p>');
+  else if (usageState.error) out.push(`<p class="note bad">${esc(usageState.error)}</p>`);
+  else if (r && !r.total.turns) out.push('<p class="note">Aún no hay datos de consumo en este periodo.</p>');
+  else if (r) {
+    const maxDay = Math.max(1, ...r.byDay.map((x) => x.tokens));
+    out.push(`<div class="stats"><div><b>${r.total.turns}</b><span>turnos</span></div><div><b>${tokens(r.total.tokens)}</b><span>tokens</span></div><div><b>${r.total.cost.toFixed(2)} $</b><span>coste (equiv. API)</span></div></div>
+      <h2 class="h2">Por día</h2><div class="days">${r.byDay.map((x) => `<div class="day" title="${esc(`${x.day}: ${tokens(x.tokens)} tokens · ${x.cost.toFixed(2)} $ · ${x.turns} turnos`)}"><i style="height:${Math.max(2, (x.tokens / maxDay) * 100)}%"></i><span>${x.day.slice(8)}</span></div>`).join('')}</div>
+      <h2 class="h2">Por suscripción y modelo</h2><table class="table-plain"><thead><tr><th>Suscripción</th><th>Modelo</th><th>Turnos</th><th>Tokens</th><th>Coste</th></tr></thead><tbody>
+      ${r.byModel.map((m) => `<tr><td>${esc(m.accountName)}</td><td>${esc(modelName(accountOf(usageState.host, m.accountId), m.model))}</td><td>${m.turns}</td><td>${tokens(m.tokens)}</td><td>${m.cost.toFixed(2)} $</td></tr>`).join('')}</tbody></table>
+      <h2 class="h2">Hilos que más gastan</h2><table class="table-plain"><thead><tr><th>Hilo</th><th>Turnos</th><th>Tokens</th><th>Coste</th></tr></thead><tbody>
+      ${r.byThread.map((t) => `<tr><td><button class="link" data-open-thread="${esc(t.threadId)}" data-host="${esc(usageState.host)}">${esc(t.title)}</button></td><td>${t.turns}</td><td>${tokens(t.tokens)}</td><td>${t.cost.toFixed(2)} $</td></tr>`).join('')}</tbody></table>`);
+  }
+  out.push('</div>');
+  main.innerHTML = out.join('');
+  main.querySelector('[data-usage-host]')?.addEventListener('change', (e) => { usageState.host = e.target.value; loadUsage(); });
+  main.querySelector('[data-usage-days]')?.addEventListener('change', (e) => { usageState.days = Number(e.target.value); loadUsage(); });
+  main.querySelector('[data-usage-refresh]')?.addEventListener('click', loadUsage);
+  if (!r && !usageState.loading && !usageState.error && usageState.host) loadUsage();
+}
+
+async function loadUsage() {
+  if (!usageState.host) return;
+  usageState.loading = true; usageState.error = null; renderMain();
+  const r = await request(usageState.host, { usageReport: { days: usageState.days } });
+  usageState.loading = false;
+  usageState.report = r.ok ? r.usage : null;
+  usageState.error = r.ok ? null : r.error;
+  if (app.view.kind === 'usage') renderMain();
+}
+
+// MARK: - Settings and sign-in
+
+function renderSettingsView(main) {
+  const hosts = [...app.hosts.entries()].filter(([id]) => has(id, 'settings'));
+  // The forms are built once per visit: snapshots arriving while you edit mustn't reset them.
+  const signature = hosts.map(([id]) => id).join(',');
+  if (main.dataset.settings !== signature || !main.querySelector('.settings-view')) {
+    main.dataset.settings = signature;
+    main.innerHTML = `<div class="view settings-view"><h1>Ajustes</h1><p class="lead">De cada host donde corren los agentes. Los del Mac están en su propia app.</p>
+      ${hosts.length ? hosts.map(([id, h]) => settingsFormHTML(id, h)).join('') : '<p class="note">Ningún host conectado se puede configurar desde aquí.</p>'}</div>`;
+    for (const [id] of hosts) bindSettingsForm(main.querySelector(`form[data-settings="${CSS.escape(id)}"]`), id);
+  }
+  for (const [id] of hosts) {
+    const box = main.querySelector(`[data-accounts="${CSS.escape(id)}"]`);
+    if (box) box.innerHTML = accountsHTML(id);
+  }
+}
+
+function settingsFormHTML(hostId, h) {
+  const st = h.data.snapshot.hostSettings ?? {};
+  const accounts = h.data.snapshot.accounts;
+  const planValue = st.limitPlan?.mode === 'chain' && st.limitPlan.targets?.length === 1 ? `chain|${st.limitPlan.targets[0].accountId}|${st.limitPlan.targets[0].model}` : st.limitPlan?.mode ?? 'ask';
+  const planOptions = [['ask', 'Avisarme y decidir yo'], ['mostQuota', 'Pasar a la de más cuota'], ['wait', 'Esperar a que se reinicie y seguir'],
+    ...accounts.flatMap((a) => a.models.filter((m) => !m.hidden).map((m) => [`chain|${a.id}|${m.id}`, `Pasar a ${a.name} · ${m.name}`]))];
+  return `<form class="card settings" data-settings="${esc(hostId)}">
+    <div class="section-head"><span class="dot ${h.info.state}"></span><h2>${esc(nameOf(h))}</h2><span class="note">${esc(h.data.snapshot.hostVersion ?? '')}</span></div>
+    <label class="field"><span>Carpeta de proyectos</span><div class="paste"><input type="text" name="projectsRoot" value="${esc(st.projectsRoot ?? '')}" spellcheck="false"><button type="button" class="btn" data-choose-root>Elegir…</button></div>
+      <small>Sus subcarpetas aparecen como proyectos. Puedes añadir más carpetas de cualquier sitio con + junto al nombre del host.</small></label>
+    <div class="row2">
+      <label class="field"><span>Suscripción por defecto</span><select name="defaultAccountId"><option value="">La primera con sesión y cuota</option>${accounts.map((a) => `<option value="${esc(a.id)}"${a.id === st.defaultAccountId ? ' selected' : ''}>${esc(a.name)}</option>`).join('')}</select></label>
+      <label class="field"><span>Permisos por defecto</span><select name="defaultMode">${Object.entries(MODES).map(([v, [l]]) => `<option value="${v}"${v === st.defaultMode ? ' selected' : ''}>${l}</option>`).join('')}</select></label>
+    </div>
+    <div class="row2">
+      <label class="field"><span>Si se acaba la cuota</span><select name="limitPlan">${planOptions.map(([v, l]) => `<option value="${esc(v)}"${v === planValue ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select></label>
+      <label class="field"><span>Segundos antes de relevar</span><input type="number" name="relayDelay" min="0" max="300" value="${st.relayDelay ?? 10}"></label>
+    </div>
+    <div class="row2">
+      <label class="field"><span>Agentes trabajando a la vez</span><input type="number" name="maxAgents" min="1" max="8" value="${st.maxAgents ?? 2}"></label>
+      <label class="check field-check"><input type="checkbox" name="aiTitles"${st.aiTitles !== false ? ' checked' : ''}> Poner el tema como título con IA (modelo barato)</label>
+    </div>
+    <div class="actions end"><button class="btn primary" type="submit">Guardar</button></div>
+    <h3 class="h3">Suscripciones</h3><div data-accounts="${esc(hostId)}"></div>
+  </form>`;
+}
+
+function accountsHTML(hostId) {
+  const accounts = snapshotOf(hostId)?.accounts ?? [];
+  if (!accounts.length) return '<p class="note">Sin agentes: instala Claude Code o Codex en el host.</p>';
+  return accounts.map((a) => {
+    const s = a.status;
+    const state = s?.loggedIn === false ? '<span class="note bad">Sin sesión</span>' : s?.loggedIn ? `<span class="note">Con sesión${s.email ? ` · ${esc(s.email)}` : ''}${s.plan ? ` · ${esc(s.plan)}` : ''}</span>` : '<span class="note">Comprobando…</span>';
+    return `<div class="acct-row">${glyph(a, 24)}<b>${esc(a.name)}</b>${state}<span class="grow"></span>`
+      + (has(hostId, 'login') ? `<button type="button" class="btn${s?.loggedIn === false ? ' primary' : ''}" data-login="${esc(a.id)}" data-login-host="${esc(hostId)}">${s?.loggedIn === false ? 'Iniciar sesión' : 'Volver a iniciar sesión'}</button>` : '') + '</div>';
+  }).join('');
+}
+
+function bindSettingsForm(form, hostId) {
+  if (!form) return;
+  form.querySelector('[data-choose-root]').onclick = async () => {
+    const p = await chooseFolder({ title: 'Carpeta de proyectos', start: form.projectsRoot.value, request: req(hostId) });
+    if (p) form.projectsRoot.value = p;
+  };
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const plan = form.limitPlan.value;
+    const limitPlan = plan.startsWith('chain|') ? { mode: 'chain', targets: [{ accountId: plan.split('|')[1], model: plan.split('|')[2] }] } : { mode: plan, targets: [] };
+    const settings = {
+      projectsRoot: form.projectsRoot.value.trim(), defaultAccountId: form.defaultAccountId.value || null, defaultMode: form.defaultMode.value,
+      limitPlan, relayDelay: Number(form.relayDelay.value), maxAgents: Number(form.maxAgents.value), aiTitles: form.aiTitles.checked,
+    };
+    const r = await request(hostId, { setSettings: { settings } });
+    toast(r.ok ? 'Ajustes guardados' : r.error);
+  };
+}
+
+function loginDialog(hostId, accountId) {
+  const account = accountOf(hostId, accountId);
+  const requestId = uuid();
+  let finished = false;
+  const d = openDialog({ title: `Iniciar sesión en ${account?.name ?? 'la suscripción'}`, wide: true, onClose: () => {
+    app.logins.delete(requestId);
+    if (!finished) sendTo(hostId, { loginCancel: { requestId } });
+  }, body: `
+    <p class="note">Abre el enlace, entra con tu cuenta y, si te muestra un código, pégalo abajo. La sesión queda guardada en ${esc(nameOf(host(hostId)))}, aparte de la de tu terminal.</p>
+    <div class="actions"><button class="btn primary" data-open-link disabled>Abrir el enlace</button><button class="btn" data-copy-link disabled>Copiar enlace</button><span class="note grow" data-state>Arrancando…</span></div>
+    <pre class="out login-out" data-out></pre>
+    <div class="paste"><input type="text" data-code placeholder="Código (si te lo pide)" autocomplete="off" spellcheck="false"><button class="btn" data-send-code>Enviar</button></div>` });
+  const $ = (s) => d.el.querySelector(s);
+  let output = '', link = null;
+  app.logins.set(requestId, (m) => {
+    if (m.text) {
+      output += m.text;
+      $('[data-out]').innerHTML = linkify(output);
+      $('[data-out]').scrollTop = $('[data-out]').scrollHeight;
+      const found = output.match(/https?:\/\/[^\s<>"']+/g);
+      if (found && !link) {
+        link = found.find((u) => /oauth|auth|login|device|activate/i.test(u)) ?? found[0];
+        $('[data-open-link]').disabled = false; $('[data-copy-link]').disabled = false;
+        $('[data-state]').textContent = 'Esperando a que inicies sesión…';
+      }
+    }
+    if (m.done) {
+      finished = true;
+      $('[data-state]').textContent = m.ok ? 'Sesión iniciada ✓' : `No se ha completado: ${m.error ?? ''}`;
+      $('[data-state]').className = m.ok ? 'note ok grow' : 'note bad grow';
+      if (m.ok) setTimeout(d.close, 1500);
+    }
+  });
+  app.requests.set(requestId, (r) => { if (r.ok === false) { finished = true; $('[data-state]').textContent = r.error; } });
+  $('[data-open-link]').onclick = () => window.open(link, '_blank', 'noopener');
+  $('[data-copy-link]').onclick = () => copy(link, 'Enlace copiado');
+  const sendCode = () => {
+    const code = $('[data-code]').value.trim();
+    if (!code) return;
+    sendTo(hostId, { loginInput: { requestId, text: code } });
+    $('[data-code]').value = '';
+    $('[data-state]').textContent = 'Código enviado…';
+  };
+  $('[data-send-code]').onclick = sendCode;
+  $('[data-code]').onkeydown = (e) => { if (e.key === 'Enter') sendCode(); };
+  sendTo(hostId, { login: { requestId, accountId } });
+}
+
+// MARK: - History and images
+
+async function loadOlder(hostId, threadId) {
+  const key = `${hostId}/${threadId}`;
+  const thread = host(hostId)?.data.threads.get(threadId);
+  const older = app.older.get(key) ?? [];
+  const r = await request(hostId, { loadOlder: { threadId, have: older.length + (thread?.items.length ?? 0) } });
+  if (!r.ok) { toast(r.error); return; }
+  if (r.items.length) app.older.set(key, [...r.items, ...older]);
+  if (threadEls) threadEls.stick = false;
+  renderMain();
+}
+
+const IMAGE_PATH = /(?:^|[\s(`'"*])((?:[A-Za-z]:[\\/]|~?\/|\.{1,2}[\\/])?[\w.\-\\/]*[\w-]\.(?:png|jpe?g|gif|webp|svg))(?=$|[\s)`'".,;:*])/gim;
+
+/** Thumbnails for the images a message names (the host serves only files the thread mentions). */
+function imagesHTML(hostId, text) {
+  const paths = [...new Set([...String(text ?? '').matchAll(IMAGE_PATH)].map((m) => m[1]))].slice(0, 6);
+  if (!paths.length) return '';
+  const threadId = app.view.thread;
+  return `<div class="thumbs">${paths.map((p) => `<button class="thumb" data-image="${esc(p)}" data-img-host="${esc(hostId)}" data-img-thread="${esc(threadId)}" title="${esc(p)}"><span class="thumb-name">${esc(p.split(/[\\/]/).pop())}</span></button>`).join('')}</div>`;
+}
+
+async function imageData(hostId, threadId, path, maxPixel) {
+  const key = `${hostId}/${threadId}/${maxPixel}/${path}`;
+  if (app.images.has(key)) return app.images.get(key);
+  const pending = request(hostId, { fetchImage: { threadId, path, maxPixel } }, 30_000).then((r) => {
+    if (!r.data) return null;
+    const ext = path.split('.').pop().toLowerCase();
+    const mime = !has(hostId, 'images') ? 'image/jpeg' : ext === 'svg' ? 'image/svg+xml' : ext === 'jpg' ? 'image/jpeg' : `image/${ext}`;
+    return `data:${mime};base64,${r.data}`;
+  });
+  app.images.set(key, pending);
+  return pending;
+}
+
+function hydrateImages(hostId, threadId) {
+  for (const b of threadEls?.items.querySelectorAll('.thumb:not([data-ready])') ?? []) {
+    b.dataset.ready = '1';
+    imageData(hostId, threadId, b.dataset.image, 480).then((url) => {
+      if (url) b.insertAdjacentHTML('afterbegin', `<img src="${url}" alt="">`);
+      else b.classList.add('missing');
+    });
+  }
+}
+
+async function imageViewer(path, hostId, threadId) {
+  const d = openDialog({ title: path.split(/[\\/]/).pop(), wide: true, body: '<div class="viewer"><span class="spinner"></span></div>' });
+  const url = await imageData(hostId, threadId, path, 2400);
+  d.el.querySelector('.viewer').innerHTML = url ? `<img src="${url}" alt="">` : '<p class="note">No se ha podido cargar la imagen.</p>';
+}
+
+// Everything above is defined: start.
 connect();
 render();

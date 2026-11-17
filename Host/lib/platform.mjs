@@ -59,7 +59,15 @@ const CMD_UNSAFE = /[%!^&|<>"\r\n]/;
  */
 export function spawnCLI(bin, args, opts = {}) {
   const options = { windowsHide: true, ...opts };
-  if (!isWindows || !/\.(cmd|bat)$/i.test(bin)) return spawn(bin, args, options);
+  if (!isWindows) {
+    // Its own process group, so stopping it also stops the shells and servers it started. Not for an
+    // interactive login on the terminal: a background group can't read from it.
+    const group = opts.stdio !== 'inherit';
+    const child = spawn(bin, args, { ...options, detached: group });
+    child.relevoGroup = group;
+    return child;
+  }
+  if (!/\.(cmd|bat)$/i.test(bin)) return spawn(bin, args, options);
   const script = npmShimTarget(bin);
   if (script) return spawn(process.execPath, [script, ...args], options);
   const bad = args.find((a) => CMD_UNSAFE.test(a));
@@ -74,6 +82,11 @@ export function killTree(proc) {
   if (isWindows && proc.pid) {
     const k = spawn('taskkill', ['/pid', String(proc.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
     k.on('error', () => { try { proc.kill(); } catch {} });
+  } else if (proc.relevoGroup && proc.pid) {
+    const signal = (sig) => { try { process.kill(-proc.pid, sig); } catch { try { proc.kill(sig); } catch {} } };
+    signal('SIGTERM');
+    // Whatever ignores SIGTERM (a dev server, a stuck test) goes a few seconds later.
+    setTimeout(() => signal('SIGKILL'), 3000).unref();
   } else {
     try { proc.kill('SIGTERM'); } catch {}
   }

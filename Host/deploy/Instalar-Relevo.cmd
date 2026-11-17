@@ -38,11 +38,12 @@ try {
     }
   }
 
-  # The newest release tag (vX.Y.Z); the main branch if there isn't one yet.
-  $tags = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/tags?per_page=100" -Headers @{ 'User-Agent' = 'relevo-installer' }
-  $ref = $tags | ForEach-Object { $_.name } | Where-Object { $_ -match '^v?\d+\.\d+\.\d+$' } |
-    Sort-Object { [version]($_ -replace '^v', '') } -Descending | Select-Object -First 1
-  if ($ref) { $url = "https://codeload.github.com/$repo/zip/refs/tags/$ref" } else { $ref = 'main'; $url = "https://codeload.github.com/$repo/zip/refs/heads/main" }
+  # The newest signed release (vX.Y.Z with manifest.sig, as the updater requires).
+  $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases?per_page=30" -Headers @{ 'User-Agent' = 'relevo-installer' }
+  $ref = $releases | Where-Object { -not $_.draft -and -not $_.prerelease -and $_.tag_name -match '^v?\d+\.\d+\.\d+$' -and ($_.assets | Where-Object { $_.name -eq 'manifest.sig' }) } |
+    ForEach-Object { $_.tag_name } | Sort-Object { [version]($_ -replace '^v', '') } -Descending | Select-Object -First 1
+  if (-not $ref) { throw 'No hay ninguna version publicada y firmada todavia.' }
+  $url = "https://codeload.github.com/$repo/zip/refs/tags/$ref"
   Write-Host "Descargando Relevo $ref..."
   $work = Join-Path $env:TEMP ('relevo-install-' + [guid]::NewGuid().ToString('N'))
   New-Item -ItemType Directory -Path $work | Out-Null

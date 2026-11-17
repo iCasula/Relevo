@@ -5,8 +5,10 @@
 //   relevo-host.mjs pair      print the pairing link for the iPhone
 //   relevo-host.mjs login [claude|codex]   sign in for this host (interactive; Codex uses a device code)
 //   relevo-host.mjs status    login, limits and models of each agent, without calling a model
-//   relevo-host.mjs update [--check | <tag> | main]   install the newest release tag (vX.Y.Z) from GitHub, or the
-//                             one given, and restart the service; --check only says whether there's a newer one
+//   relevo-host.mjs update [--check | <tag> | main]   install the newest signed release (vX.Y.Z) from GitHub, or the
+//                             one given (main: the development branch, unsigned), and restart the service;
+//                             --check only says whether there's a newer one
+//   relevo-host.mjs rollback  put back the version installed before the last update
 //   relevo-host.mjs app [--url]   open the desktop app (with RELEVO_UI_PORT set), or print its link
 //   relevo-host.mjs logs [n]  last lines of <data>/logs/host.log (where the supervisor writes; on Linux, journalctl)
 //
@@ -38,7 +40,7 @@ import { Host, PROVIDERS } from './lib/host.mjs';
 import { isWindows, which, findIn, spawnCLI, killTree, requestControl, watchControl, loadEnvFile, openAppWindow } from './lib/platform.mjs';
 import { Gateway } from './lib/remote.mjs';
 import { startUIServer, uiToken, appURL } from './lib/ui-server.mjs';
-import { DEFAULT_REPO, checkForUpdate, installVersion, installedVersion, latestTag } from './lib/updater.mjs';
+import { DEFAULT_REPO, checkForUpdate, installVersion, installedVersion, latestTag, restoreProgram, PENDING_MARKER } from './lib/updater.mjs';
 
 const SCRIPT = fileURLToPath(import.meta.url);
 const APP_DIR = path.dirname(SCRIPT);
@@ -71,6 +73,9 @@ function config() {
     minFreeProjectsBytes: Number(env.RELEVO_MIN_FREE_GB_PROJECTS ?? 2) * 1e9,
     fakeAgent: env.RELEVO_FAKE_AGENT === '1',
     uiPort: Number(env.RELEVO_UI_PORT ?? 0),
+    version: installedVersion(APP_DIR),
+    // Only the service writes the state; commands such as `pair` just read it.
+    readOnly: (process.argv[2] ?? 'serve') !== 'serve',
     uiDir: path.join(APP_DIR, 'ui'),
   };
   // Everything the agents write outside the project goes to the data folder, never to the system disk:
@@ -107,7 +112,15 @@ switch (command) {
       startUIServer({ port: cfg.uiPort, dataDir: cfg.dataDir, uiDir: cfg.uiDir, gateway, log: (m) => host.log(m) });
     }
     host.log(`data ${cfg.dataDir} · projects ${cfg.projectsRoot} · ${cfg.providers.map((p) => `${p.provider} ${p.bin}`).join(' · ')}${cfg.fakeAgent ? ' (fake agent)' : ''}`);
-    const stop = (code = 0) => { gateway?.stop(); for (const s of host.agents.values()) s.close(true); process.exit(code); };
+    const stop = (code = 0) => {
+      gateway?.stop();
+      for (const s of host.agents.values()) s.close(true);
+      host.flush();
+      process.exit(code);
+    };
+    // One bad message or timer mustn't take every running turn down with it.
+    process.on('uncaughtException', (e) => host.log(`uncaught: ${e.stack ?? e}`));
+    process.on('unhandledRejection', (e) => host.log(`unhandled rejection: ${e?.stack ?? e}`));
     process.on('SIGTERM', () => stop());
     process.on('SIGINT', () => stop());
     const refresh = (why) => { host.log(`${why}: probing the accounts again`); host.refreshUsage(); };
@@ -143,6 +156,8 @@ switch (command) {
       setTimeout(check, 5000).unref();
       setInterval(check, 6 * 3600_000).unref();
     }
+    // Up for a minute after an update: the new version works, the supervisor needn't put the old one back.
+    setTimeout(() => fs.rmSync(path.join(APP_DIR, PENDING_MARKER), { force: true }), 60_000).unref();
     // Under the supervisor: if it's gone (a scheduled task stopped by force), don't stay behind holding the port.
     const parent = Number(process.env.RELEVO_SUPERVISOR_PID);
     if (parent > 0) setInterval(() => { try { process.kill(parent, 0); } catch { stop(); } }, 5000).unref();
@@ -189,9 +204,11 @@ switch (command) {
         console.log(u.available ? `Update available: ${u.current} → ${u.latest} (relevo-host update)` : `Up to date: ${u.current}${u.latest ? ` (latest tag ${u.latest})` : ' (the repository has no release tags)'}`);
         break;
       }
-      const ref = arg ?? await latestTag(repo) ?? 'main';
-      const r = await installVersion({ appDir: APP_DIR, ref, repo });
-      console.log(`Installed ${r.version} from ${repo} (${r.files} files).`);
+      const ref = arg ?? await latestTag(repo);
+      if (!ref) throw new Error('there are no signed releases yet (use «relevo-host update main» for the development branch)');
+      if (ref === 'main' || !/^v?\d+\.\d+\.\d+$/.test(ref)) console.log(`Warning: ${ref} is a branch, not a signed release.`);
+      const r = await installVersion({ appDir: APP_DIR, ref, repo, allowUnsigned: true });
+      console.log(`Installed ${r.version} from ${repo} (${r.files} files; ${r.from} kept for «relevo-host rollback»).`);
     } catch (e) {
       console.error(`Update failed: ${e.message}`);
       process.exitCode = 1;
@@ -206,6 +223,12 @@ switch (command) {
         console.log('The running service restarts with the new version in a few seconds.');
       }
     }
+    break;
+  }
+  case 'rollback': {
+    if (!restoreProgram(APP_DIR)) { console.error('There is no previous version to go back to.'); process.exit(1); }
+    console.log(`Back to ${installedVersion(APP_DIR)}.`);
+    requestControl(cfg.dataDir, 'restart');
     break;
   }
   case 'app': {
@@ -223,7 +246,7 @@ switch (command) {
     break;
   }
   default:
-    console.error('usage: relevo-host.mjs [serve|pair|login|status|update|app|logs]');
+    console.error('usage: relevo-host.mjs [serve|pair|login|status|update|rollback|app|logs]');
     process.exit(2);
 }
 
@@ -235,21 +258,39 @@ function supervise() {
   const logDir = path.join(cfg.dataDir, 'logs');
   fs.mkdirSync(logDir, { recursive: true });
   const logFile = path.join(logDir, 'host.log');
-  let child = null, stopping = false, failures = 0;
+  const marker = path.join(APP_DIR, PENDING_MARKER);
+  let child = null, stopping = false, failures = 0, failedAfterUpdate = 0;
+  const log = (line) => {
+    try {
+      if (fs.statSync(logFile).size > 5e6) fs.renameSync(logFile, `${logFile}.1`);
+    } catch {}
+    try { fs.appendFileSync(logFile, line); } catch {}
+    // Under systemd the journal gets it too; on Windows nobody reads stdout.
+    if (!isWindows) process.stdout.write(line);
+  };
   const start = () => {
-    try { if (fs.statSync(logFile).size > 5e6) fs.renameSync(logFile, `${logFile}.1`); } catch {}
-    const out = fs.openSync(logFile, 'a');
     const startedAt = Date.now();
     child = spawn(process.execPath, [SCRIPT, 'serve'], {
       env: { ...process.env, RELEVO_SUPERVISE: '0', RELEVO_SUPERVISOR_PID: String(process.pid) },
-      stdio: ['ignore', out, out], windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
     });
-    fs.closeSync(out);
+    child.stdout.on('data', (d) => log(d.toString()));
+    child.stderr.on('data', (d) => log(d.toString()));
     child.on('exit', (code) => {
       if (stopping) process.exit(0);
-      failures = code === RESTART_EXIT_CODE ? 0 : Date.now() - startedAt < 30_000 ? failures + 1 : 0;
+      const quick = Date.now() - startedAt < 30_000;
+      failures = code === RESTART_EXIT_CODE ? 0 : quick ? failures + 1 : 0;
+      // A version just installed that keeps dying at start: put the previous one back.
+      if (code !== RESTART_EXIT_CODE && quick && fs.existsSync(marker)) {
+        failedAfterUpdate++;
+        if (failedAfterUpdate >= 2 && restoreProgram(APP_DIR)) {
+          log(`[supervisor] the new version doesn't start: back to ${installedVersion(APP_DIR)}\n`);
+          failedAfterUpdate = 0;
+          failures = 0;
+        }
+      }
       const delay = code === RESTART_EXIT_CODE ? 500 : Math.min(60_000, 2000 * 2 ** failures);
-      fs.appendFileSync(logFile, `[supervisor] worker exited (${code}); starting it again in ${delay / 1000} s\n`);
+      log(`[supervisor] worker exited (${code}); starting it again in ${delay / 1000} s\n`);
       setTimeout(start, delay);
     });
   };

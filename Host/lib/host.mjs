@@ -11,6 +11,11 @@ import { createCompanionServer } from './transport.mjs';
 import { ClaudeSession, FakeSession, probe, fakeProbe } from './claude.mjs';
 import { CodexSession, codexProbe } from './codex.mjs';
 import { handoffText } from './handoff.mjs';
+import * as gitops from './gitops.mjs';
+import { listDirectory, readThreadImage } from './files.mjs';
+import { usageReport } from './usage.mjs';
+import { LoginSession, LOGIN_ARGS } from './login.mjs';
+import { quickCompletion, cleanTitle } from './quick.mjs';
 
 const PROTOCOL_VERSION = 1;
 const MAX_STORED_ITEMS = 1500;
@@ -20,6 +25,10 @@ const PROBE_EVERY_MS = 10 * 60_000;
 const STALE_AFTER_S = 120;
 const CODEX_SESSIONS_DAYS = 30;
 const SKIP_DIRS = new Set(['$RECYCLE.BIN', 'System Volume Information', 'lost+found']);
+const MODES = new Set(['ask', 'autoEdit', 'full', 'plan']);
+const PLAN_MODES = new Set(['ask', 'mostQuota', 'chain', 'wait']);
+/** What this host does beyond the shared protocol; clients show those controls only when listed. */
+export const HOST_FEATURES = ['projects', 'threads', 'git', 'images', 'usage', 'login', 'settings', 'limitPlans', 'history', 'titles'];
 
 /** Providers this host can run. Each account is one provider with its own CLI login on this machine. */
 export const PROVIDERS = {
@@ -104,9 +113,23 @@ export class Host {
   _loadState() {
     const file = path.join(this.config.dataDir, 'state.json');
     let s = {};
-    try { s = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
+    try { s = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) {
+      // Starting over would change the pairing key and lose every thread: only when there's no state yet.
+      if (e.code !== 'ENOENT') {
+        try {
+          s = JSON.parse(fs.readFileSync(`${file}.bak`, 'utf8'));
+          this.log(`state.json unreadable (${e.message}); using the previous copy (state.json.bak)`);
+        } catch {
+          throw new Error(`Can't read ${file} (${e.message}). Fix or remove it (a new one means pairing again).`);
+        }
+      }
+    }
+    const created = !s.serverId || !s.secret;
     s.serverId ??= `relevo-${crypto.randomBytes(4).toString('hex')}`;
     s.secret ??= crypto.randomBytes(32).toString('base64');
+    s.settings ??= {};
+    s.extraProjects ??= [];
+    s.hiddenProjects ??= [];
     // One account per provider; the first version had only Claude (`accountId`, `models`).
     s.accounts ??= {};
     if (s.accountId) { s.accounts.claude ??= s.accountId; delete s.accountId; }
@@ -137,21 +160,45 @@ export class Host {
       if (!this.accountsById.has(t.accountId)) t.accountId = this.accounts[0]?.id;
       this.threads.set(meta.id, t);
     }
-    this._saveState();
+    // `pair` and other one-off commands read the state; only the service (or a brand-new state) writes it.
+    if (!this.config.readOnly || created) this._saveState();
+  }
+
+  /** Settings changed from the apps (stored in state.json), over the defaults from host.env. */
+  get settings() {
+    return {
+      projectsRoot: this.config.projectsRoot, maxAgents: this.config.maxAgents, defaultMode: 'autoEdit', defaultAccountId: null,
+      limitPlan: { mode: 'ask', targets: [] }, relayDelay: 10, aiTitles: true, ...this.state.settings,
+    };
+  }
+
+  /** Writes every pending thread and the state now (before exiting or restarting). */
+  flush() {
+    for (const t of this.threads.values()) {
+      if (!t._saveTimer) continue;
+      clearTimeout(t._saveTimer);
+      t._saveTimer = null;
+      try { writeJSONAtomic(path.join(this.config.threadsDir, `${t.id}.json`), { items: t.items, totalItems: t.totalItems }); } catch {}
+    }
+    try { this._saveState(); } catch {}
   }
 
   _saveState() {
     this.state.threads = [...this.threads.values()].map((t) => {
-      const { items, totalItems, _saveTimer, ...meta } = t;
+      const { items, totalItems, _saveTimer, _preview, ...meta } = t;
       return meta;
     });
     for (const a of this.accounts ?? []) this.state.models[a.provider] = a.models;
-    writeJSONAtomic(path.join(this.config.dataDir, 'state.json'), this.state);
+    const file = path.join(this.config.dataDir, 'state.json');
+    try { if (fs.existsSync(file)) fs.copyFileSync(file, `${file}.bak`); } catch {}
+    writeJSONAtomic(file, this.state);
   }
 
   _saveThread(t) {
     clearTimeout(t._saveTimer);
     t._saveTimer = setTimeout(() => {
+      t._saveTimer = null;
+      if (!this.threads.has(t.id)) return;
       if (t.items.length > MAX_STORED_ITEMS) t.items = t.items.slice(-MAX_STORED_ITEMS);
       writeJSONAtomic(path.join(this.config.threadsDir, `${t.id}.json`), { items: t.items, totalItems: t.totalItems });
       this._saveState();
@@ -160,6 +207,7 @@ export class Host {
 
   /** Claude Code keeps transcripts in its config folder: let it prune them sooner than its 30-day default. */
   _limitClaudeHousekeeping() {
+    if (this.config.readOnly) return;
     const file = path.join(this.config.claudeConfigDir, 'settings.json');
     if (!fs.existsSync(file)) writeJSONAtomic(file, { cleanupPeriodDays: 14 });
   }
@@ -182,7 +230,8 @@ export class Host {
       serverId: this.state.serverId, secret: Buffer.from(this.state.secret, 'base64'), port: this.config.port,
     }, (peer) => this._accept(peer));
     this.server.on('listening', () => this.log(`listening on :${this.config.port} as ${this.state.serverId} (${this.config.name}) · ${this.accounts.map((a) => a.name).join(', ')}`));
-    this.server.on('error', (e) => { this.log(`server error: ${e.message}`); process.exitCode = 1; });
+    // A busy port means another copy is serving: exit so the supervisor (or systemd) tries again later.
+    this.server.on('error', (e) => { this.log(`server error: ${e.message}`); this.flush(); process.exit(1); });
     this.refreshUsage();
     setInterval(() => this.refreshUsage(), PROBE_EVERY_MS).unref();
     setInterval(() => this._housekeeping(), 60_000).unref();
@@ -248,24 +297,194 @@ export class Host {
         break;
       }
       case 'refreshUsage': this.refreshUsage(); break;
-      case 'fetchImage': peer.send({ image: { requestId: a.requestId, error: 'Este host todavía no sirve imágenes' } }); break;
+      case 'fetchImage': {
+        if (!t) { peer.send({ image: { requestId: a.requestId, error: 'Hilo desconocido' } }); break; }
+        try { peer.send({ image: { requestId: a.requestId, data: readThreadImage(t, a.path).toString('base64') } }); } catch (e) {
+          peer.send({ image: { requestId: a.requestId, error: e.message } });
+        }
+        break;
+      }
       case 'openOnMac': peer.send({ toast: { _0: `«Abrir» no está disponible en ${this.config.name}` } }); break;
-      default: break; // setDraft, suggestion, setLimitPlan, limitAction, registerLiveActivity: not in this host yet
+      case 'setLimitPlan': if (t) { t.limitPlan = a.plan ? this._validPlan(a.plan) : null; this._changed(t); } break;
+      case 'limitAction': if (t) this._limitAction(t, a.action); break;
+      default: this._handleExtra(peer, name, a, t); break; // setDraft, suggestion, registerLiveActivity: Mac only
     }
+  }
+
+  /** Requests only this host answers (the desktop app uses them when the snapshot lists the feature). */
+  _handleExtra(peer, name, a, t) {
+    const reply = (data) => peer.send({ reply: { requestId: a.requestId, ok: true, ...data } });
+    const fail = (e) => peer.send({ reply: { requestId: a.requestId, ok: false, error: e?.message ?? String(e) } });
+    const run = (fn) => { try { const r = fn(); if (r?.then) r.then((d) => reply(d ?? {}), fail); else reply(r ?? {}); } catch (e) { fail(e); } };
+    switch (name) {
+      case 'listDirectory': run(() => ({ directory: listDirectory(a.path) })); break;
+      case 'addProject': run(() => ({ projectId: this.addProject(a.path) })); break;
+      case 'createProject': run(() => ({ projectId: this.createProject(a.name, a.git !== false) })); break;
+      case 'removeProject': run(() => this.removeProject(String(a.projectId).toUpperCase(), !!a.deleteThreads)); break;
+      case 'setSettings': run(() => this.setSettings(a.settings ?? {})); break;
+      case 'renameThread': if (t) run(() => { t.title = String(a.title ?? '').trim().slice(0, 120) || t.title; t.aiTitled = true; this._changed(t); }); break;
+      case 'deleteThread': if (t) run(() => this.deleteThread(t)); break;
+      case 'regenerateTitle': if (t) run(() => this._aiTitle(t, true)); break;
+      case 'loadOlder': if (t) run(() => {
+        const have = Math.max(0, Number(a.have) || 0);
+        const end = Math.max(0, t.items.length - have);
+        return { items: t.items.slice(Math.max(0, end - 300), end), more: end > 300 };
+      }); break;
+      case 'gitStatus': if (t) run(() => ({ git: gitops.status(t.projectPath) })); break;
+      case 'gitDiff': if (t) run(() => ({ diff: gitops.diff(t.projectPath, a.path || null) })); break;
+      case 'gitCommit': if (t) run(async () => {
+        const r = await gitops.commit(t.projectPath, { message: a.message, push: !!a.push });
+        if (!r.ok) throw new Error(r.output);
+        this._append(t, { id: uuid(), kind: 'notice', text: `${a.push ? 'Commit y push' : 'Commit'}: ${String(a.message).split('\n')[0]}` });
+        this._changed(t);
+        return { output: r.output };
+      }); break;
+      case 'gitMessage': if (t) run(async () => {
+        const changes = gitops.diff(t.projectPath).slice(0, 30_000);
+        if (!changes.trim()) throw new Error('No hay cambios sin commit');
+        const text = await this._quick(`Escribe el mensaje de commit (en el idioma de los commits que veas; si no, en español) para estos cambios: una primera línea imperativa de menos de 70 caracteres y, si hace falta, un párrafo breve. Solo el mensaje.\n\n${changes}`);
+        return { message: text.replace(/^```\w*\n?|```$/g, '').trim() };
+      }); break;
+      case 'usageReport': run(() => ({ usage: usageReport(this.threads.values(), this.accountsById, { days: Number(a.days) || 0 }) })); break;
+      case 'login': {
+        const account = this.accountsById.get(String(a.accountId).toUpperCase());
+        if (!account || !LOGIN_ARGS[account.provider]) { fail(new Error('Suscripción desconocida')); break; }
+        this._startLogin(peer, a.requestId, account);
+        break;
+      }
+      case 'loginInput': this.logins?.get(a.requestId)?.input(a.text ?? ''); break;
+      case 'loginCancel': this.logins?.get(a.requestId)?.cancel(); break;
+      default: break;
+    }
+  }
+
+  // MARK: - Projects, settings and threads (from the apps)
+
+  _projectsRoot() { return path.resolve(this.settings.projectsRoot); }
+
+  addProject(dir) {
+    const p = path.resolve(String(dir ?? ''));
+    if (!fs.statSync(p).isDirectory()) throw new Error('No es una carpeta');
+    const s = this.state;
+    s.hiddenProjects = s.hiddenProjects.filter((x) => x !== p);
+    if (path.dirname(p) !== this._projectsRoot() && !s.extraProjects.includes(p)) s.extraProjects.push(p);
+    this._projectsChanged();
+    return uuidFrom(p);
+  }
+
+  createProject(name, git) {
+    const clean = String(name ?? '').trim();
+    if (!clean || /[\\/:*?"<>|]/.test(clean) || clean.startsWith('.')) throw new Error('Nombre de carpeta no válido');
+    const p = path.join(this._projectsRoot(), clean);
+    if (fs.existsSync(p)) throw new Error(`Ya existe ${p}`);
+    fs.mkdirSync(p, { recursive: true });
+    if (git) gitops.initRepo(p);
+    return this.addProject(p);
+  }
+
+  removeProject(projectId, deleteThreads) {
+    const project = this.projects().find((x) => x.id === projectId);
+    if (!project) throw new Error('Proyecto desconocido');
+    const s = this.state;
+    s.extraProjects = s.extraProjects.filter((x) => x !== project.path);
+    if (path.dirname(project.path) === this._projectsRoot() && !s.hiddenProjects.includes(project.path)) s.hiddenProjects.push(project.path);
+    if (deleteThreads) for (const t of [...this.threads.values()]) if (t.projectId === projectId) this.deleteThread(t, false);
+    this._projectsChanged();
+    return {};
+  }
+
+  _projectsChanged() {
+    this.projectsCache.at = 0;
+    this._saveState();
+    this._broadcastSnapshot();
+  }
+
+  setSettings(changes) {
+    const next = { ...this.state.settings };
+    if ('projectsRoot' in changes) {
+      const p = path.resolve(String(changes.projectsRoot));
+      fs.mkdirSync(p, { recursive: true });
+      next.projectsRoot = p;
+    }
+    if ('defaultMode' in changes && MODES.has(changes.defaultMode)) next.defaultMode = changes.defaultMode;
+    if ('defaultAccountId' in changes) next.defaultAccountId = this.accountsById.has(changes.defaultAccountId) ? changes.defaultAccountId : null;
+    if ('maxAgents' in changes) next.maxAgents = Math.min(8, Math.max(1, Math.round(Number(changes.maxAgents) || 1)));
+    if ('limitPlan' in changes) next.limitPlan = this._validPlan(changes.limitPlan);
+    if ('relayDelay' in changes) next.relayDelay = Math.min(300, Math.max(0, Math.round(Number(changes.relayDelay) || 0)));
+    if ('aiTitles' in changes) next.aiTitles = !!changes.aiTitles;
+    this.state.settings = next;
+    this._projectsChanged();
+    for (const t of this.threads.values()) if (this.peers.size) this._schedulePatch(t);
+    return {};
+  }
+
+  _validPlan(plan) {
+    const mode = PLAN_MODES.has(plan?.mode) ? plan.mode : 'ask';
+    const targets = (plan?.targets ?? []).filter((x) => this.accountsById.has(String(x.accountId).toUpperCase()))
+      .map((x) => ({ accountId: String(x.accountId).toUpperCase(), model: String(x.model || 'default') }));
+    return { mode: mode === 'chain' && !targets.length ? 'ask' : mode, targets };
+  }
+
+  deleteThread(t, broadcast = true) {
+    const r = this._rt(t);
+    clearTimeout(r.relayTimer);
+    clearTimeout(t._saveTimer);
+    this.agents.get(t.id)?.close();
+    this.agents.delete(t.id);
+    this.threads.delete(t.id);
+    this.runtime.delete(t.id);
+    fs.rmSync(path.join(this.config.threadsDir, `${t.id}.json`), { force: true });
+    if (broadcast) { this._saveState(); this._broadcastSnapshot(); }
+    return {};
+  }
+
+  _quick(prompt) {
+    return quickCompletion(this.accounts, prompt, { env: this.config.agentEnv, cwd: this.config.dataDir, fake: this.config.fakeAgent });
+  }
+
+  /** A short title from what the thread is about (after its first turn, or when asked). */
+  async _aiTitle(t, force = false) {
+    if (!force && (t.aiTitled || !this.settings.aiTitles)) return {};
+    const text = t.items.filter((i) => i.kind === 'user' || i.kind === 'assistant').slice(0, 6)
+      .map((i) => `${i.kind === 'user' ? 'Usuario' : 'Asistente'}: ${i.text.slice(0, 1500)}`).join('\n\n');
+    if (!text) return {};
+    t.aiTitled = true;
+    const title = cleanTitle(await this._quick(`Pon un título breve (3 a 7 palabras, sin comillas ni punto final, en el idioma del usuario) a esta conversación con un agente de programación. Responde solo con el título.\n\n${text}`));
+    if (title && this.threads.has(t.id)) { t.title = title; this._changed(t); }
+    return { title };
+  }
+
+  _startLogin(peer, requestId, account) {
+    this.logins ??= new Map();
+    for (const dir of [this.config.claudeConfigDir, this.config.codexHome]) fs.mkdirSync(dir, { recursive: true });
+    const session = new LoginSession({ bin: account.bin, provider: account.provider, env: this.config.agentEnv, cwd: this.config.dataDir });
+    this.logins.set(requestId, session);
+    const send = (o) => peer.send({ loginOutput: { requestId, accountId: account.id, ...o } });
+    session.on('output', (text) => send({ text }));
+    session.on('done', ({ ok, error }) => {
+      this.logins.delete(requestId);
+      send({ done: true, ok, error });
+      this._refreshAccount(account);
+    });
+    peer.once('close', () => session.cancel());
+    send({ text: '' });
   }
 
   // MARK: - Projects and threads
 
   projects() {
     if (Date.now() - this.projectsCache.at < 5000) return this.projectsCache.list;
+    // Every subfolder of the projects folder (unless removed from Relevo) plus folders added from anywhere.
+    const root = this._projectsRoot();
+    const hidden = new Set(this.state.hiddenProjects);
     let entries = [];
-    try { entries = fs.readdirSync(this.config.projectsRoot, { withFileTypes: true }); } catch {}
-    const list = entries
-      .filter((e) => e.isDirectory() && !e.name.startsWith('.') && !SKIP_DIRS.has(e.name))
-      .map((e) => {
-        const p = path.join(this.config.projectsRoot, e.name);
-        return { id: uuidFrom(p), name: e.name, path: p };
-      })
+    try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch {}
+    const paths = entries.filter((e) => e.isDirectory() && !e.name.startsWith('.') && !SKIP_DIRS.has(e.name)).map((e) => path.join(root, e.name));
+    for (const p of this.state.extraProjects) {
+      try { if (fs.statSync(p).isDirectory()) paths.push(p); } catch {}
+    }
+    const list = [...new Set(paths)].filter((p) => !hidden.has(p))
+      .map((p) => ({ id: uuidFrom(p), name: path.basename(p), path: p }))
       .sort((x, y) => x.name.localeCompare(y.name));
     this.projectsCache = { at: Date.now(), list };
     return list;
@@ -275,6 +494,8 @@ export class Host {
 
   /** The account a new thread starts on: the first signed in with quota left, in the configured order. */
   _defaultAccount() {
+    const preferred = this.accountsById.get(this.settings.defaultAccountId);
+    if (preferred && preferred.status?.loggedIn !== false && !this._exhausted(preferred)) return preferred;
     return this.accounts.find((a) => a.status?.loggedIn !== false && !this._exhausted(a)) ?? this.accounts[0];
   }
 
@@ -286,7 +507,7 @@ export class Host {
     const account = this._defaultAccount();
     const t = {
       id: uuid(), projectId, projectPath: project.path, title: 'Nuevo hilo', createdAt: now(), updatedAt: now(),
-      accountId: account?.id, model: 'default', effort: null, mode: 'autoEdit', sessionId: null, handoffPending: false,
+      accountId: account?.id, model: 'default', effort: null, mode: this.settings.defaultMode, sessionId: null, handoffPending: false,
       items: [], totalItems: 0, queued: [], queuePaused: false,
     };
     this.threads.set(t.id, t);
@@ -329,6 +550,7 @@ export class Host {
   }
 
   sendNow(t, text) {
+    if (!text?.trim()) return;
     const r = this._rt(t);
     if (!r.isRunning) { this._startTurn(t, text); return; }
     r.sendNow = text;
@@ -344,6 +566,20 @@ export class Host {
     r.statusLine = 'Deteniendo…';
     this.agents.get(t.id)?.interrupt();
     this._changed(t);
+    // An agent that ignores the interrupt (or hasn't started its turn yet) is stopped by force.
+    clearTimeout(r.stopTimer);
+    r.stopTimer = setTimeout(() => {
+      if (!r.isRunning) return;
+      this.agents.get(t.id)?.close(true);
+      setTimeout(() => {
+        if (!r.isRunning) return;
+        r.isRunning = false;
+        r.statusLine = null;
+        r.approvals.clear();
+        this._append(t, { id: uuid(), kind: 'notice', text: 'Detenido' });
+        this._changed(t);
+      }, 2000);
+    }, 8000);
   }
 
   /**
@@ -409,7 +645,7 @@ export class Host {
     }
     if (!this._agentSlot(t)) {
       t.queued.unshift({ id: uuid(), text });
-      r.statusLine = `Esperando: ya hay ${this.config.maxAgents} agentes trabajando en ${this.config.name}`;
+      r.statusLine = `Esperando: ya hay ${this.settings.maxAgents} agentes trabajando en ${this.config.name}`;
       this._changed(t);
       return;
     }
@@ -420,10 +656,11 @@ export class Host {
     let prompt = text;
     if (t.handoffPending) {
       const accounts = new Map(this.accounts.map((a) => [a.id, a]));
-      prompt = handoffText({ items: t.items, accounts, projectPath: t.projectPath, target: account, pendingRequest }) + text;
+      prompt = handoffText({ items: t.items, accounts, projectPath: t.projectPath, target: account, pendingRequest, workState: gitops.workState(t.projectPath) }) + text;
       t.handoffPending = false;
     }
     this._append(t, { id: uuid(), kind: 'user', text });
+    this._clearLimitTimers(t);
     r.isRunning = true;
     r.limit = null;
     r.turnItems = [];
@@ -437,7 +674,7 @@ export class Host {
   _agentSlot(t) {
     if (this.agents.get(t.id)?.alive) return true;
     const alive = [...this.agents.entries()].filter(([, s]) => s.alive);
-    if (alive.length < this.config.maxAgents) return true;
+    if (alive.length < this.settings.maxAgents) return true;
     const idle = alive.filter(([id, s]) => !s.turnActive && !this._rt(this.threads.get(id)).approvals.size)
       .sort(([, a], [, b]) => a.lastActive - b.lastActive);
     if (!idle.length) return false;
@@ -505,6 +742,7 @@ export class Host {
       }
       if (f.kind === 'limit' || f.kind === 'unavailable') {
         r.limit = { accountId: account.id, message: f.message, resetsAt: f.resetsAt ?? null, isCapacity: f.kind === 'unavailable', isNoPlan: false };
+        if (f.kind === 'limit') r.limitHit = true;
       }
       if (f.kind === 'sessionLost') {
         // The CLI lost its session: a fresh one gets the thread's context instead.
@@ -548,6 +786,8 @@ export class Host {
         return;
       }
       if (r.sendNow) { const text = r.sendNow; r.sendNow = null; this._startTurn(t, text); return; }
+      if (r.limitHit) { r.limitHit = false; this._onLimit(t); return; }
+      if (!t.aiTitled && t.items.some((i) => i.kind === 'assistant' && i.text)) this._aiTitle(t).catch(() => {});
       this._next(t);
       for (const other of this.threads.values()) if (other !== t && other.queued.length && !this._rt(other).isRunning && !other.queuePaused) this._next(other);
     });
@@ -581,6 +821,83 @@ export class Host {
     this._changed(t);
   }
 
+  // MARK: - Running out of quota
+
+  _planSummary(plan) {
+    switch (plan?.mode) {
+      case 'mostQuota': return 'pasar a la de más cuota';
+      case 'wait': return 'esperar a que se reinicie y seguir';
+      case 'chain': return plan.targets.map((x) => {
+        const a = this.accountsById.get(x.accountId);
+        return `${a?.name ?? '?'} · ${a?.models.find((m) => m.id === x.model)?.name ?? x.model}`;
+      }).join(', luego ');
+      default: return 'avisarme';
+    }
+  }
+
+  _clearLimitTimers(t) {
+    const r = this._rt(t);
+    clearTimeout(r.relayTimer);
+    r.relayTimer = null;
+    r.pendingRelay = null;
+    r.resumeAt = null;
+  }
+
+  /** The turn hit the quota: follow the thread's plan (or the host's): relay after a countdown, or wait. */
+  _onLimit(t) {
+    const r = this._rt(t);
+    const plan = t.limitPlan ?? this.settings.limitPlan;
+    const current = this._account(t);
+    const usable = (a) => a && a !== current && a.status?.loggedIn !== false && !this._exhausted(a);
+    const used = (a) => Math.max(0, ...(a.status?.windows ?? []).map((w) => w.percent));
+    this._clearLimitTimers(t);
+    let target = null;
+    if (plan.mode === 'mostQuota') {
+      const best = this.accounts.filter(usable).sort((x, y) => used(x) - used(y))[0];
+      if (best) target = { accountId: best.id, model: best.defaultModel };
+    } else if (plan.mode === 'chain') {
+      target = plan.targets.find((x) => usable(this.accountsById.get(x.accountId))) ?? null;
+    } else if (plan.mode === 'wait') {
+      const resets = [r.limit?.resetsAt, ...(current?.status?.windows ?? []).filter((w) => w.percent >= 99).map((w) => w.resetsAt)].filter(Boolean);
+      const at = resets.length ? Math.max(...resets) + 30 : null;
+      if (!at) return;
+      r.resumeAt = at;
+      r.relayTimer = setTimeout(() => this._resumeAfterLimit(t), Math.min(2 ** 31 - 1, Math.max(5, at - now()) * 1000));
+      this._changed(t);
+      return;
+    }
+    if (!target) return;
+    const delay = this.settings.relayDelay;
+    r.pendingRelay = { ...target, at: now() + delay };
+    r.relayTimer = setTimeout(() => this._relayNow(t), delay * 1000);
+    this._changed(t);
+  }
+
+  _relayNow(t) {
+    const r = this._rt(t);
+    const target = r.pendingRelay;
+    this._clearLimitTimers(t);
+    if (!target) return;
+    t.queuePaused = false;
+    this.select(t, target.accountId, target.model, true);
+  }
+
+  _resumeAfterLimit(t) {
+    const r = this._rt(t);
+    this._clearLimitTimers(t);
+    r.limit = null;
+    t.queuePaused = false;
+    if (!r.isRunning) this._startTurn(t, 'Sigue con la tarea donde lo dejaste.');
+  }
+
+  _limitAction(t, action) {
+    const r = this._rt(t);
+    if (action === 'relayNow') this._relayNow(t);
+    else if (action === 'resumeNow') this._resumeAfterLimit(t);
+    else if (action === 'cancelRelay' || action === 'cancelResume') { this._clearLimitTimers(t); this._changed(t); }
+    else if (r) this._changed(t);
+  }
+
   // MARK: - Limits and housekeeping
 
   refreshUsage() {
@@ -598,7 +915,12 @@ export class Host {
     if (a.refreshing) return;
     a.refreshing = true;
     this._broadcastSnapshot();
-    const result = this.config.fakeAgent ? fakeProbe() : await a.probe({ bin: a.bin, env: this.config.agentEnv, cwd: this.config.dataDir });
+    let result;
+    try {
+      result = this.config.fakeAgent ? fakeProbe() : await a.probe({ bin: a.bin, env: this.config.agentEnv, cwd: this.config.dataDir });
+    } catch (e) {
+      result = { loggedIn: a.status?.loggedIn ?? null, windows: a.status?.windows ?? [], error: `No he podido consultar la cuenta: ${e.message}` };
+    }
     a.refreshing = false;
     if (result.models) a.models = result.models;
     a.status = {
@@ -655,15 +977,20 @@ export class Host {
       .sort((a, b) => b.updatedAt - a.updatedAt)
       .map((t) => {
         const r = this._rt(t);
-        const last = [...t.items].reverse().find((i) => i.kind === 'assistant' || i.kind === 'user');
+        let last = null;
+        for (let i = t.items.length - 1; i >= 0 && !last; i--) if (t.items[i].kind === 'assistant' || t.items[i].kind === 'user') last = t.items[i];
         return clean({
           id: t.id, projectId: t.projectId, title: t.title, updatedAt: t.updatedAt, isRunning: r.isRunning,
           needsApproval: r.approvals.size > 0, accountId: t.accountId, preview: last?.text?.slice(0, 160) ?? null, isWaiting: false,
         });
       });
+    const settings = this.settings;
     return {
       macName: this.config.name, accounts: this.accounts.map((a) => this._remoteAccount(a)), projects, threads,
-      autoRelay: false, pushReady: false,
+      autoRelay: settings.limitPlan.mode !== 'ask', pushReady: false,
+      // Beyond the shared protocol (the Mac and the iPhone ignore unknown fields).
+      hostFeatures: HOST_FEATURES, hostVersion: this.config.version ?? 'dev', hostPlatform: process.platform,
+      hostSettings: { ...settings, limitPlanSummary: this._planSummary(settings.limitPlan) },
     };
   }
 
@@ -678,6 +1005,9 @@ export class Host {
       selectedAccountId: account?.id, selectedModel: t.model, selectedEffort: t.effort, relayCandidates: candidates,
       queued: t.queued.map((q) => ({ id: q.id, text: q.text })), queuePaused: t.queuePaused,
       usage: (account?.status?.windows ?? []).map(remoteWindow), backgroundTasks: [],
+      limitPlan: t.limitPlan ? { ...t.limitPlan, summary: this._planSummary(t.limitPlan) } : null,
+      defaultLimitPlan: { ...this.settings.limitPlan, summary: this._planSummary(this.settings.limitPlan) },
+      pendingRelay: r.pendingRelay ?? null, resumeAt: r.resumeAt ?? null,
     });
   }
 

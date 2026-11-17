@@ -210,10 +210,20 @@ export class Gateway {
 
   _save() {
     const hosts = [...this.hosts.values()].filter((h) => !h.local).map((h) => h.info);
-    fs.mkdirSync(path.dirname(this.file), { recursive: true });
-    const tmp = `${this.file}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify({ hosts }, null, 2), { mode: 0o600 });
-    fs.renameSync(tmp, this.file);
+    try {
+      fs.mkdirSync(path.dirname(this.file), { recursive: true });
+      const tmp = `${this.file}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify({ hosts }, null, 2), { mode: 0o600 });
+      // Windows refuses to replace a file someone has open for a moment (an antivirus): try again.
+      for (let attempt = 0; ; attempt++) {
+        try { fs.renameSync(tmp, this.file); break; } catch (e) {
+          if (attempt >= 4 || !['EPERM', 'EBUSY', 'EACCES'].includes(e.code)) throw e;
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50 * (attempt + 1));
+        }
+      }
+    } catch (e) {
+      this.log(`desktop: couldn't save the paired hosts: ${e.message}`);
+    }
   }
 
   _broadcast(event) { for (const page of this.pages) page.send(event); }

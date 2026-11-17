@@ -17,8 +17,20 @@ What it does today:
   resumes the same session). `RELEVO_MAX_AGENTS` caps how many run at once.
 - Live Activity state goes over the connection while the iPhone app is open.
 
-Not yet: other providers (Gemini, Kimi…), automatic relays, images, Live Activity push with the app closed, publishing Bonjour (the iPhone connects through the addresses in the pairing link, which also
-works through a VPN) and creating projects from the phone.
+- When a turn runs out of quota, the thread follows its plan (or the host's): ask, move to the subscription
+  with most quota left, a given one, or wait for the reset and carry on — with a countdown that can be cut
+  short or cancelled, like the Mac's automatic relay. A handoff carries the transcript and the project's git
+  state (branch, uncommitted changes, last commits).
+- Projects: the subfolders of the projects folder (changeable from the apps) plus folders added from
+  anywhere; created and removed from the apps. Threads can be renamed and deleted, and get a title from a
+  cheap model after their first turn.
+- Git per thread (changes, diffs, commit, commit and push, a commit message written by a model), images the
+  thread mentions, token and cost statistics, older history on demand, and signing in to each agent from the
+  apps.
+
+Not yet: other providers (Gemini, Kimi…), several accounts per provider, worktrees, «Relevo sugiere», Live
+Activity push with the app closed and publishing Bonjour (the iPhone connects through the addresses in the
+pairing link, which also works through a VPN).
 
 ## Requirements
 
@@ -96,7 +108,13 @@ With `RELEVO_UI_PORT` set (the Windows installer sets 47821), the service also s
 paired host in one window — this PC, the Mac, a mini PC — with their projects and threads, the conversation
 (Markdown, tools, permission requests and the agents' questions), the composer (subscription and model,
 reasoning, permission mode, what to do when the quota runs out, queue, stop and «send now»), relays, Relevo's
-suggestions, limits of every account, and Windows notifications when a thread finishes or needs you.
+suggestions, limits of every account, and Windows notifications when a thread finishes or needs you. Also:
+thread search; projects added from any folder (a folder browser over the host's disks) or created, and
+removed; the projects folder, default subscription and permissions, what to do when the quota runs out, how
+many agents at once and AI titles, in Ajustes; signing in to each agent (the link to open and the code to
+paste, no terminal); «Cambios» with each file's diff, commit and push and a message written with AI;
+«Consumo» per thread and per period, model and thread; images the agents mention; older history; several
+agents on the same task at once (Comparar agentes); «Abrir en VS Code» for this PC's projects.
 
 - How it's built: the page (`ui/`, plain HTML, CSS and JavaScript modules, no build step) talks only to this
   service on 127.0.0.1 (`lib/ui-server.mjs`). The service connects to every paired host as the iPhone does,
@@ -115,6 +133,12 @@ suggestions, limits of every account, and Windows notifications when a thread fi
 Installed hosts update from the repository's **release tags** (`vX.Y.Z`); `<app>/VERSION` says which one
 is installed.
 
+- Only **signed** releases are offered and installed: each release has `relevo-host-<tag>.tar.gz`,
+  `manifest.json` (the SHA-256 of the archive and of every file) and `manifest.sig`, an ed25519 signature of
+  the manifest. The public key is in `lib/updater.mjs`; the private one never leaves the publisher's machine
+  (`~/.relevo/release-signing.pem`). Every file is checked before anything is replaced.
+- The version being replaced is kept in `<app>.prev`. If the new one keeps dying at start, the supervisor puts
+  the previous one back on its own; `relevo-host rollback` does it by hand.
 - The desktop app checks at start and every 6 hours, shows «Nueva versión» in the sidebar, and installs it
   from Hosts › Actualizaciones; the service restarts and the window reloads itself.
 - `relevo-host update --check` says whether there's a newer tag; `relevo-host update` installs the newest
@@ -122,9 +146,11 @@ is installed.
   that one.
 - Only `relevo-host.mjs`, `lib/`, `ui/` and `VERSION` are downloaded, into the program's folder, with no git
   or `tar` needed; each file replaces the old one only once downloaded.
-- To publish a version: bump `Host/VERSION`, commit, and push a tag:
-  `git tag v1.2.3 && git push origin v1.2.3`. The `Release` workflow (`.github/workflows/release.yml`)
-  creates the GitHub release with `Instalar-Relevo.cmd` and a zip of `Host/`.
+- To publish a version: bump `Host/VERSION`, commit, push a tag (`git tag v1.2.3 && git push origin v1.2.3`),
+  wait for the `Release` workflow (tests, then the release with the archive, the manifest,
+  `Instalar-Relevo.cmd` and a zip of `Host/`), and sign it: `node Host/deploy/release.mjs sign v1.2.3`. That
+  checks the published files against your local tag before signing and uploads `manifest.sig`; until then
+  installed hosts don't see the release.
 
 ## Disk
 
@@ -139,8 +165,13 @@ is installed.
 
 ## Testing
 
+`node --test 'Host/test/*.test.mjs'` runs the unit tests and an end-to-end run of the whole host with the echo
+agent over TLS-PSK (a turn, a permission, a relay when the quota runs out, the apps' requests, the desktop
+page's protection). CI runs it on Linux and Windows (`.github/workflows/test.yml`).
+
 `RELEVO_FAKE_AGENT=1` replaces the agents with an echo agent that also asks for a permission when the message says
-"permiso". From the Mac, `Relevo --selftest remotehost "<pairing link>" ["prompt"] [ask|autoEdit|full|plan]`
+"permiso", asks a question when it starts with "pregunta" and runs out of quota when it starts with "agota la
+cuota". From the Mac, `Relevo --selftest remotehost "<pairing link>" ["prompt"] [ask|autoEdit|full|plan]`
 connects like the iPhone, checks that every message decodes and, with a prompt, runs a turn end to end;
 add `relay` to then hand the thread to the other subscription and check it carries on. `RELEVO_SUPERVISE=1`
 runs the Windows supervisor on any system.

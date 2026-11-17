@@ -49,19 +49,23 @@ function toDate(v) {
   return Number.isNaN(t) ? null : t / 1000;
 }
 
-const AUTH_RE = /not logged in|please run \/login|invalid api key|oauth token has expired|authentication_error|401/i;
-const LIMIT_RE = /usage limit|rate limit|limit reached|out of extra usage|quota/i;
+// Specific phrases only: a bare "401", "quota" or "capacity" anywhere in a long stderr tail (a test log, a
+// file the agent printed) mustn't mark the account signed out or out of quota.
+const AUTH_RE = /not logged in|please run \/login|invalid api key|oauth token has expired|authentication_error|\b401\b[^\n]{0,40}unauthori[sz]ed|token (?:has been )?revoked/i;
+const LIMIT_RE = /usage limit|rate[ _-]limit(?:ed| reached| exceeded|_error)|limit reached|out of extra usage|exceeded your (?:current )?quota|insufficient_quota|quota (?:exceeded|exhausted)|\b429\b[^\n]{0,40}too many requests/i;
+const UNAVAILABLE_RE = /overloaded_error|\boverloaded\b|\b529\b|over capacity|capacity constraints/i;
 
 export function classify(message) {
-  if (AUTH_RE.test(message)) return 'auth';
-  if (LIMIT_RE.test(message)) return 'limit';
-  if (/overloaded|529|capacity/i.test(message)) return 'unavailable';
+  const text = String(message ?? '').slice(-2000);
+  if (AUTH_RE.test(text)) return 'auth';
+  if (LIMIT_RE.test(text)) return 'limit';
+  if (UNAVAILABLE_RE.test(text)) return 'unavailable';
   return 'other';
 }
 
 /** One-line summary of a tool call, as in the Mac's transcript. */
 export function toolTitle(name, input = {}) {
-  const base = (p) => (typeof p === 'string' ? p.split('/').filter(Boolean).pop() ?? p : '');
+  const base = (p) => (typeof p === 'string' ? p.split(/[\\/]/).filter(Boolean).pop() ?? p : '');
   switch (name) {
     case 'Bash': return input.description || input.command || 'Comando';
     case 'Read': return `Leer ${base(input.file_path)}`;
@@ -422,7 +426,24 @@ export class FakeSession extends EventEmitter {
         }
       }, 40);
     };
-    if (/permiso/i.test(text)) {
+    // «agota la cuota» at the start (not inside a handoff, which quotes it): the quota runs out, as in a real limit.
+    if (/^agota la cuota/i.test(text)) {
+      setTimeout(() => {
+        this.turnActive = false;
+        this.emit('failure', { kind: 'limit', message: 'Has alcanzado el límite de uso (prueba).', resetsAt: Date.now() / 1000 + 3600 });
+        this.emit('turnFinished');
+      }, 100);
+      return;
+    }
+    if (/^pregunta/i.test(text)) {
+      this.emit('approval', {
+        key: `q${turn}`, title: 'El agente pregunta', detail: null,
+        questions: [{ question: '¿Qué color prefieres?', header: 'Color', options: [{ label: 'Rojo', description: 'Cálido' }, { label: 'Azul' }], multiSelect: false }],
+        options: [], respond: () => finish(),
+      });
+      return;
+    }
+    if (/permiso/i.test(text) && !text.includes('<relevo_handoff>')) {
       this.emit('toolStarted', `tool${turn}`, 'Bash', 'echo hola', { command: 'echo hola' });
       this.emit('approval', {
         key: `tool${turn}`, title: 'Bash: echo hola', detail: 'Prueba de permiso', questions: null,

@@ -140,13 +140,14 @@ $trigger = New-ScheduledTaskTrigger -AtStartup
 $principal = New-ScheduledTaskPrincipal -UserId $identity.Name -LogonType S4U -RunLevel Limited
 $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable `
   -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
+# The app's link (and its token, created here before the service starts, so both use the same one).
+$appUrl = & $node (Join-Path $app 'relevo-host.mjs') app --url | Select-Object -Last 1
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $taskSettings `
   -Description 'Relevo host for Relevo Companion (Host\deploy\install-windows.ps1)' -Force | Out-Null
 Start-ScheduledTask -TaskName $TaskName
 
 # The app: Edge (always on Windows) opens the page as its own window, with Relevo's icon. The link carries
 # the token that lets this user in; it lives only in these shortcuts and in <data>\desktop\ui-token.
-$appUrl = & $node (Join-Path $app 'relevo-host.mjs') app --url | Select-Object -Last 1
 $edge = @("${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe", "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe") |
   Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
 $shell = New-Object -ComObject WScript.Shell

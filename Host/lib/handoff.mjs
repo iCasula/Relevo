@@ -54,7 +54,7 @@ function compact(items, accounts) {
   return text;
 }
 
-export function handoffText({ items, accounts, projectPath, target, pendingRequest }) {
+export function handoffText({ items, accounts, projectPath, target, pendingRequest, workState = null }) {
   let body = transcript(items, accounts, 600);
   if (body.length > BUDGET) body = compact(items, accounts);
   const agents = [...new Set(items.filter((i) => i.kind === 'assistant').map((i) => accounts.get(i.accountId)?.agentName).filter(Boolean))].join(', ');
@@ -64,7 +64,7 @@ Retomas una conversación que empezó con otro agente de IA (${agents || 'otro a
 - Los cambios en ficheros ya están aplicados en disco: si hay acciones a medias, comprueba su resultado antes de repetirlas.
 - No repitas trabajo ya hecho; continúa desde donde se quedó el agente anterior.
 
-<transcripcion>
+${workState ? `<estado_de_trabajo>\n${workState}\n</estado_de_trabajo>\n\n` : ''}<transcripcion>
 ${body}
 </transcripcion>
 </relevo_handoff>
