@@ -48,7 +48,13 @@ function writeJSONAtomic(file, value) {
   const tmp = `${file}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(value), { mode: 0o600 });
   fs.chmodSync(tmp, 0o600);
-  fs.renameSync(tmp, file);
+  // Windows refuses to replace a file another process (an antivirus, a backup) has open for a moment.
+  for (let attempt = 0; ; attempt++) {
+    try { fs.renameSync(tmp, file); return; } catch (e) {
+      if (attempt >= 4 || !['EPERM', 'EBUSY', 'EACCES'].includes(e.code)) throw e;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50 * (attempt + 1));
+    }
+  }
 }
 
 function freeBytes(dir) {
@@ -71,7 +77,8 @@ function prune(dir, cutoff) {
 export function localAddresses() {
   const out = [];
   for (const [name, list] of Object.entries(os.networkInterfaces())) {
-    if (/^(lo|docker|br-|veth|virbr|cni|flannel)/.test(name)) continue;
+    // Linux bridges and containers; on Windows, Hyper-V/WSL switches and other virtual machines' adapters.
+    if (/^(lo|docker|br-|veth|virbr|cni|flannel)/.test(name) || /^vEthernet|VirtualBox|VMware|Loopback/i.test(name)) continue;
     for (const a of list ?? []) if (a.family === 'IPv4' && !a.internal && !a.address.startsWith('169.254')) out.push(a.address);
   }
   return [...new Set(out)].sort();

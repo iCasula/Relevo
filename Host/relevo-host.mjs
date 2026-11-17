@@ -1,13 +1,15 @@
 #!/usr/bin/env node
 // Relevo host: runs agents on a headless machine (e.g. a Linux mini PC) and serves them to Relevo Companion
 // on the iPhone, next to the Mac app. Usage:
-//   relevo-host.mjs [serve]   start serving (systemd runs this)
+//   relevo-host.mjs [serve]   start serving (systemd runs this on Linux, a scheduled task on Windows)
 //   relevo-host.mjs pair      print the pairing link for the iPhone
 //   relevo-host.mjs login [claude|codex]   sign in for this host (interactive; Codex uses a device code)
 //   relevo-host.mjs status    login, limits and models of each agent, without calling a model
 //   relevo-host.mjs update    replace the program with the latest version on GitHub and restart the service
+//   relevo-host.mjs logs [n]  last lines of <data>/logs/host.log (where the supervisor writes; on Linux, journalctl)
 //
-// Environment (all optional):
+// Settings come from the environment and from `host.env` next to the program's folder (<base>/host.env for
+// <base>/app/relevo-host.mjs, as the installers lay it out), or the file in RELEVO_ENV_FILE. All optional:
 //   RELEVO_HOST_DATA   data folder: state, transcripts, Claude Code config, temp and caches (default ~/.relevo-host)
 //   RELEVO_PROJECTS    folder whose subfolders are the projects (default $RELEVO_HOST_DATA/projects)
 //   RELEVO_HOST_NAME   name shown on the iPhone (default: hostname)
@@ -21,28 +23,28 @@
 //   RELEVO_MIN_FREE_GB_DATA / RELEVO_MIN_FREE_GB_PROJECTS   refuse to start a turn below this (default 1 / 2)
 //   RELEVO_FAKE_AGENT=1  echo agent for tests (no Claude calls)
 //   RELEVO_REPO        GitHub repository `update` downloads from (default iCasula/Relevo, branch main)
+//   RELEVO_SUPERVISE   1: `serve` restarts its worker when it exits or after an update, logging to
+//                      <data>/logs/host.log (default on Windows, where no systemd does it)
 
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { Host, PROVIDERS } from './lib/host.mjs';
+import { isWindows, which, findIn, spawnCLI, killTree, requestControl, watchControl, loadEnvFile, untarGz } from './lib/platform.mjs';
 
-function which(name) {
-  for (const dir of (process.env.PATH ?? '').split(':')) {
-    const p = path.join(dir, name);
-    try { fs.accessSync(p, fs.constants.X_OK); return p; } catch {}
-  }
-  return null;
-}
+const SCRIPT = fileURLToPath(import.meta.url);
+const APP_DIR = path.dirname(SCRIPT);
+const RESTART_EXIT_CODE = 75;
+loadEnvFile(process.env.RELEVO_ENV_FILE ?? path.join(APP_DIR, '..', 'host.env'));
 
 function config() {
   const env = process.env;
   const dataDir = path.resolve(env.RELEVO_HOST_DATA ?? path.join(os.homedir(), '.relevo-host'));
   const cli = (name, override) => {
     if (override) return override;
-    const local = path.join(os.homedir(), '.local/bin', name);
-    return fs.existsSync(local) ? local : which(name);
+    return findIn(path.join(os.homedir(), '.local', 'bin'), name) ?? which(name);
   };
   const bins = { claude: cli('claude', env.RELEVO_CLAUDE), codex: cli('codex', env.RELEVO_CODEX) };
   const c = {
@@ -70,6 +72,7 @@ function config() {
     CLAUDE_CONFIG_DIR: c.claudeConfigDir,
     CODEX_HOME: c.codexHome,
     TMPDIR: c.tmpDir,
+    ...(isWindows ? { TEMP: c.tmpDir, TMP: c.tmpDir } : {}),
     XDG_CACHE_HOME: c.cacheDir,
     npm_config_cache: path.join(c.cacheDir, 'npm'),
     UV_CACHE_DIR: path.join(c.cacheDir, 'uv'),
@@ -85,14 +88,24 @@ const command = process.argv[2] ?? 'serve';
 
 switch (command) {
   case 'serve': {
+    if ((process.env.RELEVO_SUPERVISE ?? (isWindows ? '1' : '0')) === '1') { supervise(); break; }
     const host = new Host(cfg);
     host.listen();
     host.log(`data ${cfg.dataDir} · projects ${cfg.projectsRoot} · ${cfg.providers.map((p) => `${p.provider} ${p.bin}`).join(' · ')}${cfg.fakeAgent ? ' (fake agent)' : ''}`);
-    const stop = () => { for (const s of host.agents.values()) s.close(true); process.exit(0); };
-    process.on('SIGTERM', stop);
-    process.on('SIGINT', stop);
-    // `relevo-host login` sends it so the iPhone sees the new session without waiting for the next probe.
-    process.on('SIGHUP', () => { host.log('SIGHUP: probing the accounts again'); host.refreshUsage(); });
+    const stop = (code = 0) => { for (const s of host.agents.values()) s.close(true); process.exit(code); };
+    process.on('SIGTERM', () => stop());
+    process.on('SIGINT', () => stop());
+    const refresh = (why) => { host.log(`${why}: probing the accounts again`); host.refreshUsage(); };
+    if (!isWindows) process.on('SIGHUP', () => refresh('SIGHUP'));
+    // `relevo-host login` asks for a probe so the iPhone sees the new session at once; `update` for a restart
+    // (the supervisor or systemd starts the new version).
+    watchControl(cfg.dataDir, {
+      refresh: () => refresh('login'),
+      restart: () => { host.log('restarting for the update'); stop(RESTART_EXIT_CODE); },
+    });
+    // Under the supervisor: if it's gone (a scheduled task stopped by force), don't stay behind holding the port.
+    const parent = Number(process.env.RELEVO_SUPERVISOR_PID);
+    if (parent > 0) setInterval(() => { try { process.kill(parent, 0); } catch { stop(); } }, 5000).unref();
     break;
   }
   case 'pair': {
@@ -107,13 +120,12 @@ switch (command) {
     for (const dir of [cfg.claudeConfigDir, cfg.codexHome]) fs.mkdirSync(dir, { recursive: true });
     const args = agent === 'codex' ? ['login', '--device-auth'] : ['auth', 'login'];
     console.log(`${PROVIDERS[agent].name} login for this host (${agent === 'codex' ? cfg.codexHome : cfg.claudeConfigDir}).`);
-    const child = spawn(p.bin, args, { env: cfg.agentEnv, stdio: 'inherit' });
+    const child = spawnCLI(p.bin, args, { env: cfg.agentEnv, stdio: 'inherit' });
+    child.on('error', (e) => { console.error(e.message); process.exit(1); });
     child.on('exit', (code) => {
       if (code === 0) {
-        // Only the service's main process: `systemctl kill` would also signal the agents it runs.
-        const show = spawnSync('systemctl', ['--user', 'show', '-p', 'MainPID', '--value', 'relevo-host'], { encoding: 'utf8' });
-        const pid = Number(show.stdout?.trim());
-        if (pid > 0) { try { process.kill(pid, 'SIGHUP'); console.log('The running service will pick up the new session.'); } catch {} }
+        requestControl(cfg.dataDir, 'refresh');
+        console.log('The running service will pick up the new session.');
       }
       process.exit(code ?? 0);
     });
@@ -128,36 +140,79 @@ switch (command) {
     break;
   }
   case 'update': {
-    // Only Host/ from the repository's latest commit: no git checkout and nothing outside the data folder.
+    // Only Host/ from the repository's latest commit: no git checkout, no `tar` binary (Windows may lack one)
+    // and nothing outside the program's folder.
     const repo = process.env.RELEVO_REPO ?? 'iCasula/Relevo';
-    const appDir = path.dirname(new URL(import.meta.url).pathname);
-    fs.mkdirSync(cfg.tmpDir, { recursive: true });
-    const work = fs.mkdtempSync(path.join(cfg.tmpDir, 'update-'));
     try {
       const res = await fetch(`https://codeload.github.com/${repo}/tar.gz/refs/heads/main`);
       if (!res.ok) throw new Error(`GitHub: HTTP ${res.status}`);
-      const archive = path.join(work, 'main.tar.gz');
-      fs.writeFileSync(archive, Buffer.from(await res.arrayBuffer()));
-      const tar = spawn('tar', ['-xzf', archive, '-C', work, '--wildcards', '*/Host/relevo-host.mjs', '*/Host/lib/*'], { stdio: 'inherit' });
-      if (await new Promise((r) => tar.on('exit', r)) !== 0) throw new Error('tar failed');
-      const [top] = fs.readdirSync(work).filter((n) => n !== 'main.tar.gz');
-      const src = path.join(work, top, 'Host');
-      fs.cpSync(path.join(src, 'lib'), path.join(appDir, 'lib'), { recursive: true });
-      fs.copyFileSync(path.join(src, 'relevo-host.mjs'), path.join(appDir, 'relevo-host.mjs'));
-      console.log(`Updated from ${repo} (${top}).`);
+      const wanted = /^([^/]+)\/Host\/(relevo-host\.mjs|lib\/[\w.-]+\.mjs)$/;
+      const files = [...untarGz(Buffer.from(await res.arrayBuffer()))].map(([name, data]) => [wanted.exec(name), data]).filter(([m]) => m);
+      if (!files.some(([m]) => m[2] === 'relevo-host.mjs')) throw new Error('relevo-host.mjs is not in the archive');
+      fs.mkdirSync(path.join(APP_DIR, 'lib'), { recursive: true });
+      for (const [m, data] of files) {
+        const dest = path.join(APP_DIR, ...m[2].split('/'));
+        fs.writeFileSync(`${dest}.new`, data);
+        fs.renameSync(`${dest}.new`, dest);
+      }
+      console.log(`Updated from ${repo} (${files[0][0][1]}, ${files.length} files).`);
     } catch (e) {
       console.error(`Update failed: ${e.message}`);
       process.exitCode = 1;
-    } finally {
-      fs.rmSync(work, { recursive: true, force: true });
     }
     if (!process.exitCode) {
-      const r = spawn('systemctl', ['--user', 'restart', 'relevo-host'], { stdio: 'inherit' });
-      r.on('exit', (code) => console.log(code === 0 ? 'Service restarted.' : 'Restart it with: systemctl --user restart relevo-host'));
+      const systemd = !isWindows && spawnSync('systemctl', ['--user', 'cat', 'relevo-host'], { stdio: 'ignore' }).status === 0;
+      if (systemd) {
+        const r = spawn('systemctl', ['--user', 'restart', 'relevo-host'], { stdio: 'inherit' });
+        r.on('exit', (code) => console.log(code === 0 ? 'Service restarted.' : 'Restart it with: systemctl --user restart relevo-host'));
+      } else {
+        requestControl(cfg.dataDir, 'restart');
+        console.log('The running service restarts with the new version in a few seconds.');
+      }
     }
     break;
   }
+  case 'logs': {
+    const file = path.join(cfg.dataDir, 'logs', 'host.log');
+    let text = '';
+    try { text = fs.readFileSync(file, 'utf8'); } catch { console.error(`No log yet at ${file}${isWindows ? '' : ' (under systemd: journalctl --user -u relevo-host)'}`); process.exit(1); }
+    console.log(text.trimEnd().split('\n').slice(-Number(process.argv[3] ?? 50)).join('\n'));
+    break;
+  }
   default:
-    console.error('usage: relevo-host.mjs [serve|pair|login|status|update]');
+    console.error('usage: relevo-host.mjs [serve|pair|login|status|update|logs]');
     process.exit(2);
+}
+
+/**
+ * Keeps a `serve` worker running, as systemd does on Linux: it starts it again when it exits (at once after an
+ * update, backing off if it keeps failing) and appends its output to <data>/logs/host.log.
+ */
+function supervise() {
+  const logDir = path.join(cfg.dataDir, 'logs');
+  fs.mkdirSync(logDir, { recursive: true });
+  const logFile = path.join(logDir, 'host.log');
+  let child = null, stopping = false, failures = 0;
+  const start = () => {
+    try { if (fs.statSync(logFile).size > 5e6) fs.renameSync(logFile, `${logFile}.1`); } catch {}
+    const out = fs.openSync(logFile, 'a');
+    const startedAt = Date.now();
+    child = spawn(process.execPath, [SCRIPT, 'serve'], {
+      env: { ...process.env, RELEVO_SUPERVISE: '0', RELEVO_SUPERVISOR_PID: String(process.pid) },
+      stdio: ['ignore', out, out], windowsHide: true,
+    });
+    fs.closeSync(out);
+    child.on('exit', (code) => {
+      if (stopping) process.exit(0);
+      failures = code === RESTART_EXIT_CODE ? 0 : Date.now() - startedAt < 30_000 ? failures + 1 : 0;
+      const delay = code === RESTART_EXIT_CODE ? 500 : Math.min(60_000, 2000 * 2 ** failures);
+      fs.appendFileSync(logFile, `[supervisor] worker exited (${code}); starting it again in ${delay / 1000} s\n`);
+      setTimeout(start, delay);
+    });
+  };
+  const stop = () => { stopping = true; killTree(child); setTimeout(() => process.exit(0), 3000).unref(); };
+  process.on('SIGTERM', stop);
+  process.on('SIGINT', stop);
+  console.log(`relevo-host: logging to ${logFile}`);
+  start();
 }

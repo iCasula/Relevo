@@ -245,7 +245,7 @@ cd Companion && xcodegen generate && open RelevoCompanion.xcodeproj   # run on y
 
 **Mac signing.** `scripts/build-app.sh` signs with the identity in `RELEVO_SIGN_IDENTITY` or the untracked `.signing-identity` file (e.g. the SHA-1 of your "Apple Development" certificate from `security find-identity -v -p codesigning`). With a stable identity the Keychain recognises every rebuild as the same app, so "Always Allow" is asked only once; ad-hoc signing makes it ask again after each build.
 
-**Headless host.** [`Host/`](Host/README.md) is a small Node program (no dependencies) that serves the same protocol from a machine without a screen, such as a Linux mini PC that stays on when the Mac is off, running Claude Code there. `--selftest remotehost <pairing link> [prompt] [mode]` talks to any host as the iPhone does and checks that every message decodes.
+**Headless host.** [`Host/`](Host/README.md) is a small Node program (no dependencies) that serves the same protocol from another machine, such as a Linux mini PC that stays on when the Mac is off or a Windows PC (installed as a scheduled task by `Host/deploy/install-windows.ps1`), running Claude Code and Codex there. `--selftest remotehost <pairing link> [prompt] [mode]` talks to any host as the iPhone does and checks that every message decodes.
 
 Headless checks of the Mac side: `--selftest companion` (pairs, connects over Bonjour + TLS-PSK, checks a wrong key is rejected and that a command comes back as a patch) and `--selftest serve [port] [seconds]` (only the server with in-memory credentials, prints a pairing link for the simulator). Debug builds of the iPhone app accept `-pairURL <link>`, `-tab limits|settings` and `-openThread <uuid>` launch arguments for simulator testing.
 

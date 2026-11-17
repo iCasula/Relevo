@@ -1,7 +1,7 @@
 # Relevo host (headless)
 
-A proof of concept: Relevo's iPhone app driving agents on a machine without a screen, such as a Linux mini PC
-that stays on when the Mac is off. It speaks the same protocol as the Mac app (TLS-PSK + WebSocket + the
+A proof of concept: Relevo's iPhone app driving agents on a machine other than the Mac, such as a Linux mini PC
+that stays on when the Mac is off, or a Windows PC. It speaks the same protocol as the Mac app (TLS-PSK + WebSocket + the
 `RelevoProtocol` messages), so the iPhone pairs with it like with a Mac and switches between hosts.
 
 What it does today:
@@ -22,10 +22,11 @@ works through a VPN) and creating projects from the phone.
 
 ## Requirements
 
-Node 22 or newer, the `claude` and/or `codex` CLIs, and a user with systemd lingering (`loginctl show-user $USER -p Linger`)
-so the service runs without a login. No `npm install`: the program is a few files with no dependencies.
+Node 22 or newer (20 on Windows), the `claude` and/or `codex` CLIs, and on Linux a user with systemd lingering
+(`loginctl show-user $USER -p Linger`) so the service runs without a login. No `npm install`: the program is a
+few files with no dependencies.
 
-## Install or update
+## Install or update (Linux)
 
 Once, from a computer with this repository (over ssh); after that the server updates itself with
 `relevo-host update`, and the iPhone talks to it directly:
@@ -51,8 +52,36 @@ relevo-host update   # latest Host/ from GitHub (main), then restarts the servic
 journalctl --user -u relevo-host -f
 ```
 
+## Install or update (Windows)
+
+From an **administrator** PowerShell, signed in as the user whose logins and projects the agents will use, in a
+copy of this repository on the PC:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File Host\deploy\install-windows.ps1 [-Projects C:\path\to\projects] [-Base <folder>] [-Name <name>]
+```
+
+- `<Base>` defaults to `%LOCALAPPDATA%\RelevoHost`, with the same `app`, `data` and `host.env` as on Linux, and
+  `relevo-host.cmd` (the folder goes in your PATH). Projects default to `%USERPROFILE%\Projects`.
+- A scheduled task **Relevo host** starts it with Windows, before anyone signs in, as you (S4U: no stored
+  password, no window). `serve` supervises its own worker: it restarts it after `update` or a crash and writes
+  its output to `<data>\logs\host.log`. `TEMP`/`TMP` also point at the data folder.
+- A firewall rule opens the port (47820) on private and domain networks. If Windows calls your network
+  *Public*, change it to private or the iPhone won't get through.
+- `host.env` gets the absolute paths of `claude`, `codex` and Git Bash (`CLAUDE_CODE_GIT_BASH_PATH`; Claude Code
+  runs its commands with it, so install Git for Windows). Codex from npm (`codex.cmd`) works: the host runs
+  the npm package's script with Node instead of the batch file.
+- Running the script again updates the program and keeps `host.env`; `-Uninstall` removes the task, the rule
+  and the PATH entry (the data stays).
+- The PC must not go to sleep while you want to reach it (Settings › System › Power).
+
+Then, in a new terminal: `relevo-host login claude`, `relevo-host login codex`, `relevo-host pair`,
+`relevo-host status`, `relevo-host update`, `relevo-host logs`, as on Linux.
+
 After a login the running service checks the accounts again, so the iPhone shows the session straight away
 (it also does when the iPhone connects, for any account signed out or not checked in the last two minutes).
+`login` and `update` reach the service through files in `<data>/control`, which it checks every 2 s, so they
+work the same with systemd and on Windows.
 
 ## Disk
 
@@ -70,4 +99,5 @@ After a login the running service checks the accounts again, so the iPhone shows
 `RELEVO_FAKE_AGENT=1` replaces the agents with an echo agent that also asks for a permission when the message says
 "permiso". From the Mac, `Relevo --selftest remotehost "<pairing link>" ["prompt"] [ask|autoEdit|full|plan]`
 connects like the iPhone, checks that every message decodes and, with a prompt, runs a turn end to end;
-add `relay` to then hand the thread to the other subscription and check it carries on.
+add `relay` to then hand the thread to the other subscription and check it carries on. `RELEVO_SUPERVISE=1`
+runs the Windows supervisor on any system.

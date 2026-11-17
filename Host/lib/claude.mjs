@@ -1,7 +1,7 @@
 // Claude Code through its own CLI and OAuth login: `claude -p --input-format stream-json --output-format
 // stream-json` with permission prompts over stdio, like ClaudeAgent.swift on the Mac.
 
-import { spawn } from 'node:child_process';
+import { spawnCLI, killTree } from './platform.mjs';
 import { EventEmitter } from 'node:events';
 import readline from 'node:readline';
 
@@ -117,7 +117,7 @@ export class ClaudeSession extends EventEmitter {
     if (this.model && this.model !== 'default') args.push('--model', this.model);
     if (this.effort) args.push('--effort', this.effort);
     if (this.resumeId) args.push('--resume', this.resumeId);
-    const proc = spawn(this.bin, args, { cwd: this.cwd, env: this.env, stdio: ['pipe', 'pipe', 'pipe'] });
+    const proc = spawnCLI(this.bin, args, { cwd: this.cwd, env: this.env, stdio: ['pipe', 'pipe', 'pipe'] });
     this.proc = proc;
     this.stderrTail = '';
     readline.createInterface({ input: proc.stdout }).on('line', (line) => this._line(line));
@@ -166,7 +166,7 @@ export class ClaudeSession extends EventEmitter {
     if (!keepSession) this.closed = true;
     const p = this.proc;
     this.proc = null;
-    if (p) { try { p.stdin.end(); } catch {} p.kill('SIGTERM'); }
+    if (p) { try { p.stdin.end(); } catch {} killTree(p); }
     for (const cb of this.pending.values()) cb(null, 'closed');
     this.pending.clear();
   }
@@ -354,22 +354,22 @@ export class ClaudeSession extends EventEmitter {
 export async function probe({ bin, env, cwd }) {
   const status = { loggedIn: null, email: null, plan: null, windows: [], error: null, models: null };
   const auth = await new Promise((resolve) => {
-    const p = spawn(bin, ['auth', 'status', '--json'], { env, cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+    const p = spawnCLI(bin, ['auth', 'status', '--json'], { env, cwd, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
     p.stdout.on('data', (d) => { out += d; });
     p.on('error', () => resolve(null));
     p.on('exit', () => { try { resolve(JSON.parse(out)); } catch { resolve(null); } });
-    setTimeout(() => p.kill(), 15_000);
+    setTimeout(() => killTree(p), 15_000);
   });
   if (auth) {
     status.email = auth.email ?? null;
     if (auth.loggedIn === false) { status.loggedIn = false; status.error = 'Sin sesión: ejecuta «relevo-host login claude» en el host'; return status; }
   }
   await new Promise((resolve) => {
-    const p = spawn(bin, ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'], { env, cwd, stdio: ['pipe', 'pipe', 'pipe'] });
+    const p = spawnCLI(bin, ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'], { env, cwd, stdio: ['pipe', 'pipe', 'pipe'] });
     const answered = new Set();
     let tail = '';
-    const done = () => { try { p.stdin.end(); } catch {} p.kill(); resolve(); };
+    const done = () => { try { p.stdin.end(); } catch {} killTree(p); resolve(); };
     readline.createInterface({ input: p.stdout }).on('line', (line) => {
       let o; try { o = JSON.parse(line); } catch { return; }
       if (o.type !== 'control_response') return;

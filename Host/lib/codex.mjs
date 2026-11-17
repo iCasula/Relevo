@@ -1,7 +1,7 @@
 // Codex through its own CLI and ChatGPT login: `codex app-server` (JSON-RPC over stdio), like CodexAgent.swift
 // on the Mac. Same events as ClaudeSession, so the host treats both alike.
 
-import { spawn } from 'node:child_process';
+import { spawnCLI, killTree } from './platform.mjs';
 import { EventEmitter } from 'node:events';
 import readline from 'node:readline';
 import { classify } from './claude.mjs';
@@ -13,12 +13,26 @@ const CLIENT_INFO = { clientInfo: { name: 'relevo', title: 'Relevo', version: '1
 
 const cap = (s, n = 4000) => (s.length > n ? s.slice(0, n) + '\n…' : s);
 
-/** `/usr/bin/bash -lc 'cat hola.txt'` → `cat hola.txt`: Codex wraps every command in a login shell. */
+// The shell program, maybe with a path (`/usr/bin/`, `C:\Program Files\Git\bin\`) and quoted as a whole.
+const PROGRAM = (names) => String.raw`^(['"]?)(?:[^'"\s]*[\\/]|[A-Za-z]:\\[^'"]*\\)?(?:${names})(?:\.exe)?\1`;
+const POSIX_SHELL = new RegExp(PROGRAM('(?:ba|z)?sh') + String.raw` -l?c (['"])([\s\S]*)\2$`);
+const POWERSHELL = new RegExp(PROGRAM('powershell|pwsh') + String.raw`(?:\s+-(?:NoProfile|NoLogo|NonInteractive|ExecutionPolicy\s+\S+))*\s+-(?:Command|c)\s+(['"])([\s\S]*)\2$`, 'i');
+const CMD = new RegExp(PROGRAM('cmd') + String.raw`\s+/[cC]\s+([\s\S]+)$`, 'i');
+
+const unquote = (quote, s) => (quote === "'" ? s.replaceAll(`'\\''`, `'`) : s.replace(/\\(["\\$`])/g, '$1'));
+
+/**
+ * `/usr/bin/bash -lc 'cat hola.txt'` → `cat hola.txt`: Codex wraps every command in a shell. On Windows the
+ * shell is PowerShell (`powershell.exe -NoProfile -Command '…'`), cmd.exe or Git Bash.
+ */
 export function shellCommand(command) {
   if (typeof command !== 'string') return command;
-  const m = /^(?:\S*\/)?(?:ba|z)?sh -l?c (['"])([\s\S]*)\1$/.exec(command.trim());
-  if (!m) return command;
-  return m[1] === "'" ? m[2].replaceAll(`'\\''`, `'`) : m[2].replace(/\\(["\\$`])/g, '$1');
+  const s = command.trim();
+  let m = POSIX_SHELL.exec(s) ?? POWERSHELL.exec(s);
+  if (m) return unquote(m[2], m[3]);
+  m = CMD.exec(s);
+  if (m) return /^"[\s\S]*"$/.test(m[2]) ? m[2].slice(1, -1) : m[2];
+  return command;
 }
 
 function toDate(v) {
@@ -54,7 +68,7 @@ class RPC extends EventEmitter {
     this.next = 1;
     this.pending = new Map();
     this.tail = '';
-    this.proc = spawn(bin, ['app-server'], { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
+    this.proc = spawnCLI(bin, ['app-server'], { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
     this.proc.stdin.on('error', () => {});
     this.proc.stderr.on('data', (d) => { this.tail = (this.tail + d).slice(-4000); });
     this.proc.on('error', (e) => { this.tail = e.message; });
@@ -85,7 +99,7 @@ class RPC extends EventEmitter {
   notify(method, params) { this._send(params === undefined ? { method } : { method, params }); }
   respond(id, result) { this._send({ id, result }); }
   respondError(id, message) { this._send({ id, error: { code: -32601, message } }); }
-  kill() { try { this.proc.stdin.end(); } catch {} this.proc.kill('SIGTERM'); }
+  kill() { try { this.proc.stdin.end(); } catch {} killTree(this.proc); }
 }
 
 export class CodexSession extends EventEmitter {
