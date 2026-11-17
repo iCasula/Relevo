@@ -3,7 +3,7 @@
 // on the iPhone, next to the Mac app. Usage:
 //   relevo-host.mjs [serve]   start serving (systemd runs this on Linux, a scheduled task on Windows)
 //   relevo-host.mjs pair      print the pairing link for the iPhone
-//   relevo-host.mjs login [claude|codex]   sign in for this host (interactive; Codex uses a device code)
+//   relevo-host.mjs login [claude|codex|<subscription name>]   sign in for this host (interactive; Codex uses a device code)
 //   relevo-host.mjs status    login, limits and models of each agent, without calling a model
 //   relevo-host.mjs update [--check | <tag> | main]   install the newest signed release (vX.Y.Z) from GitHub, or the
 //                             one given (main: the development branch, unsigned), and restart the service;
@@ -54,7 +54,10 @@ function config() {
     if (override) return override;
     return findIn(path.join(os.homedir(), '.local', 'bin'), name) ?? which(name);
   };
-  const bins = { claude: cli('claude', env.RELEVO_CLAUDE), codex: cli('codex', env.RELEVO_CODEX) };
+  const bins = {
+    claude: cli('claude', env.RELEVO_CLAUDE), codex: cli('codex', env.RELEVO_CODEX),
+    kimi: cli('kimi', env.RELEVO_KIMI), gemini: cli('gemini', env.RELEVO_GEMINI),
+  };
   const c = {
     dataDir,
     threadsDir: path.join(dataDir, 'threads'),
@@ -65,6 +68,7 @@ function config() {
     projectsRoot: path.resolve(env.RELEVO_PROJECTS ?? path.join(dataDir, 'projects')),
     name: env.RELEVO_HOST_NAME ?? os.hostname(),
     port: Number(env.RELEVO_PORT ?? 47820),
+    bins,
     providers: (env.RELEVO_PROVIDERS ?? 'claude,codex').split(',').map((p) => p.trim())
       .filter((p) => PROVIDERS[p] && (bins[p] || env.RELEVO_FAKE_AGENT === '1'))
       .map((provider) => ({ provider, bin: bins[provider] ?? provider })),
@@ -169,13 +173,18 @@ switch (command) {
     break;
   }
   case 'login': {
-    const agent = process.argv[3] ?? cfg.providers[0]?.provider;
-    const p = cfg.providers.find((x) => x.provider === agent);
-    if (!p) { console.error(`Unknown or missing agent: ${agent}. Available: ${cfg.providers.map((x) => x.provider).join(', ')}`); process.exit(2); }
-    for (const dir of [cfg.claudeConfigDir, cfg.codexHome]) fs.mkdirSync(dir, { recursive: true });
-    const args = agent === 'codex' ? ['login', '--device-auth'] : ['auth', 'login'];
-    console.log(`${PROVIDERS[agent].name} login for this host (${agent === 'codex' ? cfg.codexHome : cfg.claudeConfigDir}).`);
-    const child = spawnCLI(p.bin, args, { env: cfg.agentEnv, stdio: 'inherit' });
+    // A subscription by provider (the first of that kind) or by its name, as listed in Ajustes › Suscripciones.
+    const host = new Host(cfg);
+    const want = (process.argv[3] ?? '').toLowerCase();
+    const loginable = host.accounts.filter((a) => a.loginArgs);
+    const account = loginable.find((a) => a.provider === want || a.name.toLowerCase() === want) ?? (want ? null : loginable[0]);
+    if (!account) {
+      console.error(`Unknown subscription: ${want || '(none)'}. Available: ${loginable.map((a) => `${a.provider} («${a.name}»)`).join(', ') || 'none'}`);
+      process.exit(2);
+    }
+    fs.mkdirSync(account.home, { recursive: true });
+    console.log(`${account.name} login for this host (${account.home}).`);
+    const child = spawnCLI(account.bin, account.loginArgs, { env: account.env, stdio: 'inherit' });
     child.on('error', (e) => { console.error(e.message); process.exit(1); });
     child.on('exit', (code) => {
       if (code === 0) {
@@ -187,10 +196,10 @@ switch (command) {
     break;
   }
   case 'status': {
-    for (const dir of [cfg.claudeConfigDir, cfg.codexHome]) fs.mkdirSync(dir, { recursive: true });
-    for (const { provider, bin } of cfg.providers) {
-      const s = await PROVIDERS[provider].probe({ bin, env: cfg.agentEnv, cwd: cfg.dataDir });
-      console.log(`${provider}: ${JSON.stringify({ ...s, models: s.models?.map((m) => m.id) }, null, 2)}`);
+    const host = new Host(cfg);
+    for (const a of host.accounts) {
+      const s = !a.bin && !a.usesAPIKey ? { error: 'program not found' } : await a.probe({ bin: a.bin, env: a.env, cwd: cfg.dataDir });
+      console.log(`${a.name} (${a.kind}): ${JSON.stringify({ ...s, models: s.models?.map((m) => m.id) }, null, 2)}`);
     }
     break;
   }

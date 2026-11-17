@@ -8,15 +8,13 @@ import { spawnCLI, killTree } from './platform.mjs';
 const ANSI = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07/g;
 const TIMEOUT_MS = 15 * 60_000;
 
-export const LOGIN_ARGS = { claude: ['auth', 'login'], codex: ['login', '--device-auth'] };
-
 export class LoginSession extends EventEmitter {
-  constructor({ bin, provider, env, cwd }) {
+  constructor({ bin, args, env, cwd }) {
     super();
     this.output = '';
     this.done = false;
     // No browser to open from a service: the link goes to the client instead.
-    this.proc = spawnCLI(bin, LOGIN_ARGS[provider], { env: { ...env, BROWSER: 'none' }, cwd, stdio: ['pipe', 'pipe', 'pipe'] });
+    this.proc = spawnCLI(bin, args, { env: { ...env, BROWSER: 'none' }, cwd, stdio: ['pipe', 'pipe', 'pipe'] });
     const onData = (d) => {
       const text = d.toString().replace(ANSI, '').replace(/\r(?!\n)/g, '\n');
       this.output = (this.output + text).slice(-16_000);

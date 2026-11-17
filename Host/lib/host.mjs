@@ -7,15 +7,18 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { createCompanionServer } from './transport.mjs';
+import { killTree } from './platform.mjs';
 import { ClaudeSession, FakeSession, probe, fakeProbe } from './claude.mjs';
 import { CodexSession, codexProbe } from './codex.mjs';
 import { handoffText } from './handoff.mjs';
 import * as gitops from './gitops.mjs';
 import { listDirectory, readThreadImage } from './files.mjs';
 import { usageReport } from './usage.mjs';
-import { LoginSession, LOGIN_ARGS } from './login.mjs';
+import { LoginSession } from './login.mjs';
 import { quickCompletion, cleanTitle } from './quick.mjs';
+import { buildAccount, API_PRESETS, ACP_PRESETS, TYPES } from './accounts.mjs';
 
 const PROTOCOL_VERSION = 1;
 const MAX_STORED_ITEMS = 1500;
@@ -28,7 +31,9 @@ const SKIP_DIRS = new Set(['$RECYCLE.BIN', 'System Volume Information', 'lost+fo
 const MODES = new Set(['ask', 'autoEdit', 'full', 'plan']);
 const PLAN_MODES = new Set(['ask', 'mostQuota', 'chain', 'wait']);
 /** What this host does beyond the shared protocol; clients show those controls only when listed. */
-export const HOST_FEATURES = ['projects', 'threads', 'git', 'images', 'usage', 'login', 'settings', 'limitPlans', 'history', 'titles'];
+export const HOST_FEATURES = ['projects', 'threads', 'git', 'images', 'usage', 'login', 'settings', 'limitPlans', 'history', 'titles', 'accounts',
+  'turns', 'worktrees', 'pullRequests', 'suggest', 'quickActions', 'attachments'];
+const IMAGE_UPLOAD = /\.(png|jpe?g|gif|webp)$/i;
 
 /** Providers this host can run. Each account is one provider with its own CLI login on this machine. */
 export const PROVIDERS = {
@@ -130,6 +135,7 @@ export class Host {
     s.settings ??= {};
     s.extraProjects ??= [];
     s.hiddenProjects ??= [];
+    s.quickActions ??= {};
     // One account per provider; the first version had only Claude (`accountId`, `models`).
     s.accounts ??= {};
     if (s.accountId) { s.accounts.claude ??= s.accountId; delete s.accountId; }
@@ -137,16 +143,15 @@ export class Host {
     s.threads ??= [];
     this.state = s;
 
-    this.accounts = [];
-    for (const { provider, bin } of this.config.providers) {
-      const p = PROVIDERS[provider];
-      s.accounts[provider] ??= uuid();
-      this.accounts.push({
-        id: s.accounts[provider], provider, bin, ...p, status: null, refreshing: false,
-        models: s.models[provider]?.length ? s.models[provider] : p.models, defaultModel: 'default',
-      });
+    // Subscriptions: one per installed provider the first time (keeping the ids and sign-in folders of the
+    // single-account versions), then as added, edited and removed from the apps.
+    if (!Array.isArray(s.accountList)) {
+      s.accountList = this.config.providers.map(({ provider }) => ({
+        id: s.accounts[provider] ?? uuid(), type: provider, name: PROVIDERS[provider].name,
+        home: provider === 'claude' ? this.config.claudeConfigDir : this.config.codexHome,
+      }));
     }
-    this.accountsById = new Map(this.accounts.map((a) => [a.id, a]));
+    this._buildAccounts();
 
     for (const meta of s.threads) {
       let stored = { items: [], totalItems: 0 };
@@ -168,7 +173,7 @@ export class Host {
   get settings() {
     return {
       projectsRoot: this.config.projectsRoot, maxAgents: this.config.maxAgents, defaultMode: 'autoEdit', defaultAccountId: null,
-      limitPlan: { mode: 'ask', targets: [] }, relayDelay: 10, aiTitles: true, ...this.state.settings,
+      limitPlan: { mode: 'ask', targets: [] }, relayDelay: 10, aiTitles: true, suggest: true, ...this.state.settings,
     };
   }
 
@@ -188,7 +193,8 @@ export class Host {
       const { items, totalItems, _saveTimer, _preview, ...meta } = t;
       return meta;
     });
-    for (const a of this.accounts ?? []) this.state.models[a.provider] = a.models;
+    // Model lists the CLIs reported (an API's come from its definition).
+    for (const a of this.accounts ?? []) if (a.provider !== 'api') this.state.models[a.id] = a.models;
     const file = path.join(this.config.dataDir, 'state.json');
     try { if (fs.existsSync(file)) fs.copyFileSync(file, `${file}.bak`); } catch {}
     writeJSONAtomic(file, this.state);
@@ -346,15 +352,41 @@ export class Host {
         return { message: text.replace(/^```\w*\n?|```$/g, '').trim() };
       }); break;
       case 'usageReport': run(() => ({ usage: usageReport(this.threads.values(), this.accountsById, { days: Number(a.days) || 0 }) })); break;
+      case 'addAccount': run(() => this.addAccount(a.account ?? {})); break;
+      case 'turnChanges': if (t) run(() => {
+        const it = this._item(t, a.itemId);
+        if (!it?.turnBefore) throw new Error('Este turno no tiene instantánea (el proyecto no es git, o es anterior a esta versión)');
+        return { changes: gitops.changesBetween(t.projectPath, it.turnBefore, it.turnAfter ?? null), finished: !!it.turnAfter };
+      }); break;
+      case 'restoreTurn': if (t) run(() => this.restoreTurn(t, a.itemId)); break;
+      case 'restoreTree': if (t) run(() => this.restoreTree(t, a.tree)); break;
+      case 'newWorktreeThread': run(() => ({ threadId: this.createWorktreeThread(String(a.projectId).toUpperCase()).id })); break;
+      case 'mergeWorktree': if (t) run(() => this.mergeWorktree(t, a.message, a.remove !== false)); break;
+      case 'removeWorktree': if (t) run(() => this.removeWorktree(t, !!a.deleteBranch)); break;
+      case 'pullRequest': if (t) run(async () => ({ pr: await gitops.pullRequest(t.projectPath) })); break;
+      case 'createPullRequest': if (t) run(async () => {
+        const url = await gitops.createPullRequest(t.projectPath);
+        this._append(t, { id: uuid(), kind: 'notice', text: `PR creada: ${url}` });
+        this._changed(t);
+        return { url };
+      }); break;
+      case 'setQuickActions': run(() => this.setQuickActions(String(a.projectId).toUpperCase(), a.actions ?? [])); break;
+      case 'runQuickAction': run(() => this.runQuickAction(t, String(a.projectId ?? t?.projectId ?? '').toUpperCase(), a.actionId)); break;
+      case 'uploadImage': if (t) run(() => this.saveUpload(t, a.name, a.data)); break;
+      case 'updateAccount': run(() => this.updateAccount(String(a.accountId).toUpperCase(), a.account ?? {})); break;
+      case 'removeAccount': run(() => this.removeAccount(String(a.accountId).toUpperCase())); break;
       case 'login': {
         const account = this.accountsById.get(String(a.accountId).toUpperCase());
-        if (!account || !LOGIN_ARGS[account.provider]) { fail(new Error('Suscripción desconocida')); break; }
+        if (!account) { fail(new Error('Suscripción desconocida')); break; }
+        if (!account.loginArgs) { fail(new Error(account.usesAPIKey ? 'Esta suscripción usa una API key: cámbiala en sus ajustes' : `${account.name} no inicia sesión desde Relevo: ábrelo una vez en una terminal del host`)); break; }
         this._startLogin(peer, a.requestId, account);
         break;
       }
       case 'loginInput': this.logins?.get(a.requestId)?.input(a.text ?? ''); break;
       case 'loginCancel': this.logins?.get(a.requestId)?.cancel(); break;
-      default: break;
+      case 'setDraft': if (t) this._suggestSoon(t, a.text ?? ''); break;
+      case 'suggestion': if (t) this._suggestionAction(t, a.action); break;
+      default: break; // registerLiveActivity: Mac only
     }
   }
 
@@ -412,6 +444,7 @@ export class Host {
     if ('limitPlan' in changes) next.limitPlan = this._validPlan(changes.limitPlan);
     if ('relayDelay' in changes) next.relayDelay = Math.min(300, Math.max(0, Math.round(Number(changes.relayDelay) || 0)));
     if ('aiTitles' in changes) next.aiTitles = !!changes.aiTitles;
+    if ('suggest' in changes) next.suggest = !!changes.suggest;
     this.state.settings = next;
     this._projectsChanged();
     for (const t of this.threads.values()) if (this.peers.size) this._schedulePatch(t);
@@ -439,7 +472,261 @@ export class Host {
   }
 
   _quick(prompt) {
-    return quickCompletion(this.accounts, prompt, { env: this.config.agentEnv, cwd: this.config.dataDir, fake: this.config.fakeAgent });
+    return quickCompletion(this.accounts, prompt, { cwd: this.config.dataDir, fake: this.config.fakeAgent });
+  }
+
+  // MARK: - Turns, worktrees, quick actions and attachments
+
+  restoreTurn(t, itemId) {
+    if (this._rt(t).isRunning) throw new Error('Detén el agente antes de restaurar');
+    const it = this._item(t, itemId);
+    if (!it?.turnBefore) throw new Error('Este turno no tiene instantánea');
+    const redo = gitops.snapshot(t.projectPath);
+    gitops.restore(t.projectPath, it.turnBefore);
+    const quoted = it.text.split('\n')[0].slice(0, 80);
+    this._append(t, { id: uuid(), kind: 'notice', text: `Ficheros restaurados a antes de «${quoted}»`, redoTree: redo });
+    // The agent's session still remembers what it did: tell it with the next message.
+    t.restoreNote = `(Nota de Relevo: el usuario ha restaurado los ficheros del proyecto al estado de antes de su mensaje «${quoted}». Lo que hiciste desde entonces ya no está en disco.)`;
+    this._changed(t);
+    return {};
+  }
+
+  restoreTree(t, tree) {
+    if (this._rt(t).isRunning) throw new Error('Detén el agente antes de restaurar');
+    if (!t.items.some((i) => i.redoTree === tree)) throw new Error('Instantánea desconocida');
+    gitops.restore(t.projectPath, tree);
+    this._append(t, { id: uuid(), kind: 'notice', text: 'Restauración deshecha: los ficheros vuelven a como estaban' });
+    t.restoreNote = '(Nota de Relevo: el usuario ha deshecho la restauración; los ficheros vuelven a estar como los dejaste.)';
+    this._changed(t);
+    return {};
+  }
+
+  /** A thread in its own git worktree and branch, so its agent doesn't step on the main folder (as on the Mac). */
+  createWorktreeThread(projectId) {
+    const project = this.projects().find((p) => p.id === projectId);
+    if (!project) throw new Error('Proyecto desconocido');
+    const short = crypto.randomBytes(3).toString('hex');
+    const branch = `relevo/${short}`;
+    const dir = path.join(this.config.dataDir, 'worktrees', `${path.basename(project.path)}-${short}`);
+    const wt = gitops.addWorktree(project.path, dir, branch);
+    const t = this.createThread(projectId);
+    t.projectPath = wt.path;
+    t.worktree = wt;
+    this._append(t, { id: uuid(), kind: 'notice', text: `Worktree en la rama ${branch} (desde ${wt.base ?? 'HEAD'}): los cambios no tocan la carpeta del proyecto hasta que fusiones` });
+    this._changed(t);
+    return t;
+  }
+
+  async mergeWorktree(t, message, remove) {
+    if (!t.worktree) throw new Error('Este hilo no está en un worktree');
+    if (this._rt(t).isRunning) throw new Error('Detén el agente antes de fusionar');
+    const out = await gitops.mergeWorktree(t.worktree, message);
+    const { branch, base } = t.worktree;
+    if (remove) this.removeWorktree(t, true, false);
+    this._append(t, { id: uuid(), kind: 'notice', text: `Rama ${branch} fusionada en ${base}${remove ? '; worktree eliminado' : ''}` });
+    this._changed(t);
+    return { output: out };
+  }
+
+  removeWorktree(t, deleteBranch, notice = true) {
+    if (!t.worktree) throw new Error('Este hilo no está en un worktree');
+    this.agents.get(t.id)?.close();
+    this.agents.delete(t.id);
+    gitops.removeWorktree(t.worktree, deleteBranch);
+    const { branch, repo } = t.worktree;
+    t.projectPath = repo;
+    t.worktree = null;
+    t.sessionId = null;
+    t.handoffPending = t.items.some((i) => i.kind === 'user');
+    if (notice) this._append(t, { id: uuid(), kind: 'notice', text: `Worktree eliminado${deleteBranch ? ` y rama ${branch} borrada` : ''}: el hilo sigue en la carpeta del proyecto` });
+    this._changed(t);
+    return {};
+  }
+
+  setQuickActions(projectId, actions) {
+    const project = this.projects().find((p) => p.id === projectId);
+    if (!project) throw new Error('Proyecto desconocido');
+    const list = actions.map((x) => ({ id: x.id || uuid(), name: String(x.name ?? '').trim().slice(0, 40), command: String(x.command ?? '').trim() }))
+      .filter((x) => x.name && x.command).slice(0, 20);
+    if (list.length) this.state.quickActions[project.path] = list; else delete this.state.quickActions[project.path];
+    this._projectsChanged();
+    return {};
+  }
+
+  /** Runs one of the project's commands (tests, build…) where the thread works; its output can go to the agent. */
+  runQuickAction(t, projectId, actionId) {
+    const project = this.projects().find((p) => p.id === (t?.projectId ?? projectId));
+    const action = project && (this.state.quickActions[project.path] ?? []).find((x) => x.id === actionId);
+    if (!action) throw new Error('Acción desconocida');
+    const cwd = t?.projectPath ?? project.path;
+    return new Promise((resolve) => {
+      const shell = process.platform === 'win32'
+        ? spawn(process.env.ComSpec ?? 'cmd.exe', ['/d', '/s', '/c', `"${action.command}"`], { cwd, env: this.config.agentEnv, windowsVerbatimArguments: true, windowsHide: true })
+        : spawn('sh', ['-c', action.command], { cwd, env: this.config.agentEnv, detached: true });
+      shell.relevoGroup = process.platform !== 'win32';
+      let output = '';
+      const add = (d) => { output = (output + d).slice(-200_000); };
+      shell.stdout.on('data', add);
+      shell.stderr.on('data', add);
+      const timer = setTimeout(() => killTree(shell), 10 * 60_000);
+      shell.on('error', (e) => { clearTimeout(timer); resolve({ code: -1, output: e.message, name: action.name }); });
+      shell.on('close', (code) => { clearTimeout(timer); resolve({ code, output, name: action.name }); });
+    });
+  }
+
+  /** An image pasted in the composer, kept in the data folder; the message names its path for the agent. */
+  saveUpload(t, name, data) {
+    const safe = path.basename(String(name || 'imagen.png')).replace(/[^\w.-]+/g, '_').slice(-60);
+    if (!IMAGE_UPLOAD.test(safe)) throw new Error('Solo imágenes PNG, JPEG, GIF o WebP');
+    const buf = Buffer.from(String(data ?? ''), 'base64');
+    if (!buf.length || buf.length > 10 << 20) throw new Error('La imagen está vacía o pasa de 10 MB');
+    const dir = path.join(this.config.dataDir, 'uploads', t.id);
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, `${Date.now()}-${safe}`);
+    fs.writeFileSync(file, buf);
+    return { path: file };
+  }
+
+  // MARK: - Relevo sugiere
+
+  _suggestSoon(t, text) {
+    const r = this._rt(t);
+    clearTimeout(r.suggestTimer);
+    if (!this.settings.suggest || r.suggestionDismissed) return;
+    r.suggestTimer = setTimeout(() => this._suggest(t, text), 900);
+  }
+
+  /**
+   * Which subscription and model suit the request being typed (a smaller «Relevo sugiere»): the size of the
+   * task from the text, and the quota left. Only shown when it differs from the selection.
+   */
+  _suggest(t, text) {
+    if (!this.threads.has(t.id)) return;
+    const r = this._rt(t);
+    const draft = String(text).trim();
+    const previous = JSON.stringify(r.suggestion ?? null);
+    r.suggestion = null;
+    if (draft.length >= 12 && !r.isRunning) {
+      const heavy = /refactori|arquitect|rediseñ|migra|investiga|depura|debug|implementa|optimiza|seguridad|concurren|rendimiento|desde cero|diseña|architecture|refactor|migrate|implement|redesign/i;
+      const light = /^(qué|que|cómo|como|dónde|donde|por qué|explica|resume|traduce|renombra|corrige (la |el )?(errata|texto|typo)|what|how|where|why|explain|rename|typo)\b/i;
+      const level = draft.length > 700 || heavy.test(draft) ? 'heavy' : draft.length < 160 && light.test(draft) ? 'light' : 'normal';
+      const used = (a) => Math.max(0, ...(a.status?.windows ?? []).map((w) => w.percent));
+      const usable = this.accounts.filter((a) => a.status?.loggedIn !== false && !this._exhausted(a) && used(a) < 97);
+      const current = this._account(t);
+      // Stay on the current subscription while it has room (switching costs context); else the one with most quota.
+      const target = usable.includes(current) && used(current) < 85 ? current : [...usable].sort((x, y) => used(x) - used(y))[0];
+      if (target) {
+        const tier = { light: ['haiku', 'flash', 'mini'], normal: ['sonnet'], heavy: ['opus', 'pro', 'max'] }[level];
+        const pick = tier.map((k) => target.models.find((m) => m.id !== 'default' && m.id.toLowerCase().includes(k))?.id).find(Boolean);
+        const model = pick ?? (target.id === t.accountId ? t.model : 'default');
+        if (target.id !== t.accountId || model !== t.model) {
+          const reasons = [{ light: 'tarea sencilla: basta un modelo rápido', normal: 'tarea normal', heavy: 'tarea compleja: mejor el modelo más capaz' }[level]];
+          if (target.id !== t.accountId) reasons.push(current && !usable.includes(current) ? `${current.name} sin cuota` : `${target.name} tiene más cuota libre`);
+          r.suggestion = { accountId: target.id, model, reasons, autoApplied: false, byAI: false };
+        }
+      }
+    }
+    if (JSON.stringify(r.suggestion) !== previous) this._changed(t, false);
+  }
+
+  _suggestionAction(t, action) {
+    const r = this._rt(t);
+    const sg = r.suggestion;
+    if (action === 'accept' && sg) {
+      r.suggestion = null;
+      this.select(t, sg.accountId, sg.model, false);
+    } else if (action === 'dismiss') {
+      r.suggestionDismissed = true;
+      this._changed(t, false);
+    }
+  }
+
+  // MARK: - Subscriptions
+
+  _buildAccounts() {
+    const old = new Map((this.accounts ?? []).map((a) => [a.id, a]));
+    const ctx = { bins: this.config.bins ?? {}, agentEnv: this.config.agentEnv, dataDir: this.config.dataDir };
+    this.accounts = this.state.accountList.map((def) => {
+      const a = buildAccount(def, ctx);
+      if (!a) return null;
+      const prev = old.get(def.id);
+      if (prev) { a.status = prev.status; a.refreshing = prev.refreshing; }
+      const stored = this.state.models[def.id] ?? this.state.models[def.type];
+      if (def.type !== 'api' && Array.isArray(stored) && stored.length) a.models = stored;
+      return a;
+    }).filter(Boolean);
+    this.accountsById = new Map(this.accounts.map((a) => [a.id, a]));
+  }
+
+  /** What the apps need to show and edit each subscription (never the key itself). */
+  _accountDefs() {
+    return this.state.accountList.map((d) => clean({
+      id: d.id, type: d.type, preset: d.preset, name: d.name, baseURL: d.baseURL, main: d.main, fast: d.fast, command: d.command,
+      args: d.args, models: d.models?.map((m) => m.id), hasKey: d.type === 'api' ? !!d.apiKey : undefined,
+    }));
+  }
+
+  _defFrom(changes, def = {}) {
+    const next = { ...def };
+    if (changes.name !== undefined) next.name = String(changes.name).trim().slice(0, 60) || def.name;
+    if (changes.apiKey) next.apiKey = String(changes.apiKey).trim();
+    if (changes.baseURL !== undefined) next.baseURL = String(changes.baseURL).trim() || undefined;
+    if (changes.models !== undefined) {
+      const ids = (Array.isArray(changes.models) ? changes.models : String(changes.models).split(',')).map((x) => String(x).trim()).filter(Boolean);
+      next.models = ids.length ? ids.map((id) => ({ id, name: id })) : undefined;
+    }
+    for (const k of ['main', 'fast', 'command']) if (changes[k] !== undefined) next[k] = String(changes[k]).trim() || undefined;
+    if (changes.args !== undefined) next.args = (Array.isArray(changes.args) ? changes.args : String(changes.args).split(' ')).map((x) => String(x).trim()).filter(Boolean);
+    return next;
+  }
+
+  addAccount(changes) {
+    const type = String(changes.type);
+    if (!TYPES.includes(type)) throw new Error('Tipo de suscripción desconocido');
+    const presets = type === 'api' ? API_PRESETS : type === 'acp' ? ACP_PRESETS : null;
+    const preset = presets ? (presets[changes.preset] ? changes.preset : 'custom') : undefined;
+    const count = this.state.accountList.filter((d) => d.type === type && d.preset === preset).length;
+    const baseName = presets ? presets[preset].name : PROVIDERS[type].name;
+    const def = this._defFrom(changes, { id: uuid(), type, preset, name: count ? `${baseName} ${count + 1}` : baseName });
+    if (type === 'api' && preset === 'custom' && !def.baseURL) throw new Error('Falta la URL de la API');
+    if (type === 'acp' && preset === 'custom' && !def.command) throw new Error('Falta el comando del agente');
+    this.state.accountList.push(def);
+    this._accountsChanged();
+    this._refreshAccount(this.accountsById.get(def.id));
+    return { accountId: def.id };
+  }
+
+  updateAccount(id, changes) {
+    const i = this.state.accountList.findIndex((d) => d.id === id);
+    if (i < 0) throw new Error('Suscripción desconocida');
+    this.state.accountList[i] = this._defFrom(changes, this.state.accountList[i]);
+    this._closeAgentsOf(id); // they started with the old settings
+    this._accountsChanged();
+    this._refreshAccount(this.accountsById.get(id));
+    return {};
+  }
+
+  removeAccount(id) {
+    if (!this.state.accountList.some((d) => d.id === id)) throw new Error('Suscripción desconocida');
+    this._closeAgentsOf(id);
+    this.state.accountList = this.state.accountList.filter((d) => d.id !== id);
+    if (this.state.settings.defaultAccountId === id) this.state.settings.defaultAccountId = null;
+    this._accountsChanged();
+    return {};
+  }
+
+  _closeAgentsOf(accountId) {
+    for (const [threadId, s] of this.agents) {
+      const t = this.threads.get(threadId);
+      if (t?.accountId === accountId && !this._rt(t).isRunning) { s.close(true); this.agents.delete(threadId); }
+    }
+  }
+
+  _accountsChanged() {
+    this._buildAccounts();
+    this._saveState();
+    this._broadcastSnapshot();
+    for (const t of this.threads.values()) if (this.peers.size) this._schedulePatch(t);
   }
 
   /** A short title from what the thread is about (after its first turn, or when asked). */
@@ -457,7 +744,8 @@ export class Host {
   _startLogin(peer, requestId, account) {
     this.logins ??= new Map();
     for (const dir of [this.config.claudeConfigDir, this.config.codexHome]) fs.mkdirSync(dir, { recursive: true });
-    const session = new LoginSession({ bin: account.bin, provider: account.provider, env: this.config.agentEnv, cwd: this.config.dataDir });
+    fs.mkdirSync(account.home, { recursive: true });
+    const session = new LoginSession({ bin: account.bin, args: account.loginArgs, env: account.env, cwd: this.config.dataDir });
     this.logins.set(requestId, session);
     const send = (o) => peer.send({ loginOutput: { requestId, accountId: account.id, ...o } });
     session.on('output', (text) => send({ text }));
@@ -484,7 +772,7 @@ export class Host {
       try { if (fs.statSync(p).isDirectory()) paths.push(p); } catch {}
     }
     const list = [...new Set(paths)].filter((p) => !hidden.has(p))
-      .map((p) => ({ id: uuidFrom(p), name: path.basename(p), path: p }))
+      .map((p) => clean({ id: uuidFrom(p), name: path.basename(p), path: p, quickActions: this.state.quickActions[p]?.length ? this.state.quickActions[p] : null }))
       .sort((x, y) => x.name.localeCompare(y.name));
     this.projectsCache = { at: Date.now(), list };
     return list;
@@ -659,7 +947,13 @@ export class Host {
       prompt = handoffText({ items: t.items, accounts, projectPath: t.projectPath, target: account, pendingRequest, workState: gitops.workState(t.projectPath) }) + text;
       t.handoffPending = false;
     }
-    this._append(t, { id: uuid(), kind: 'user', text });
+    if (t.restoreNote) { prompt = `${t.restoreNote}\n\n${prompt}`; t.restoreNote = null; }
+    // The project as it was before this turn, to show what the turn changed and to go back to it.
+    const turnBefore = gitops.snapshot(t.projectPath);
+    const userItem = this._append(t, { id: uuid(), kind: 'user', text, turnBefore });
+    r.turnUserItem = userItem.id;
+    r.suggestion = null;
+    r.suggestionDismissed = false;
     this._clearLimitTimers(t);
     r.isRunning = true;
     r.limit = null;
@@ -687,7 +981,10 @@ export class Host {
     if (s) return s;
     const account = this._account(t);
     const Session = this.config.fakeAgent ? FakeSession : account.Session;
-    s = new Session({ bin: account.bin, cwd: t.projectPath, env: this.config.agentEnv, model: t.model, effort: t.effort, mode: t.mode, resumeId: t.sessionId });
+    s = new Session({
+      bin: account.bin, args: account.args, cwd: t.projectPath, env: account.env, model: t.model, effort: t.effort, mode: t.mode,
+      resumeId: t.sessionId, agentName: account.agentName, loginHint: account.loginHint,
+    });
     this.agents.set(t.id, s);
     const r = this._rt(t);
     const item = (key, make) => {
@@ -698,6 +995,7 @@ export class Host {
     };
     const assistant = () => ({ id: uuid(), kind: 'assistant', text: '', accountId: account.id, model: t.model });
     s.on('session', (id) => { t.sessionId = id; this._saveThread(t); });
+    s.on('models', (models) => { account.models = models; this._saveState(); this._broadcastSnapshot(); });
     s.on('status', (text) => { r.statusLine = text; this._changed(t, false); });
     s.on('textDelta', (key, text) => { const it = item(`a:${key}`, assistant); it.text += text; this._touch(t, it); this._changed(t, false); });
     s.on('textFinal', (key, text) => { const it = item(`a:${key}`, assistant); it.text = text; this._touch(t, it); this._changed(t, false); });
@@ -737,8 +1035,8 @@ export class Host {
     s.on('failure', (f) => {
       this._append(t, { id: uuid(), kind: 'error', text: f.message, accountId: account.id });
       if (f.kind === 'auth') {
-        account.status = { ...(account.status ?? {}), loggedIn: false, error: `Sin sesión: ejecuta «relevo-host login ${account.provider}» en el host` };
-        this._append(t, { id: uuid(), kind: 'notice', text: `Inicia sesión en ${account.name} en ${this.config.name}: ssh y «relevo-host login ${account.provider}».` });
+        account.status = { ...(account.status ?? {}), loggedIn: false, error: 'Sin sesión: Ajustes › Suscripciones › Iniciar sesión' };
+        this._append(t, { id: uuid(), kind: 'notice', text: `Inicia sesión en ${account.name} en ${this.config.name}: Ajustes › Suscripciones (o «relevo-host login» en el host).` });
       }
       if (f.kind === 'limit' || f.kind === 'unavailable') {
         r.limit = { accountId: account.id, message: f.message, resetsAt: f.resetsAt ?? null, isCapacity: f.kind === 'unavailable', isNoPlan: false };
@@ -771,6 +1069,8 @@ export class Host {
       r.isRunning = false;
       r.statusLine = null;
       r.finishedAt = Date.now();
+      const userItem = r.turnUserItem && this._item(t, r.turnUserItem);
+      if (userItem?.turnBefore) { userItem.turnAfter = gitops.snapshot(t.projectPath); this._touch(t, userItem); }
       for (const [id] of r.approvals) {
         const it = this._item(t, id);
         if (it && !it.resolution) { it.resolution = 'Sin respuesta'; this._touch(t, it); }
@@ -917,7 +1217,8 @@ export class Host {
     this._broadcastSnapshot();
     let result;
     try {
-      result = this.config.fakeAgent ? fakeProbe() : await a.probe({ bin: a.bin, env: this.config.agentEnv, cwd: this.config.dataDir });
+      if (!this.config.fakeAgent && !a.bin) throw new Error(`no encuentro el programa de ${a.name} en el host`);
+      result = this.config.fakeAgent ? fakeProbe() : await a.probe({ bin: a.bin, env: a.env, cwd: this.config.dataDir });
     } catch (e) {
       result = { loggedIn: a.status?.loggedIn ?? null, windows: a.status?.windows ?? [], error: `No he podido consultar la cuenta: ${e.message}` };
     }
@@ -959,7 +1260,7 @@ export class Host {
   _remoteAccount(a) {
     const s = a.status;
     return clean({
-      id: a.id, kind: a.kind, name: a.name, agentName: a.agentName, symbol: a.symbol, tint: a.tint, usesAPIKey: false,
+      id: a.id, kind: a.kind, name: a.name, agentName: a.agentName, symbol: a.symbol, tint: a.tint, usesAPIKey: !!a.usesAPIKey,
       status: s ? clean({
         loggedIn: s.loggedIn, plan: s.plan, email: s.email, error: s.error, note: s.note,
         windows: (s.windows ?? []).map(remoteWindow), noPlan: false, exhausted: this._exhausted(a), updatedAt: s.updatedAt,
@@ -982,6 +1283,7 @@ export class Host {
         return clean({
           id: t.id, projectId: t.projectId, title: t.title, updatedAt: t.updatedAt, isRunning: r.isRunning,
           needsApproval: r.approvals.size > 0, accountId: t.accountId, preview: last?.text?.slice(0, 160) ?? null, isWaiting: false,
+          worktree: t.worktree ? t.worktree.branch : null,
         });
       });
     const settings = this.settings;
@@ -990,7 +1292,11 @@ export class Host {
       autoRelay: settings.limitPlan.mode !== 'ask', pushReady: false,
       // Beyond the shared protocol (the Mac and the iPhone ignore unknown fields).
       hostFeatures: HOST_FEATURES, hostVersion: this.config.version ?? 'dev', hostPlatform: process.platform,
-      hostSettings: { ...settings, limitPlanSummary: this._planSummary(settings.limitPlan) },
+      hostSettings: { ...settings, limitPlanSummary: this._planSummary(settings.limitPlan), accounts: this._accountDefs() },
+      hostProviders: {
+        api: Object.entries(API_PRESETS).map(([id, p]) => ({ id, name: p.name, keyURL: p.keyURL ?? null })),
+        acp: Object.entries(ACP_PRESETS).map(([id, p]) => ({ id, name: p.name, login: !!p.login })),
+      },
     };
   }
 
@@ -1008,11 +1314,12 @@ export class Host {
       limitPlan: t.limitPlan ? { ...t.limitPlan, summary: this._planSummary(t.limitPlan) } : null,
       defaultLimitPlan: { ...this.settings.limitPlan, summary: this._planSummary(this.settings.limitPlan) },
       pendingRelay: r.pendingRelay ?? null, resumeAt: r.resumeAt ?? null,
+      suggestion: r.suggestionDismissed ? null : r.suggestion ?? null,
     });
   }
 
   _remoteThread(t) {
-    return { id: t.id, title: t.title, items: t.items.slice(-SENT_ITEMS), totalItems: t.totalItems, runtime: this._runtime(t) };
+    return clean({ id: t.id, title: t.title, items: t.items.slice(-SENT_ITEMS), totalItems: t.totalItems, runtime: this._runtime(t), worktree: t.worktree ?? null });
   }
 
   _activity() {
@@ -1055,7 +1362,7 @@ export class Host {
       const ids = r.dirty;
       r.dirty = new Set();
       const upserts = t.items.filter((i) => ids.has(i.id));
-      const patch = { id: t.id, title: t.title, upserts, totalItems: t.totalItems, runtime: this._runtime(t) };
+      const patch = { id: t.id, title: t.title, upserts, totalItems: t.totalItems, runtime: this._runtime(t), worktree: t.worktree ?? null };
       for (const peer of this.peers) if (peer.greeted && peer.subscribed === t.id) peer.send({ threadPatch: { _0: patch } });
       this._broadcastSnapshot();
     }, 120);

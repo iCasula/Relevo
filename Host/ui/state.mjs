@@ -64,7 +64,9 @@ export function applyPatch(thread, patch) {
     const i = index.get(item.id);
     if (i === undefined) { index.set(item.id, items.length); items.push(item); } else items[i] = item;
   }
-  return { ...thread, items, title: patch.title, totalItems: patch.totalItems, runtime: patch.runtime };
+  const next = { ...thread, items, title: patch.title, totalItems: patch.totalItems, runtime: patch.runtime };
+  if ('worktree' in patch) next.worktree = patch.worktree ?? undefined; // the Node host's worktree (or its removal)
+  return next;
 }
 
 /** Client messages (desktop → host), shaped as the host decodes them. */

@@ -44,7 +44,7 @@ const MODES = {
   plan: ['Solo planificar', 'Solo lectura: analiza y propone un plan sin tocar nada.'],
 };
 const EFFORTS = { none: 'Sin razonamiento', minimal: 'Mínimo', low: 'Bajo', medium: 'Medio', high: 'Alto', xhigh: 'Muy alto', max: 'Máximo', ultra: 'Ultra', disabled: 'Desactivado', enabled: 'Activado' };
-const GLYPHS = { asterisk: '✳', hexagon: '⬡', sparkles: '✦', 'sparkle': '✦', moon: '☾', bolt: 'ϟ', key: '⚿', star: '★', diamond: '◆', circle: '●', 'brain': '✺', 'cpu': '▣' };
+const GLYPHS = { fish: '◗', asterisk: '✳', hexagon: '⬡', sparkles: '✦', 'sparkle': '✦', moon: '☾', bolt: 'ϟ', key: '⚿', star: '★', diamond: '◆', circle: '●', 'brain': '✺', 'cpu': '▣' };
 
 const effortName = (e) => EFFORTS[String(e).toLowerCase()] ?? (e ? e[0].toUpperCase() + e.slice(1) : 'Auto');
 const host = (id) => app.hosts.get(id);
@@ -392,6 +392,7 @@ function buildThreadView(main) {
       <div id="t-banners"></div>
       <div id="t-queue"></div>
       <div class="composer">
+        <div class="attachments" id="t-attachments"></div>
         <textarea id="draft" rows="2" placeholder="Escribe un mensaje…"></textarea>
         <div class="composer-bar">
           <select id="sel-model" title="Suscripción y modelo"></select>
@@ -456,6 +457,21 @@ function buildThreadView(main) {
     } else if (v !== 'current') sendTo(hostId, Client.setLimitPlan(threadId, { mode: v, targets: [] }));
   };
   threadEls.transcript.onscroll = () => { threadEls.stick = nearBottom(); };
+  attachments.length = 0;
+  renderAttachments();
+  // Images pasted or dropped on the composer go to the host; the message names their path for the agent.
+  const composer = main.querySelector('.composer');
+  threadEls.draft.addEventListener('paste', (e) => {
+    const files = [...(e.clipboardData?.files ?? [])].filter((f) => f.type.startsWith('image/'));
+    if (files.length) { e.preventDefault(); attach(files); }
+  });
+  composer.addEventListener('dragover', (e) => { if ([...e.dataTransfer.items].some((i) => i.type.startsWith('image/'))) { e.preventDefault(); composer.classList.add('drop'); } });
+  composer.addEventListener('dragleave', () => composer.classList.remove('drop'));
+  composer.addEventListener('drop', (e) => {
+    composer.classList.remove('drop');
+    const files = [...e.dataTransfer.files].filter((f) => f.type.startsWith('image/'));
+    if (files.length) { e.preventDefault(); attach(files); }
+  });
   threadEls.stick = true;
   autosize();
   setTimeout(() => threadEls?.draft.focus(), 0);
@@ -477,14 +493,18 @@ function autosize() {
 
 function canSend() {
   const { h, thread } = current();
-  if (h?.info.state !== 'connected' || !threadEls.draft.value.trim()) return false;
+  if (h?.info.state !== 'connected' || (!threadEls.draft.value.trim() && !attachments.some((a) => a.path))) return false;
+  if (attachments.some((a) => !a.path && !a.error)) return false; // still uploading
   return !thread?.runtime?.isRunning || thread.runtime.queued !== undefined;
 }
 
 function sendDraft(now) {
   if (!canSend()) return;
   const { hostId, threadId } = current();
-  const text = threadEls.draft.value.trim();
+  const files = attachments.filter((a) => a.path).map((a) => `[Imagen adjunta: ${a.path}]`);
+  const text = [threadEls.draft.value.trim(), ...files].filter(Boolean).join('\n\n');
+  attachments.length = 0;
+  renderAttachments();
   sendTo(hostId, now ? Client.sendNow(threadId, text) : Client.send(threadId, text));
   threadEls.draft.value = '';
   app.drafts.delete(`${hostId}/${threadId}`);
@@ -502,7 +522,11 @@ function updateThreadView() {
   const project = h.data.snapshot?.projects.find((p) => p.id === summary?.projectId);
   threadEls.title.textContent = thread?.title ?? summary?.title ?? 'Hilo';
   threadEls.sub.textContent = [nameOf(h), project?.name, account ? `${account.name} · ${modelName(account, runtime?.selectedModel)}` : null].filter(Boolean).join(' · ');
-  const actions = [has(hostId, 'git') ? '<button class="btn small" data-git title="Cambios en el proyecto, diff y commit">Cambios</button>' : '',
+  const wt = thread?.worktree;
+  const quick = project?.quickActions?.length || has(hostId, 'quickActions');
+  const actions = [wt ? `<span class="badge-wt" title="${esc(wt.path)}">⑂ ${esc(wt.branch)}</span>` : '',
+    has(hostId, 'git') ? '<button class="btn small" data-git title="Cambios en el proyecto, diff y commit">Cambios</button>' : '',
+    quick ? '<button class="btn small" data-quick-menu title="Acciones rápidas del proyecto">Acciones</button>' : '',
     '<button class="btn small" data-thread-usage title="Tokens y coste de este hilo">Consumo</button>',
     `<button class="btn small" data-thread-menu title="Más acciones">⋯</button>`].join('');
   if (threadEls.actions.dataset.html !== actions) { threadEls.actions.innerHTML = actions; threadEls.actions.dataset.html = actions; }
@@ -604,7 +628,11 @@ function groupHTML(row) {
 function itemHTML(hostId, it, header) {
   const open = app.expanded.has(it.id);
   switch (it.kind) {
-    case 'user': return `<div class="msg user"><div class="bubble">${esc(it.text)}</div></div>`;
+    case 'user': {
+      const turn = it.turnBefore && has(hostId, 'turns')
+        ? `<div class="turn-actions"><button class="link" data-turn-changes="${esc(it.id)}">Cambios del turno</button><button class="link" data-turn-restore="${esc(it.id)}">Restaurar a antes…</button></div>` : '';
+      return `<div class="msg user"><div class="bubble">${esc(it.text)}${imagesHTML(hostId, it.text)}</div>${turn}</div>`;
+    }
     case 'assistant': {
       const acct = accountOf(hostId, it.accountId);
       const head = header && acct ? `<div class="author">${glyph(acct)}${esc(acct.agentName ?? acct.name)}${it.model && it.model !== 'default' ? ` · ${esc(modelName(acct, it.model))}` : ''}</div>` : '';
@@ -619,7 +647,7 @@ function itemHTML(hostId, it, header) {
       const body = open && it.output ? `<div class="fold-body"><pre class="out">${esc(it.output)}</pre></div>` : '';
       return `<div class="fold"><button class="fold-head" data-toggle="${esc(it.id)}"${it.output ? '' : ' disabled'}>${state}<span class="label">${label}</span>${it.output ? `<span class="chev${open ? ' open' : ''}"></span>` : ''}</button>${body}</div>`;
     }
-    case 'notice': return `<div class="notice">${inline(it.text)}</div>`;
+    case 'notice': return `<div class="notice">${inline(it.text)}${it.redoTree ? ` · <button class="link" data-redo-tree="${esc(it.redoTree)}">Deshacer</button>` : ''}</div>`;
     case 'error': return `<div class="error-card">${esc(it.text)}</div>`;
     case 'approval': return approvalHTML(it);
     default: return `<div class="notice">${esc(it.text)}</div>`;
@@ -905,6 +933,14 @@ document.addEventListener('click', (e) => {
   else if (d.loadOlder !== undefined) loadOlder(hostId, threadId);
   else if (d.image) imageViewer(d.image, d.imgHost, d.imgThread);
   else if (d.login) loginDialog(d.loginHost, d.login);
+  else if (d.turnChanges) turnChangesDialog(hostId, threadId, d.turnChanges);
+  else if (d.turnRestore) restoreTurn(hostId, threadId, d.turnRestore);
+  else if (d.redoTree) request(hostId, { restoreTree: { threadId, tree: d.redoTree } }).then((r) => toast(r.ok ? 'Restauración deshecha' : r.error));
+  else if (d.quickMenu !== undefined) { const r = el.getBoundingClientRect(); quickMenu(hostId, threadId, r.left, r.bottom); }
+  else if (d.removeAttachment) { attachments.splice(Number(d.removeAttachment), 1); renderAttachments(); }
+  else if (d.addAccount) accountDialog(d.addAccount);
+  else if (d.editAccount) accountDialog(d.accountHost, d.editAccount);
+  else if (d.removeAccount) removeAccount(d.accountHost, d.removeAccount);
   else if (d.checkUpdate !== undefined) { post({ type: 'checkUpdate' }); toast('Buscando actualizaciones…'); }
   else if (d.applyUpdate !== undefined) {
     const running = [...app.hosts.values()].filter((h) => h.info.local).flatMap((h) => h.data.snapshot?.threads ?? []).filter((t) => t.isRunning).length;
@@ -971,8 +1007,13 @@ function projectMenu(hostId, projectId, x, y) {
   const items = [
     { label: 'Nuevo hilo', action: () => newThread(hostId, projectId) },
     { label: 'Comparar agentes…', action: () => compareDialog(hostId, projectId) },
-    '-',
   ];
+  if (has(hostId, 'worktrees')) items.splice(1, 0, { label: 'Nuevo hilo en un worktree', action: async () => {
+    const r = await request(hostId, { newWorktreeThread: { projectId } });
+    if (r.ok) openThread(hostId, r.threadId); else toast(r.error);
+  } });
+  if (has(hostId, 'quickActions')) items.push({ label: 'Acciones rápidas…', action: () => quickActionsEditor(hostId, projectId) });
+  items.push('-');
   if (h.info.local) items.push({ label: 'Abrir en VS Code', action: () => { location.href = vscodeURL(p.path); } });
   items.push({ label: 'Copiar ruta', action: () => copy(p.path, 'Ruta copiada') });
   if (has(hostId, 'projects')) {
@@ -997,6 +1038,16 @@ function threadMenu(hostId, threadId, x, y) {
   const t = snapshotOf(hostId)?.threads.find((th) => th.id === threadId);
   if (!t) return;
   const items = [{ label: 'Abrir', action: () => openThread(hostId, threadId) }];
+  const full = host(hostId)?.data.threads.get(threadId);
+  const wt = full?.worktree;
+  if (wt) {
+    items.push('-', { label: `Fusionar ${wt.branch} en ${wt.base ?? 'la rama base'}…`, action: () => mergeWorktreeDialog(hostId, threadId, wt) },
+      { label: 'Eliminar worktree…', danger: true, action: async () => {
+        if (!await confirmDialog({ title: 'Eliminar worktree', text: `Se borran la carpeta del worktree y la rama ${wt.branch} con sus cambios sin fusionar. El hilo sigue en la carpeta del proyecto.`, confirm: 'Eliminar', danger: true })) return;
+        const r = await request(hostId, { removeWorktree: { threadId, deleteBranch: true } });
+        toast(r.ok ? 'Worktree eliminado' : r.error);
+      } });
+  }
   if (has(hostId, 'threads')) {
     items.push(
       { label: 'Renombrar…', action: async () => {
@@ -1097,9 +1148,30 @@ async function gitDialog(hostId, threadId) {
       <div class="actions"><button class="btn" data-ai>Escribir con IA</button><span class="note grow" data-branch></span>
         <button class="btn" data-refresh>Actualizar</button><button class="btn" data-commit>Commit</button><button class="btn primary" data-push>Commit y push</button></div>
       <pre class="out" data-output hidden></pre>
+      <div class="pr" data-pr></div>
     </div>` });
   const $ = (s) => d.el.querySelector(s);
   let selected = null;
+  const loadPR = async () => {
+    if (!has(hostId, 'pullRequests')) return;
+    const box = $('[data-pr]');
+    const r = await request(hostId, { pullRequest: { threadId } });
+    if (!r.ok) { box.innerHTML = `<span class="note">PR: ${esc(r.error)}</span>`; return; }
+    if (!r.pr) {
+      box.innerHTML = '<span class="note grow">Esta rama no tiene pull request.</span><button class="btn small" data-create-pr>Crear PR</button>';
+      box.querySelector('[data-create-pr]').onclick = async (e) => {
+        e.target.disabled = true;
+        const c = await request(hostId, { createPullRequest: { threadId } }, 180_000);
+        toast(c.ok ? 'PR creada' : c.error);
+        loadPR();
+      };
+      return;
+    }
+    const pr = r.pr;
+    const checks = pr.checks.failed ? `<i class="del">✕ ${pr.checks.failed}</i>` : pr.checks.pending ? `⏳ ${pr.checks.pending}` : pr.checks.passed ? `<i class="add">✓ ${pr.checks.passed}</i>` : '';
+    box.innerHTML = `<a href="${esc(pr.url)}" target="_blank" rel="noopener"><b>#${pr.number}</b> ${esc(pr.title)}</a><span class="note">${esc({ OPEN: 'abierta', MERGED: 'fusionada', CLOSED: 'cerrada' }[pr.state] ?? pr.state)}${pr.draft ? ' · borrador' : ''}${pr.review ? ` · ${esc({ APPROVED: 'aprobada', CHANGES_REQUESTED: 'piden cambios', REVIEW_REQUIRED: 'falta revisión' }[pr.review] ?? pr.review)}` : ''}</span><span>${checks}</span>`;
+  };
+  loadPR();
   const showDiff = async (path) => {
     selected = path;
     for (const b of d.el.querySelectorAll('.git-file')) b.classList.toggle('active', (b.dataset.path || null) === path);
@@ -1218,7 +1290,7 @@ async function loadUsage() {
 function renderSettingsView(main) {
   const hosts = [...app.hosts.entries()].filter(([id]) => has(id, 'settings'));
   // The forms are built once per visit: snapshots arriving while you edit mustn't reset them.
-  const signature = hosts.map(([id]) => id).join(',');
+  const signature = hosts.map(([id, h]) => `${id}:${(h.data.snapshot.hostSettings?.accounts ?? []).map((a) => `${a.id}${a.name}`).join('|')}`).join(',');
   if (main.dataset.settings !== signature || !main.querySelector('.settings-view')) {
     main.dataset.settings = signature;
     main.innerHTML = `<div class="view settings-view"><h1>Ajustes</h1><p class="lead">De cada host donde corren los agentes. Los del Mac están en su propia app.</p>
@@ -1253,8 +1325,10 @@ function settingsFormHTML(hostId, h) {
       <label class="field"><span>Agentes trabajando a la vez</span><input type="number" name="maxAgents" min="1" max="8" value="${st.maxAgents ?? 2}"></label>
       <label class="check field-check"><input type="checkbox" name="aiTitles"${st.aiTitles !== false ? ' checked' : ''}> Poner el tema como título con IA (modelo barato)</label>
     </div>
+    <label class="check"><input type="checkbox" name="suggest"${st.suggest !== false ? ' checked' : ''}> Relevo sugiere: proponer suscripción y modelo según la tarea que escribes</label>
     <div class="actions end"><button class="btn primary" type="submit">Guardar</button></div>
-    <h3 class="h3">Suscripciones</h3><div data-accounts="${esc(hostId)}"></div>
+    <div class="section-head"><h3 class="h3 grow">Suscripciones</h3>${h.data.snapshot.hostFeatures?.includes('accounts') ? `<button type="button" class="btn small" data-add-account="${esc(hostId)}">Añadir suscripción</button>` : ''}</div>
+    <div data-accounts="${esc(hostId)}"></div>
   </form>`;
 }
 
@@ -1264,8 +1338,11 @@ function accountsHTML(hostId) {
   return accounts.map((a) => {
     const s = a.status;
     const state = s?.loggedIn === false ? '<span class="note bad">Sin sesión</span>' : s?.loggedIn ? `<span class="note">Con sesión${s.email ? ` · ${esc(s.email)}` : ''}${s.plan ? ` · ${esc(s.plan)}` : ''}</span>` : '<span class="note">Comprobando…</span>';
-    return `<div class="acct-row">${glyph(a, 24)}<b>${esc(a.name)}</b>${state}<span class="grow"></span>`
-      + (has(hostId, 'login') ? `<button type="button" class="btn${s?.loggedIn === false ? ' primary' : ''}" data-login="${esc(a.id)}" data-login-host="${esc(hostId)}">${s?.loggedIn === false ? 'Iniciar sesión' : 'Volver a iniciar sesión'}</button>` : '') + '</div>';
+    const def = snapshotOf(hostId)?.hostSettings?.accounts?.find((x) => x.id === a.id);
+    const canLogin = has(hostId, 'login') && !a.usesAPIKey && (def?.type !== 'acp' || snapshotOf(hostId)?.hostProviders?.acp.find((p) => p.id === def.preset)?.login);
+    return `<div class="acct-row">${glyph(a, 24)}<div class="grow"><b>${esc(a.name)}</b> ${state}${s?.error && s.loggedIn !== false ? `<div class="note bad">${esc(s.error)}</div>` : ''}</div>`
+      + (canLogin ? `<button type="button" class="btn small${s?.loggedIn === false ? ' primary' : ''}" data-login="${esc(a.id)}" data-login-host="${esc(hostId)}">${s?.loggedIn === false ? 'Iniciar sesión' : 'Volver a iniciar sesión'}</button>` : '')
+      + (def ? `<button type="button" class="btn small" data-edit-account="${esc(a.id)}" data-account-host="${esc(hostId)}">Editar</button><button type="button" class="btn small danger" data-remove-account="${esc(a.id)}" data-account-host="${esc(hostId)}">Quitar</button>` : '') + '</div>';
   }).join('');
 }
 
@@ -1282,6 +1359,7 @@ function bindSettingsForm(form, hostId) {
     const settings = {
       projectsRoot: form.projectsRoot.value.trim(), defaultAccountId: form.defaultAccountId.value || null, defaultMode: form.defaultMode.value,
       limitPlan, relayDelay: Number(form.relayDelay.value), maxAgents: Number(form.maxAgents.value), aiTitles: form.aiTitles.checked,
+      suggest: form.suggest.checked,
     };
     const r = await request(hostId, { setSettings: { settings } });
     toast(r.ok ? 'Ajustes guardados' : r.error);
@@ -1349,7 +1427,7 @@ async function loadOlder(hostId, threadId) {
   renderMain();
 }
 
-const IMAGE_PATH = /(?:^|[\s(`'"*])((?:[A-Za-z]:[\\/]|~?\/|\.{1,2}[\\/])?[\w.\-\\/]*[\w-]\.(?:png|jpe?g|gif|webp|svg))(?=$|[\s)`'".,;:*])/gim;
+const IMAGE_PATH = /(?:^|[\s(`'"*])((?:[A-Za-z]:[\\/]|~?\/|\.{1,2}[\\/])?[\w.\-\\/]*[\w-]\.(?:png|jpe?g|gif|webp|svg))(?=$|[\s)\]`'".,;:*])/gim;
 
 /** Thumbnails for the images a message names (the host serves only files the thread mentions). */
 function imagesHTML(hostId, text) {
@@ -1386,6 +1464,197 @@ async function imageViewer(path, hostId, threadId) {
   const d = openDialog({ title: path.split(/[\\/]/).pop(), wide: true, body: '<div class="viewer"><span class="spinner"></span></div>' });
   const url = await imageData(hostId, threadId, path, 2400);
   d.el.querySelector('.viewer').innerHTML = url ? `<img src="${url}" alt="">` : '<p class="note">No se ha podido cargar la imagen.</p>';
+}
+
+// MARK: - Attachments
+
+const attachments = []; // { name, path?, error?, preview }
+
+async function attach(files) {
+  const { hostId, threadId } = current();
+  if (!has(hostId, 'attachments')) { toast(`${nameOf(host(hostId))} no admite imágenes adjuntas`); return; }
+  for (const file of files.slice(0, 6)) {
+    if (file.size > 10 << 20) { toast(`${file.name || 'La imagen'} pasa de 10 MB`); continue; }
+    const entry = { name: file.name || `captura-${Date.now()}.png`, preview: URL.createObjectURL(file) };
+    attachments.push(entry);
+    renderAttachments();
+    const data = await new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result).split(',')[1]);
+      reader.readAsDataURL(file);
+    });
+    const ext = (file.type.split('/')[1] || 'png').replace('jpeg', 'jpg');
+    const name = /\.\w+$/.test(entry.name) ? entry.name : `${entry.name}.${ext}`;
+    const r = await request(hostId, { uploadImage: { threadId, name, data } });
+    if (r.ok) entry.path = r.path; else { entry.error = r.error; toast(r.error); }
+    renderAttachments();
+  }
+}
+
+function renderAttachments() {
+  const box = threadEls?.main?.querySelector?.('#t-attachments') ?? document.getElementById('t-attachments');
+  if (!box) return;
+  box.innerHTML = attachments.map((a, i) => `<span class="chip-img${a.error ? ' bad' : ''}"><img src="${a.preview}" alt="">${esc(a.name)}${!a.path && !a.error ? ' <span class="spinner"></span>' : ''}<button class="icon-btn small" data-remove-attachment="${i}" title="Quitar">✕</button></span>`).join('');
+  updateComposer();
+}
+
+// MARK: - Turns: what each changed, and going back
+
+async function turnChangesDialog(hostId, threadId, itemId) {
+  const d = openDialog({ title: 'Cambios de este turno', wide: true, body: '<div class="note pad">Cargando…</div>' });
+  const r = await request(hostId, { turnChanges: { threadId, itemId } });
+  if (!r.ok) { d.el.innerHTML = `<p class="note bad">${esc(r.error)}</p>`; return; }
+  const c = r.changes;
+  d.el.innerHTML = `<p class="note">${r.finished ? 'Lo que cambió el agente durante este turno.' : 'El turno sigue en marcha: cambios hasta ahora.'} ${c.files.length} ${c.files.length === 1 ? 'fichero' : 'ficheros'}.</p>
+    <div class="git-diff tall">${diffHTML(c.diff)}</div>
+    <div class="actions end"><button class="btn danger" data-restore-here>Restaurar a antes de este turno…</button></div>`;
+  d.el.querySelector('[data-restore-here]').onclick = () => { d.close(); restoreTurn(hostId, threadId, itemId); };
+}
+
+async function restoreTurn(hostId, threadId, itemId) {
+  if (!await confirmDialog({ title: 'Restaurar a antes de este turno', text: 'Los ficheros del proyecto vuelven a como estaban antes de este mensaje (lo hecho después se deshace, también a mano). Se guarda el estado actual: podrás deshacerlo. La conversación no se borra; el agente recibe una nota con tu siguiente mensaje.', confirm: 'Restaurar', danger: true })) return;
+  const r = await request(hostId, { restoreTurn: { threadId, itemId } });
+  toast(r.ok ? 'Ficheros restaurados' : r.error);
+}
+
+// MARK: - Worktrees
+
+function mergeWorktreeDialog(hostId, threadId, wt) {
+  const d = openDialog({ title: `Fusionar ${wt.branch} en ${wt.base ?? 'la rama base'}`, body: `
+    <p class="note">Se hace commit de los cambios del worktree en su rama y se fusiona en <b>${esc(wt.base ?? '?')}</b> en la carpeta del proyecto (que debe estar en esa rama).</p>
+    <label class="field"><span>Mensaje del commit (si hay cambios sin commit)</span><input type="text" data-msg value="Cambios de ${esc(wt.branch)}"></label>
+    <label class="check"><input type="checkbox" data-remove checked> Después, eliminar el worktree y su rama</label>
+    <pre class="out" data-output hidden></pre>
+    <div class="actions end"><button class="btn" data-no>Cancelar</button><button class="btn primary" data-yes>Fusionar</button></div>` });
+  d.el.querySelector('[data-no]').onclick = d.close;
+  d.el.querySelector('[data-yes]').onclick = async (e) => {
+    e.target.disabled = true;
+    const r = await request(hostId, { mergeWorktree: { threadId, message: d.el.querySelector('[data-msg]').value, remove: d.el.querySelector('[data-remove]').checked } }, 180_000);
+    e.target.disabled = false;
+    if (r.ok) { toast('Rama fusionada'); d.close(); return; }
+    const out = d.el.querySelector('[data-output]');
+    out.hidden = false;
+    out.textContent = r.error;
+  };
+}
+
+// MARK: - Quick actions
+
+function quickMenu(hostId, threadId, x, y) {
+  const t = snapshotOf(hostId)?.threads.find((th) => th.id === threadId);
+  const project = snapshotOf(hostId)?.projects.find((p) => p.id === t?.projectId);
+  if (!project) return;
+  const items = (project.quickActions ?? []).map((qa) => ({ label: qa.name, action: () => runQuickAction(hostId, threadId, qa) }));
+  if (items.length) items.push('-');
+  items.push({ label: 'Editar acciones…', action: () => quickActionsEditor(hostId, project.id) });
+  showMenu(x, y, items);
+}
+
+function quickActionsEditor(hostId, projectId) {
+  const project = snapshotOf(hostId)?.projects.find((p) => p.id === projectId);
+  if (!project) return;
+  const rows = (list) => list.map((qa) => `<div class="qa-row" data-id="${esc(qa.id ?? '')}"><input type="text" class="qa-name" placeholder="Nombre" value="${esc(qa.name)}"><input type="text" class="qa-cmd" placeholder="Comando (p. ej. npm test)" value="${esc(qa.command)}" spellcheck="false"><button class="icon-btn small" data-qa-del title="Quitar">✕</button></div>`).join('');
+  const d = openDialog({ title: `Acciones de ${project.name}`, wide: true, body: `
+    <p class="note">Comandos que lanzas con un clic desde el hilo (en su carpeta, o en su worktree). Su salida puedes enviarla al agente.</p>
+    <div class="qa-list">${rows(project.quickActions?.length ? project.quickActions : [{ name: '', command: '' }])}</div>
+    <div class="actions"><button class="btn" data-qa-add>Añadir acción</button><span class="grow"></span><button class="btn" data-no>Cancelar</button><button class="btn primary" data-yes>Guardar</button></div>` });
+  const list = d.el.querySelector('.qa-list');
+  d.el.querySelector('[data-qa-add]').onclick = () => list.insertAdjacentHTML('beforeend', rows([{ name: '', command: '' }]));
+  list.addEventListener('click', (e) => { if (e.target.closest('[data-qa-del]')) e.target.closest('.qa-row').remove(); });
+  d.el.querySelector('[data-no]').onclick = d.close;
+  d.el.querySelector('[data-yes]').onclick = async () => {
+    const actions = [...list.querySelectorAll('.qa-row')].map((r) => ({ id: r.dataset.id || undefined, name: r.querySelector('.qa-name').value, command: r.querySelector('.qa-cmd').value }));
+    const r = await request(hostId, { setQuickActions: { projectId, actions } });
+    toast(r.ok ? 'Acciones guardadas' : r.error);
+    if (r.ok) d.close();
+  };
+}
+
+async function runQuickAction(hostId, threadId, qa) {
+  const d = openDialog({ title: qa.name, wide: true, body: `<p class="note"><code>${esc(qa.command)}</code></p><pre class="out tall" data-out>Ejecutando…</pre>
+    <div class="actions end"><span class="note grow" data-state><span class="spinner"></span></span><button class="btn" data-again disabled>Repetir</button><button class="btn primary" data-send disabled>Enviar al agente</button></div>` });
+  const run = async () => {
+    d.el.querySelector('[data-out]').textContent = 'Ejecutando…';
+    d.el.querySelector('[data-state]').innerHTML = '<span class="spinner"></span>';
+    for (const b of d.el.querySelectorAll('[data-again], [data-send]')) b.disabled = true;
+    const r = await request(hostId, { runQuickAction: { threadId, actionId: qa.id } }, 11 * 60_000);
+    const out = r.ok ? r.output || '(sin salida)' : r.error;
+    d.el.querySelector('[data-out]').textContent = out;
+    d.el.querySelector('[data-state]').textContent = r.ok ? (r.code === 0 ? 'Terminó bien' : `Falló (${r.code})`) : 'Error';
+    d.el.querySelector('[data-state]').className = `note grow ${r.ok && r.code === 0 ? 'ok' : 'bad'}`;
+    for (const b of d.el.querySelectorAll('[data-again], [data-send]')) b.disabled = false;
+    d.el.querySelector('[data-send]').onclick = () => {
+      const tail = out.length > 12_000 ? `…\n${out.slice(-12_000)}` : out;
+      sendTo(hostId, Client.send(threadId, `Salida de «${qa.name}» (\`${qa.command}\`, ${r.ok && r.code === 0 ? 'terminó bien' : `código ${r.code ?? '?'}`}):\n\n\`\`\`\n${tail}\n\`\`\``));
+      toast('Enviado al agente');
+      d.close();
+    };
+  };
+  d.el.querySelector('[data-again]').onclick = run;
+  run();
+}
+
+// MARK: - Subscriptions
+
+function accountDialog(hostId, accountId) {
+  const snap = snapshotOf(hostId);
+  const def = accountId ? snap?.hostSettings?.accounts?.find((x) => x.id === accountId) : null;
+  const providers = snap?.hostProviders ?? { api: [], acp: [] };
+  const choices = [['claude', 'Claude (otra cuenta)'], ['codex', 'Codex / ChatGPT (otra cuenta)'],
+    ...providers.api.map((p) => [`api:${p.id}`, `${p.name} (API key, pago por uso)`]),
+    ...providers.acp.map((p) => [`acp:${p.id}`, `${p.name} (agente ACP)`])];
+  const kindOf = (v) => ({ type: v.split(':')[0], preset: v.split(':')[1] });
+  const current = def ? `${def.type}${def.preset ? `:${def.preset}` : ''}` : 'claude';
+  const d = openDialog({ title: def ? `Editar ${def.name}` : 'Añadir suscripción', body: `
+    ${def ? '' : `<label class="field"><span>Tipo</span><select data-kind>${choices.map(([v, l]) => `<option value="${v}"${v === current ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select></label>`}
+    <label class="field"><span>Nombre</span><input type="text" data-f="name" value="${esc(def?.name ?? '')}" placeholder="Por defecto, el del proveedor"></label>
+    <div data-fields></div>
+    <div class="actions end"><button class="btn" data-no>Cancelar</button><button class="btn primary" data-yes>${def ? 'Guardar' : 'Añadir'}</button></div>` });
+  const fields = () => {
+    const { type, preset } = kindOf(def ? current : d.el.querySelector('[data-kind]').value);
+    const api = providers.api.find((p) => p.id === preset);
+    let html = '';
+    if (type === 'claude' || type === 'codex') html = '<p class="note">Una cuenta más, con su propia carpeta de sesión en el host. Después, «Iniciar sesión».</p>';
+    if (type === 'api') {
+      html = `<label class="field"><span>API key${def?.hasKey ? ' (guardada: déjala vacía para no cambiarla)' : ''}</span><input type="password" data-f="apiKey" autocomplete="off" placeholder="${def?.hasKey ? '••••••••' : 'sk-…'}"></label>`
+        + (api?.keyURL ? `<p class="note">Consíguela en <a href="${esc(api.keyURL)}" target="_blank" rel="noopener">${esc(api.keyURL)}</a>. Se guarda en el host y solo se envía a la API del proveedor.</p>` : '');
+      if (preset === 'custom') {
+        html += `<label class="field"><span>URL de la API (compatible con Anthropic)</span><input type="text" data-f="baseURL" value="${esc(def?.baseURL ?? '')}" placeholder="https://…/anthropic"></label>
+          <label class="field"><span>Modelos (separados por comas)</span><input type="text" data-f="models" value="${esc(def?.models?.join(', ') ?? '')}"></label>
+          <div class="row2"><label class="field"><span>Modelo principal</span><input type="text" data-f="main" value="${esc(def?.main ?? '')}"></label><label class="field"><span>Modelo rápido</span><input type="text" data-f="fast" value="${esc(def?.fast ?? '')}"></label></div>`;
+      }
+    }
+    if (type === 'acp') {
+      html = preset === 'custom'
+        ? `<label class="field"><span>Comando</span><input type="text" data-f="command" value="${esc(def?.command ?? '')}" placeholder="ruta al ejecutable"></label>
+           <label class="field"><span>Argumentos para ACP</span><input type="text" data-f="args" value="${esc(def?.args?.join(' ') ?? '')}" placeholder="--acp"></label>`
+        : `<p class="note">${preset === 'gemini' ? 'Usa Gemini CLI (`gemini`) instalado en el host; inicia sesión abriéndolo una vez en una terminal.' : 'Usa la CLI del agente instalada en el host; después, «Iniciar sesión».'}</p>`;
+    }
+    d.el.querySelector('[data-fields]').innerHTML = html;
+  };
+  d.el.querySelector('[data-kind]')?.addEventListener('change', fields);
+  fields();
+  d.el.querySelector('[data-no]').onclick = d.close;
+  d.el.querySelector('[data-yes]').onclick = async () => {
+    const account = {};
+    for (const input of d.el.querySelectorAll('[data-f]')) if (input.value.trim() || input.dataset.f !== 'apiKey') account[input.dataset.f] = input.value.trim();
+    if (!account.name) delete account.name;
+    let r;
+    if (def) r = await request(hostId, { updateAccount: { accountId, account } });
+    else {
+      const { type, preset } = kindOf(d.el.querySelector('[data-kind]').value);
+      r = await request(hostId, { addAccount: { account: { ...account, type, preset } } });
+    }
+    toast(r.ok ? (def ? 'Suscripción guardada' : 'Suscripción añadida') : r.error);
+    if (r.ok) d.close();
+  };
+}
+
+async function removeAccount(hostId, accountId) {
+  const a = accountOf(hostId, accountId);
+  if (!await confirmDialog({ title: `Quitar ${a?.name ?? 'la suscripción'}`, text: 'Deja de usarse en este host; los hilos que la usaban pasan a otra. Su carpeta de sesión se conserva en el host.', confirm: 'Quitar', danger: true })) return;
+  const r = await request(hostId, { removeAccount: { accountId } });
+  toast(r.ok ? 'Suscripción quitada' : r.error);
 }
 
 // Everything above is defined: start.

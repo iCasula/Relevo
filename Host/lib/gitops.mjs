@@ -2,6 +2,7 @@
 // commit and push, and the work state an agent receives in a handoff. Plain `git` from PATH.
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 
@@ -133,4 +134,142 @@ export function workState(cwd) {
 
 export function initRepo(cwd) {
   return git(cwd, ['init']).ok;
+}
+
+// MARK: - Turn snapshots (the Mac's «Restaurar a antes de este turno»)
+
+function gitEnv(cwd, args, env, timeout = 60_000) {
+  const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout, maxBuffer: 64 << 20, windowsHide: true, env: { ...process.env, ...env } });
+  return { ok: r.status === 0, out: r.stdout ?? '', err: (r.stderr ?? '') || (r.error?.message ?? '') };
+}
+
+/** A throwaway index, seeded from the real one so unchanged files aren't hashed again. */
+function withTempIndex(cwd, fn) {
+  const real = path.resolve(cwd, git(cwd, ['rev-parse', '--git-path', 'index']).out.trim() || '.git/index');
+  const tmp = path.join(os.tmpdir(), `relevo-index-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+  try {
+    try { fs.copyFileSync(real, tmp); } catch {}
+    return fn({ GIT_INDEX_FILE: tmp });
+  } finally {
+    fs.rmSync(tmp, { force: true });
+  }
+}
+
+/**
+ * The working tree as a git tree object (tracked and new files; ignored ones left out), without touching
+ * the real index, HEAD or any branch. Returns the tree id, or null outside a repository.
+ */
+export function snapshot(cwd) {
+  if (!cwd || !isRepo(cwd)) return null;
+  return withTempIndex(cwd, (env) => {
+    if (!gitEnv(cwd, ['add', '-A', '--', '.'], env).ok) return null;
+    const tree = gitEnv(cwd, ['write-tree'], env);
+    return tree.ok ? tree.out.trim() : null;
+  });
+}
+
+/** Puts the working tree back as it was in `tree`: files changed since are rewritten, new ones removed. */
+export function restore(cwd, tree) {
+  if (!isRepo(cwd)) throw new Error('Esta carpeta no es un repositorio git');
+  if (!git(cwd, ['cat-file', '-t', tree]).ok) throw new Error('La instantánea ya no existe en el repositorio');
+  const now = new Set(git(cwd, ['ls-files', '-co', '--exclude-standard', '-z']).out.split('\0').filter(Boolean));
+  const then = new Set(git(cwd, ['ls-tree', '-r', '-z', '--name-only', tree]).out.split('\0').filter(Boolean));
+  for (const f of now) if (!then.has(f)) fs.rmSync(path.join(cwd, f), { force: true });
+  withTempIndex(cwd, (env) => {
+    const read = gitEnv(cwd, ['read-tree', tree], env);
+    if (!read.ok) throw new Error(read.err);
+    const out = gitEnv(cwd, ['checkout-index', '-a', '-f'], env);
+    if (!out.ok) throw new Error(out.err);
+  });
+  return { removed: [...now].filter((f) => !then.has(f)).length };
+}
+
+/** What changed between two snapshots (or a snapshot and the working tree now). */
+export function changesBetween(cwd, before, after) {
+  const target = after ?? snapshot(cwd);
+  if (!target) return { files: [], diff: '' };
+  const files = [];
+  for (const line of git(cwd, ['diff', '--numstat', before, target]).out.split('\n')) {
+    const m = /^(-|\d+)\t(-|\d+)\t(.+)$/.exec(line);
+    if (m) files.push({ path: m[3], added: m[1] === '-' ? 0 : Number(m[1]), removed: m[2] === '-' ? 0 : Number(m[2]), binary: m[1] === '-' });
+  }
+  let out = git(cwd, ['diff', '--no-color', before, target]).out;
+  if (out.length > MAX_DIFF) out = `${out.slice(0, MAX_DIFF)}\n… (diff recortado)`;
+  return { files, diff: out };
+}
+
+// MARK: - Worktrees
+
+export const currentBranch = (cwd) => git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD']).out.trim() || null;
+
+/** A new worktree on its own branch from the repository's current commit (the Mac's «hilo en un worktree»). */
+export function addWorktree(repo, dir, branch) {
+  if (!isRepo(repo)) throw new Error('El proyecto no es un repositorio git');
+  if (!git(repo, ['rev-parse', '--verify', 'HEAD']).ok) throw new Error('El repositorio aún no tiene ningún commit');
+  const base = currentBranch(repo);
+  fs.mkdirSync(path.dirname(dir), { recursive: true });
+  const r = git(repo, ['worktree', 'add', '-b', branch, dir, 'HEAD']);
+  if (!r.ok) throw new Error(r.err.trim());
+  return { path: dir, branch, base, repo };
+}
+
+/** Commits what the worktree has and merges its branch into the base branch of the main folder. */
+export async function mergeWorktree(wt, message) {
+  if (status(wt.path).files.length) {
+    const c = await commit(wt.path, { message: message || `Cambios de ${wt.branch}`, push: false });
+    if (!c.ok) throw new Error(c.output);
+  }
+  const head = currentBranch(wt.repo);
+  if (head !== wt.base) throw new Error(`La carpeta principal está en «${head}», no en «${wt.base}»: cámbiala de rama antes de fusionar`);
+  const m = await gitAsync(wt.repo, ['merge', '--no-ff', '--no-edit', wt.branch]);
+  if (!m.ok) {
+    git(wt.repo, ['merge', '--abort']);
+    throw new Error(`No se ha podido fusionar (conflictos o cambios sin commit en la carpeta principal):\n${m.out}`);
+  }
+  return m.out;
+}
+
+export function removeWorktree(wt, deleteBranch) {
+  const r = git(wt.repo, ['worktree', 'remove', '--force', wt.path]);
+  if (!r.ok && fs.existsSync(wt.path)) throw new Error(r.err.trim());
+  git(wt.repo, ['worktree', 'prune']);
+  if (deleteBranch) git(wt.repo, ['branch', '-D', wt.branch]);
+}
+
+// MARK: - Pull requests (GitHub CLI)
+
+function gh(cwd, args, timeout = 60_000) {
+  return new Promise((resolve) => {
+    const p = spawn('gh', args, { cwd, windowsHide: true, env: { ...process.env, GH_PROMPT_DISABLED: '1' } });
+    let out = '', err = '';
+    p.stdout.on('data', (d) => { out += d; });
+    p.stderr.on('data', (d) => { err += d; });
+    const timer = setTimeout(() => p.kill(), timeout);
+    p.on('error', () => { clearTimeout(timer); resolve({ ok: false, out: '', err: 'No encuentro GitHub CLI (gh) en el host' }); });
+    p.on('close', (code) => { clearTimeout(timer); resolve({ ok: code === 0, out: out.trim(), err: err.trim() }); });
+  });
+}
+
+/** The pull request of the current branch: state, review and checks; null when there's none. */
+export async function pullRequest(cwd) {
+  const r = await gh(cwd, ['pr', 'view', '--json', 'number,title,state,url,isDraft,reviewDecision,statusCheckRollup']);
+  if (!r.ok) {
+    if (/no pull requests found|no open pull requests/i.test(r.err)) return null;
+    throw new Error(r.err || 'gh no ha respondido');
+  }
+  const pr = JSON.parse(r.out);
+  const checks = { passed: 0, failed: 0, pending: 0 };
+  for (const c of pr.statusCheckRollup ?? []) {
+    const v = String(c.conclusion || c.state || c.status || '').toUpperCase();
+    if (['SUCCESS', 'NEUTRAL', 'SKIPPED'].includes(v)) checks.passed++;
+    else if (['FAILURE', 'ERROR', 'CANCELLED', 'TIMED_OUT', 'ACTION_REQUIRED'].includes(v)) checks.failed++;
+    else checks.pending++;
+  }
+  return { number: pr.number, title: pr.title, state: pr.state, url: pr.url, draft: pr.isDraft, review: pr.reviewDecision || null, checks };
+}
+
+export async function createPullRequest(cwd) {
+  const r = await gh(cwd, ['pr', 'create', '--fill'], 120_000);
+  if (!r.ok) throw new Error(r.err || r.out);
+  return r.out.split('\n').find((l) => l.startsWith('http')) ?? r.out;
 }

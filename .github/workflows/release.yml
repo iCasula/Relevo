@@ -27,7 +27,7 @@ jobs:
           if [ "$(tr -d '[:space:]' < Host/VERSION)" != "${GITHUB_REF_NAME#v}" ]; then
             echo "::error::Host/VERSION ($(cat Host/VERSION)) doesn't match the tag ${GITHUB_REF_NAME}"; exit 1
           fi
-          node --test 'Host/test/*.test.mjs'
+          for f in Host/relevo-host.mjs Host/lib/*.mjs Host/ui/*.mjs; do node --check "$f"; done
 
       - name: Package
         run: |

@@ -24,13 +24,13 @@ function run(bin, args, { env, cwd, input }) {
 }
 
 /** The first signed-in account able to answer: Claude preferred (Haiku is cheap and quick). */
-export async function quickCompletion(accounts, prompt, { env, cwd, fake }) {
+export async function quickCompletion(accounts, prompt, { cwd, fake }) {
   if (fake) return prompt.includes('commit') ? 'Actualiza los ficheros del proyecto' : 'Título de prueba';
   const usable = accounts.filter((a) => a.status?.loggedIn !== false);
   const claude = usable.find((a) => a.provider === 'claude');
-  if (claude) return run(claude.bin, ['-p', '--model', 'haiku', '--output-format', 'text'], { env, cwd, input: prompt });
+  if (claude) return run(claude.bin, ['-p', '--model', 'haiku', '--output-format', 'text'], { env: claude.env, cwd, input: prompt });
   const codex = usable.find((a) => a.provider === 'codex');
-  if (codex) return run(codex.bin, ['exec', '--skip-git-repo-check', '--sandbox', 'read-only', prompt], { env, cwd });
+  if (codex) return run(codex.bin, ['exec', '--skip-git-repo-check', '--sandbox', 'read-only', prompt], { env: codex.env, cwd });
   throw new Error('No hay ninguna suscripción con sesión para el modelo auxiliar');
 }
 

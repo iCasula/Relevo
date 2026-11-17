@@ -28,9 +28,21 @@ What it does today:
   thread mentions, token and cost statistics, older history on demand, and signing in to each agent from the
   apps.
 
-Not yet: other providers (Gemini, Kimi…), several accounts per provider, worktrees, «Relevo sugiere», Live
-Activity push with the app closed and publishing Bonjour (the iPhone connects through the addresses in the
-pairing link, which also works through a VPN).
+- Subscriptions, several per provider, each with its own sign-in folder: Claude and Codex accounts;
+  pay-per-use APIs compatible with Anthropic driven through Claude Code (Anthropic API, DeepSeek with its
+  balance, Z.ai GLM with its plan quota, or any other URL); and ACP agents (Kimi Code, Gemini CLI, or any
+  command). Added, edited and removed from the apps; keys stay on the host.
+- Turns: each turn's changes (a git snapshot before and after, without touching the index or branches),
+  going back to before a turn, and undoing that.
+- Worktrees: a thread on its own branch and folder, merged back into the base branch, or removed.
+- Pull requests with GitHub CLI (`gh`): state, review and checks of the branch's PR, and creating it.
+- «Relevo sugiere» (smaller than the Mac's): a subscription and model for the request being typed, from the
+  size of the task and the quota left.
+- Quick actions per project (a command, its output, and sending it to the agent), and images pasted or
+  dropped in the composer.
+
+Not yet: Antigravity, window capture, the MCP server, Live Activity push with the app closed and publishing
+Bonjour (the iPhone connects through the addresses in the pairing link, which also works through a VPN).
 
 ## Requirements
 
@@ -164,10 +176,6 @@ is installed.
   permissions; git detects both by itself.
 
 ## Testing
-
-`node --test 'Host/test/*.test.mjs'` runs the unit tests and an end-to-end run of the whole host with the echo
-agent over TLS-PSK (a turn, a permission, a relay when the quota runs out, the apps' requests, the desktop
-page's protection). CI runs it on Linux and Windows (`.github/workflows/test.yml`).
 
 `RELEVO_FAKE_AGENT=1` replaces the agents with an echo agent that also asks for a permission when the message says
 "permiso", asks a question when it starts with "pregunta" and runs out of quota when it starts with "agota la
