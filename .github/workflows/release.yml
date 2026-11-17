@@ -28,6 +28,7 @@ jobs:
             echo "::error::Host/VERSION ($(cat Host/VERSION)) doesn't match the tag ${GITHUB_REF_NAME}"; exit 1
           fi
           for f in Host/relevo-host.mjs Host/lib/*.mjs Host/ui/*.mjs; do node --check "$f"; done
+          node --test 'Host/test/*.test.mjs'
 
       - name: Package
         run: |

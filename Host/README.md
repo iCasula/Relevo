@@ -29,9 +29,8 @@ What it does today:
   apps.
 
 - Subscriptions, several per provider, each with its own sign-in folder: Claude and Codex accounts;
-  pay-per-use APIs compatible with Anthropic driven through Claude Code (Anthropic API, DeepSeek with its
-  balance, Z.ai GLM with its plan quota, or any other URL); and ACP agents (Kimi Code, Gemini CLI, or any
-  command). Added, edited and removed from the apps; keys stay on the host.
+  pay-per-use APIs compatible with Anthropic driven through Claude Code (DeepSeek with its balance, the
+  Anthropic API, or any other URL); and ACP agents (Gemini CLI, or any command). Added, edited and removed from the apps; keys stay on the host.
 - Turns: each turn's changes (a git snapshot before and after, without touching the index or branches),
   going back to before a turn, and undoing that.
 - Worktrees: a thread on its own branch and folder, merged back into the base branch, or removed.
@@ -176,6 +175,9 @@ is installed.
   permissions; git detects both by itself.
 
 ## Testing
+
+`node --test 'Host/test/*.test.mjs'`: the handoff, a manual switch between agents and the automatic relay when
+the quota runs out, on the whole host with the echo agent. Releases run it before publishing.
 
 `RELEVO_FAKE_AGENT=1` replaces the agents with an echo agent that also asks for a permission when the message says
 "permiso", asks a question when it starts with "pregunta" and runs out of quota when it starts with "agota la

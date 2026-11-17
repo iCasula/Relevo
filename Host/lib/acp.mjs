@@ -1,5 +1,5 @@
-// Agent Client Protocol (JSON-RPC 2.0 over stdio), like ACPAgent.swift on the Mac: any ACP agent — Kimi Code
-// (`kimi acp`), Gemini CLI (`gemini --experimental-acp`), others — with the same events as ClaudeSession.
+// Agent Client Protocol (JSON-RPC 2.0 over stdio), like ACPAgent.swift on the Mac: any ACP agent — Gemini CLI
+// (`gemini --experimental-acp`) or another — with the same events as ClaudeSession.
 
 import { EventEmitter } from 'node:events';
 import readline from 'node:readline';

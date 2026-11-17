@@ -656,6 +656,8 @@ export class Host {
       return a;
     }).filter(Boolean);
     this.accountsById = new Map(this.accounts.map((a) => [a.id, a]));
+    // Subscriptions of providers Relevo no longer offers go away.
+    this.state.accountList = this.state.accountList.filter((d) => this.accountsById.has(d.id));
   }
 
   /** What the apps need to show and edit each subscription (never the key itself). */

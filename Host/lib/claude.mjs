@@ -413,11 +413,12 @@ export class FakeSession extends EventEmitter {
     if (!this.resumeId) { this.resumeId = `fake-${Date.now()}`; this.emit('session', this.resumeId); }
     const finish = () => {
       const reply = `Eco (${this.model}, ${this.mode}): ${text}`;
+      const step = Math.max(8, Math.ceil(reply.length / 20)); // long prompts (handoffs) stream in ~20 chunks too
       let i = 0;
       const tick = setInterval(() => {
         if (!this.turnActive) { clearInterval(tick); return; }
-        this.emit('textDelta', `t${turn}`, reply.slice(i, i + 8));
-        i += 8;
+        this.emit('textDelta', `t${turn}`, reply.slice(i, i + step));
+        i += step;
         if (i >= reply.length) {
           clearInterval(tick);
           this.turnActive = false;

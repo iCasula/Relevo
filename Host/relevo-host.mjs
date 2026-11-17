@@ -56,7 +56,7 @@ function config() {
   };
   const bins = {
     claude: cli('claude', env.RELEVO_CLAUDE), codex: cli('codex', env.RELEVO_CODEX),
-    kimi: cli('kimi', env.RELEVO_KIMI), gemini: cli('gemini', env.RELEVO_GEMINI),
+    gemini: cli('gemini', env.RELEVO_GEMINI),
   };
   const c = {
     dataDir,

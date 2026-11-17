@@ -1,6 +1,6 @@
 // Subscriptions this host can run, several per provider (each with its own sign-in folder), as on the Mac:
 // Claude and Codex with their CLI logins; pay-per-use APIs compatible with Anthropic driven through Claude
-// Code (Anthropic, DeepSeek, Z.ai GLM, or any other); and ACP agents (Kimi Code, Gemini CLI, or any other).
+// Code (DeepSeek, Anthropic, or any other); and ACP agents (Gemini CLI, or any other).
 
 import path from 'node:path';
 import { ClaudeSession, probe as claudeProbe } from './claude.mjs';
@@ -11,25 +11,20 @@ const CLAUDE_MODELS = [{ id: 'default', name: 'Predeterminado' }, { id: 'opus', 
 
 /** Anthropic-compatible APIs (Claude Code with ANTHROPIC_BASE_URL and a key), like AnthropicAPIProvider.swift. */
 export const API_PRESETS = {
-  anthropic: {
-    name: 'Anthropic API', symbol: 'key', tint: '#C96442', baseURL: null, keyURL: 'https://console.anthropic.com/settings/keys',
-    models: [{ id: 'opus', name: 'Opus' }, { id: 'sonnet', name: 'Sonnet' }, { id: 'haiku', name: 'Haiku' }], main: 'sonnet', fast: 'haiku',
-  },
   deepseek: {
     name: 'DeepSeek', symbol: 'fish', tint: '#4D6BFE', baseURL: 'https://api.deepseek.com/anthropic', apiRoot: 'https://api.deepseek.com',
     keyURL: 'https://platform.deepseek.com/api_keys', balance: 'deepseek',
     models: [{ id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro' }, { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' }], main: 'deepseek-v4-pro', fast: 'deepseek-v4-flash',
   },
-  zai: {
-    name: 'Z.ai · GLM', symbol: 'bolt', tint: '#8561F2', baseURL: 'https://api.z.ai/api/anthropic', keyURL: 'https://z.ai/manage-apikey/apikey-list', quota: 'zai',
-    models: [{ id: 'GLM-5.3', name: 'GLM-5.3' }, { id: 'GLM-5.3-Flash', name: 'GLM-5.3-Flash' }, { id: 'GLM-5.2', name: 'GLM-5.2' }], main: 'GLM-5.3', fast: 'GLM-5.3-Flash',
+  anthropic: {
+    name: 'Anthropic API', symbol: 'key', tint: '#C96442', baseURL: null, keyURL: 'https://console.anthropic.com/settings/keys',
+    models: [{ id: 'opus', name: 'Opus' }, { id: 'sonnet', name: 'Sonnet' }, { id: 'haiku', name: 'Haiku' }], main: 'sonnet', fast: 'haiku',
   },
   custom: { name: 'API compatible con Anthropic', symbol: 'cpu', tint: '#5B6CFF', models: [], main: null, fast: null },
 };
 
-/** ACP agents, like the Mac's Kimi (ACPAgent.swift). */
+/** ACP agents (ACPAgent.swift on the Mac). */
 export const ACP_PRESETS = {
-  kimi: { name: 'Kimi Code', symbol: 'moon', tint: '#1A1A1F', bin: 'kimi', args: ['acp'], homeVar: 'KIMI_CODE_HOME', login: ['login'] },
   gemini: { name: 'Gemini CLI', symbol: 'sparkles', tint: '#4285F4', bin: 'gemini', args: ['--experimental-acp'], homeVar: null, login: null },
   custom: { name: 'Agente ACP', symbol: 'cpu', tint: '#6B7280', bin: null, args: [], homeVar: null, login: null },
 };
@@ -52,6 +47,7 @@ export function buildAccount(def, { bins, agentEnv, dataDir }) {
       return { ...base, kind: 'codex', agentName: 'Codex', symbol: 'hexagon', tint: '#12A380', Session: CodexSession, probe: codexProbe,
         bin: bins.codex, env: { ...agentEnv, CODEX_HOME: home }, home, models: [{ id: 'default', name: 'Predeterminado' }], loginArgs: ['login', '--device-auth'] };
     case 'api': {
+      if (def.preset && !API_PRESETS[def.preset]) return null; // a provider Relevo no longer offers
       const p = API_PRESETS[def.preset] ?? API_PRESETS.custom;
       const models = def.models?.length ? def.models : p.models;
       const main = def.main ?? p.main ?? models[0]?.id;
@@ -69,6 +65,7 @@ export function buildAccount(def, { bins, agentEnv, dataDir }) {
         probe: () => apiProbe(def, p), bin: bins.claude, env, home, usesAPIKey: true, models: [{ id: 'default', name: `Predeterminado (${models.find((m) => m.id === main)?.name ?? main})` }, ...models] };
     }
     case 'acp': {
+      if (def.preset && !ACP_PRESETS[def.preset]) return null;
       const p = ACP_PRESETS[def.preset] ?? ACP_PRESETS.custom;
       const env = { ...agentEnv };
       if (p.homeVar) env[p.homeVar] = home;
@@ -81,7 +78,7 @@ export function buildAccount(def, { bins, agentEnv, dataDir }) {
   }
 }
 
-/** A pay-per-use API: signed in when it has a key; balance (DeepSeek) or plan quota (Z.ai) when available. */
+/** A pay-per-use API: signed in when it has a key; its balance when the provider tells (DeepSeek). */
 async function apiProbe(def, preset) {
   if (!def.apiKey) return { loggedIn: false, windows: [], error: 'Falta la API key: Ajustes › Suscripciones' };
   const status = { loggedIn: true, windows: [], note: 'Pago por uso', error: null };
@@ -91,17 +88,6 @@ async function apiProbe(def, preset) {
       if (r.status === 401) return { loggedIn: false, windows: [], error: 'La API key no es válida' };
       const b = (await r.json()).balance_infos?.[0];
       if (b) status.note = `Saldo: ${Number(b.total_balance).toFixed(2)} ${b.currency}`;
-    } else if (preset.quota === 'zai') {
-      const r = await fetch('https://api.z.ai/api/monitor/usage/quota/limit', { headers: { Authorization: `Bearer ${def.apiKey}`, 'Accept-Language': 'es-ES,en' }, signal: AbortSignal.timeout(15_000) });
-      if (r.status === 401) return { loggedIn: false, windows: [], error: 'La API key no es válida' };
-      const data = (await r.json()).data ?? {};
-      status.plan = data.level ? data.level[0].toUpperCase() + data.level.slice(1) : null;
-      status.windows = (data.limits ?? []).filter((l) => typeof l.percentage === 'number').map((l, i) => {
-        const unit = { 3: 'h', 4: 'd', 6: 'sem' }[l.unit] ?? '';
-        const label = l.unit === 4 && (l.number ?? 1) === 1 ? 'Día' : l.unit === 6 && (l.number ?? 1) === 1 ? 'Semana' : `${l.number ?? 1} ${unit}`.trim();
-        return { id: `zai${i}`, label, percent: l.percentage, resetsAt: l.nextResetTime ? l.nextResetTime / 1000 : null };
-      });
-      if (status.windows.length) status.note = null;
     }
   } catch (e) {
     status.error = `No he podido consultar el saldo: ${e.message}`;
