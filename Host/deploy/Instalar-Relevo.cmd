@@ -38,11 +38,16 @@ try {
     }
   }
 
-  # The newest signed release (vX.Y.Z with manifest.sig, as the updater requires).
-  $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases?per_page=30" -Headers @{ 'User-Agent' = 'relevo-installer' }
-  $ref = $releases | Where-Object { -not $_.draft -and -not $_.prerelease -and $_.tag_name -match '^v?\d+\.\d+\.\d+$' -and ($_.assets | Where-Object { $_.name -eq 'manifest.sig' }) } |
-    ForEach-Object { $_.tag_name } | Sort-Object { [version]($_ -replace '^v', '') } -Descending | Select-Object -First 1
-  if (-not $ref) { throw 'No hay ninguna version publicada y firmada todavia.' }
+  # The newest release, read from its own files (not the GitHub API, which limits requests per IP); it must be
+  # signed (manifest.sig), as the updater requires.
+  function Get-Text([string]$u) {
+    $r = Invoke-WebRequest -Uri $u -UseBasicParsing -Headers @{ 'User-Agent' = 'relevo-installer' }
+    if ($r.Content -is [byte[]]) { [Text.Encoding]::UTF8.GetString($r.Content) } else { $r.Content }
+  }
+  $manifest = Get-Text "https://github.com/$repo/releases/latest/download/manifest.json" | ConvertFrom-Json
+  try { $null = Get-Text "https://github.com/$repo/releases/latest/download/manifest.sig" } catch { throw 'La ultima version aun no esta firmada: prueba de nuevo en unos minutos.' }
+  $ref = $manifest.tag
+  if ($ref -notmatch '^v?\d+\.\d+\.\d+$') { throw 'No encuentro ninguna version publicada.' }
   $url = "https://codeload.github.com/$repo/zip/refs/tags/$ref"
   Write-Host "Descargando Relevo $ref..."
   $work = Join-Path $env:TEMP ('relevo-install-' + [guid]::NewGuid().ToString('N'))

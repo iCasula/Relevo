@@ -20,7 +20,6 @@ export const PENDING_MARKER = '.update-pending';
 
 const parse = (v) => TAG.exec(String(v ?? '').trim())?.slice(1).map(Number) ?? null;
 const sha256 = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
-const headers = { Accept: 'application/vnd.github+json', 'User-Agent': 'relevo-host' };
 
 /** >0 when `a` is newer than `b`; versions that aren't x.y.z sort before any that are. */
 export function compareVersions(a, b) {
@@ -44,20 +43,34 @@ export function verifyManifest(manifest, signature, publicKey = RELEASE_PUBLIC_K
   } catch { return false; }
 }
 
-/** The newest published, signed release (`vX.Y.Z` with its archive, manifest and signature), or null. */
-export async function latestRelease(repo = DEFAULT_REPO) {
-  const res = await fetch(`https://api.github.com/repos/${repo}/releases?per_page=30`, { headers, signal: AbortSignal.timeout(15_000) });
-  if (!res.ok) throw new Error(`GitHub: HTTP ${res.status}`);
-  const releases = (await res.json()).filter((r) => !r.draft && !r.prerelease && parse(r.tag_name)).filter((r) => {
-    const names = new Set(r.assets.map((a) => a.name));
-    const want = assetNames(r.tag_name);
-    return names.has(want.archive) && names.has(want.manifest) && names.has(want.signature);
-  });
-  return releases.sort((a, b) => compareVersions(b.tag_name, a.tag_name))[0] ?? null;
+// Release files come straight from github.com/<repo>/releases/…/download, not from the API: the API allows
+// 60 unauthenticated requests an hour per IP, which a few hosts behind one router (and a busy day) use up.
+const releaseURL = (repo, tag, name) => (tag
+  ? `https://github.com/${repo}/releases/download/${encodeURIComponent(tag)}/${name}`
+  : `https://github.com/${repo}/releases/latest/download/${name}`);
+
+/** A release file, or null when the release doesn't have it (404). */
+async function asset(url, timeout = 30_000) {
+  const res = await fetch(url, { headers: { 'User-Agent': 'relevo-host', Accept: 'application/octet-stream' }, signal: AbortSignal.timeout(timeout) });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`GitHub: HTTP ${res.status} (${url.split('/').pop()})`);
+  return Buffer.from(await res.arrayBuffer());
 }
 
-export async function latestTag(repo = DEFAULT_REPO) {
-  return (await latestRelease(repo))?.tag_name ?? null;
+/** The signed manifest of a release (`tag`, or the latest one): null if it has none or isn't signed yet. */
+async function signedManifest(repo, tag, publicKey) {
+  const [manifestBytes, signature] = await Promise.all([asset(releaseURL(repo, tag, 'manifest.json')), asset(releaseURL(repo, tag, 'manifest.sig'))]);
+  if (!manifestBytes || !signature) return null;
+  if (!verifyManifest(manifestBytes, signature.toString('utf8'), publicKey)) throw new Error(`La firma de ${tag ?? 'la última versión'} no es válida: no la instalo`);
+  const manifest = JSON.parse(manifestBytes.toString('utf8'));
+  if (tag && manifest.tag !== tag) throw new Error(`El manifiesto es de ${manifest.tag}, no de ${tag}`);
+  if (!parse(manifest.tag)) throw new Error('Manifiesto sin versión');
+  return manifest;
+}
+
+/** The newest published release, if it's signed (until it's signed, installed hosts don't see it). */
+export async function latestTag(repo = DEFAULT_REPO, publicKey = RELEASE_PUBLIC_KEY) {
+  return (await signedManifest(repo, null, publicKey))?.tag ?? null;
 }
 
 /** { current, latest, available, checkedAt } — `available` when a signed release is newer than what's installed. */
@@ -68,27 +81,14 @@ export async function checkForUpdate({ appDir, repo = DEFAULT_REPO }) {
   return { current, latest, available, checkedAt: Date.now() / 1000 };
 }
 
-async function download(url, timeout = 120_000) {
-  const res = await fetch(url, { headers: { 'User-Agent': 'relevo-host', Accept: 'application/octet-stream' }, signal: AbortSignal.timeout(timeout) });
-  if (!res.ok) throw new Error(`GitHub: HTTP ${res.status} (${url.split('/').pop()})`);
-  return Buffer.from(await res.arrayBuffer());
-}
-
 /** The program's files from a release, checked against its signed manifest: Map(relative path → bytes). */
 export async function fetchSignedRelease(tag, repo = DEFAULT_REPO, publicKey = RELEASE_PUBLIC_KEY) {
-  const res = await fetch(`https://api.github.com/repos/${repo}/releases/tags/${encodeURIComponent(tag)}`, { headers, signal: AbortSignal.timeout(15_000) });
-  if (!res.ok) throw new Error(`GitHub: no hay release ${tag} (HTTP ${res.status})`);
-  const release = await res.json();
-  const want = assetNames(release.tag_name);
-  const url = (name) => release.assets.find((a) => a.name === name)?.browser_download_url;
-  if (!url(want.signature) || !url(want.manifest) || !url(want.archive)) throw new Error(`La versión ${tag} no está firmada: no la instalo`);
-  const [manifestBytes, signature] = await Promise.all([download(url(want.manifest)), download(url(want.signature))]);
-  if (!verifyManifest(manifestBytes, signature.toString('utf8'), publicKey)) throw new Error(`La firma de ${tag} no es válida: no la instalo`);
-  const manifest = JSON.parse(manifestBytes.toString('utf8'));
-  if (manifest.tag !== release.tag_name) throw new Error(`El manifiesto es de ${manifest.tag}, no de ${release.tag_name}`);
-  const archive = await download(url(want.archive));
+  const manifest = await signedManifest(repo, tag, publicKey);
+  if (!manifest) throw new Error(`La versión ${tag} no está publicada o no está firmada: no la instalo`);
+  const archive = await asset(releaseURL(repo, tag, assetNames(tag).archive), 120_000);
+  if (!archive) throw new Error(`A la versión ${tag} le falta el paquete`);
   if (sha256(archive) !== manifest.archive) throw new Error('El paquete descargado no coincide con el manifiesto firmado');
-  return { files: filesFromArchive(archive, manifest), version: release.tag_name.replace(/^v/, '') };
+  return { files: filesFromArchive(archive, manifest), version: tag.replace(/^v/, '') };
 }
 
 /** Program files inside a release archive, each checked against the manifest; nothing missing, nothing extra. */
@@ -107,7 +107,8 @@ export function filesFromArchive(archive, manifest) {
 
 /** The development branch, unsigned: only on explicit request (`relevo-host update main`). */
 async function fetchBranch(branch, repo) {
-  const archive = await download(`https://codeload.github.com/${repo}/tar.gz/refs/heads/${encodeURIComponent(branch)}`);
+  const archive = await asset(`https://codeload.github.com/${repo}/tar.gz/refs/heads/${encodeURIComponent(branch)}`, 120_000);
+  if (!archive) throw new Error(`No existe la rama ${branch}`);
   const files = new Map();
   for (const [name, data] of untarGz(archive)) {
     const rel = ARCHIVE_FILE.exec(name)?.[1];
