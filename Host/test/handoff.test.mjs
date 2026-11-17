@@ -90,7 +90,7 @@ test('switching agent by hand: the next message goes to Codex with the thread as
   peer.send(Client.send(threadId, 'primer mensaje'));
   await next(finished(claude));
   peer.send(Client.select(threadId, codex.id, 'default'));
-  await next((m) => m.threadPatch?._0.upserts.some((i) => i.kind === 'notice' && /Relevo de Claude a Codex/.test(i.text)));
+  await next((m) => m.threadPatch?._0.upserts.some((i) => i.kind === 'notice' && /Relevo: Claude · .* → Codex/.test(i.text)));
   peer.send(Client.send(threadId, 'segundo mensaje'));
   const reply = (await next(finished(codex))).threadPatch._0.upserts.find((i) => i.kind === 'assistant');
   // The echo agent repeats its prompt: the handoff with the first exchange, then the new message.
@@ -100,7 +100,7 @@ test('switching agent by hand: the next message goes to Codex with the thread as
 test('out of quota: the thread relays on its own to the subscription with most quota left', async () => {
   const claude = account('claude'), codex = account('codex');
   peer.send(Client.select(threadId, claude.id, 'default'));
-  await next((m) => m.threadPatch?._0.upserts.some((i) => i.kind === 'notice' && /Relevo de Codex a Claude/.test(i.text)));
+  await next((m) => m.threadPatch?._0.upserts.some((i) => i.kind === 'notice' && /Relevo: Codex · .* → Claude/.test(i.text)));
   peer.send(Client.send(threadId, 'vuelvo a Claude'));
   await next(finished(claude)); // takes the handoff, so the next prompt starts with the request itself
   peer.send(Client.setLimitPlan(threadId, { mode: 'mostQuota', targets: [] }));
@@ -108,7 +108,7 @@ test('out of quota: the thread relays on its own to the subscription with most q
   const pending = await next((m) => m.threadPatch?._0.runtime.pendingRelay);
   assert.equal(pending.threadPatch._0.runtime.pendingRelay.accountId, codex.id);
   peer.send(Client.limitAction(threadId, 'relayNow'));
-  await next((m) => m.threadPatch?._0.upserts.some((i) => i.kind === 'notice' && /Relevo de Claude a Codex/.test(i.text)));
+  await next((m) => m.threadPatch?._0.upserts.some((i) => i.kind === 'notice' && /Relevo: Claude · .* → Codex/.test(i.text)));
   const reply = (await next(finished(codex))).threadPatch._0.upserts.find((i) => i.kind === 'assistant');
   assert.match(reply.text, /quedó sin terminar/, 'Codex is asked to carry on with the request that ran out');
 });

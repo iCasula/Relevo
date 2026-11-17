@@ -56,7 +56,7 @@ function config() {
   };
   const bins = {
     claude: cli('claude', env.RELEVO_CLAUDE), codex: cli('codex', env.RELEVO_CODEX),
-    gemini: cli('gemini', env.RELEVO_GEMINI),
+    gemini: cli('gemini', env.RELEVO_GEMINI), antigravity: cli('agy', env.RELEVO_AGY),
   };
   const c = {
     dataDir,
@@ -69,7 +69,7 @@ function config() {
     name: env.RELEVO_HOST_NAME ?? os.hostname(),
     port: Number(env.RELEVO_PORT ?? 47820),
     bins,
-    providers: (env.RELEVO_PROVIDERS ?? 'claude,codex').split(',').map((p) => p.trim())
+    providers: (env.RELEVO_PROVIDERS ?? 'claude,codex,antigravity').split(',').map((p) => p.trim())
       .filter((p) => PROVIDERS[p] && (bins[p] || env.RELEVO_FAKE_AGENT === '1'))
       .map((provider) => ({ provider, bin: bins[provider] ?? provider })),
     maxAgents: Number(env.RELEVO_MAX_AGENTS ?? 2),

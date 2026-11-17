@@ -9,23 +9,23 @@
   <link rel="stylesheet" href="app.css">
 </head>
 <body>
+  <div id="menubar">
+    <button class="app-name" data-menu="app">Relevo</button>
+    <button data-menu="file">Archivo</button>
+    <button data-menu="agents">Agentes</button>
+    <button data-menu="actions">Acciones</button>
+    <button data-menu="view">Visualización</button>
+  </div>
   <div id="app">
     <aside id="sidebar">
-      <div class="brand"><img src="icon.png" alt=""><span>Relevo</span></div>
-      <div class="search"><input type="search" id="filter" placeholder="Buscar hilos" autocomplete="off" spellcheck="false"></div>
-      <nav id="hosts" aria-label="Hosts e hilos"></nav>
-      <div id="update-slot"></div>
-      <footer class="side-foot">
-        <button class="side-link" data-view="limits">Límites</button>
-        <button class="side-link" data-view="usage">Consumo</button>
-        <button class="side-link" data-view="settings">Ajustes</button>
-        <button class="side-link" data-view="hosts">Hosts</button>
-      </footer>
+      <div class="side-top" id="side-top"></div>
+      <div class="side-list" id="side-list"></div>
+      <div class="limits" id="limits"></div>
+      <div class="resizer" id="resizer"></div>
     </aside>
-    <main id="main"></main>
+    <main id="detail"></main>
   </div>
   <div id="offline" hidden>Reconectando con el servicio de Relevo de este equipo…</div>
-  <div id="toast" role="status" aria-live="polite" hidden></div>
   <script type="module" src="app.mjs"></script>
 </body>
 </html>

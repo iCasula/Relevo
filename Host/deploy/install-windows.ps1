@@ -87,6 +87,7 @@ function Find-Cli([string]$cli) {
 }
 $claude = Find-Cli 'claude'
 $codex = Find-Cli 'codex'
+$agy = Find-Cli 'agy'
 # Claude Code runs its shell commands with Git Bash.
 $bash = $null
 $git = (Get-Command git -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1).Source
@@ -114,6 +115,7 @@ if (Test-Path $envFile) {
 # Paths found now fill what's missing; what you set by hand stays.
 if ($claude -and -not $settings.Contains('RELEVO_CLAUDE')) { $settings['RELEVO_CLAUDE'] = $claude }
 if ($codex -and -not $settings.Contains('RELEVO_CODEX')) { $settings['RELEVO_CODEX'] = $codex }
+if ($agy -and -not $settings.Contains('RELEVO_AGY')) { $settings['RELEVO_AGY'] = $agy }
 if ($bash -and -not $settings.Contains('CLAUDE_CODE_GIT_BASH_PATH')) { $settings['CLAUDE_CODE_GIT_BASH_PATH'] = $bash }
 # The desktop app's page, on 127.0.0.1 only (also added to installs from before it existed).
 if (-not $settings.Contains('RELEVO_UI_PORT')) { $settings['RELEVO_UI_PORT'] = '47821' }

@@ -28,7 +28,8 @@ What it does today:
   thread mentions, token and cost statistics, older history on demand, and signing in to each agent from the
   apps.
 
-- Subscriptions, several per provider, each with its own sign-in folder: Claude and Codex accounts;
+- Subscriptions, several per provider, each with its own sign-in folder: Claude, Codex and Google
+  Antigravity (`agy`, wrapped per turn like on the Mac) accounts;
   pay-per-use APIs compatible with Anthropic driven through Claude Code (DeepSeek with its balance, the
   Anthropic API, or any other URL); and ACP agents (Gemini CLI, or any command). Added, edited and removed from the apps; keys stay on the host.
 - Turns: each turn's changes (a git snapshot before and after, without touching the index or branches),
@@ -38,9 +39,12 @@ What it does today:
 - «Relevo sugiere» (smaller than the Mac's): a subscription and model for the request being typed, from the
   size of the task and the quota left.
 - Quick actions per project (a command, its output, and sending it to the agent), and images pasted or
-  dropped in the composer.
+  dropped in the composer (or anywhere in the window), copied from the transcript, and opened full size.
+- The desktop app is a clone of the Mac one: the same menus, sidebar, toolbar, composer, sheets (settings,
+  usage, diffs, commit, compare, traza, quick actions) and the subscriptions' limits always visible at the
+  bottom of the sidebar, in light and dark.
 
-Not yet: Antigravity, window capture, the MCP server, Live Activity push with the app closed and publishing
+Not yet: window capture, the MCP server, Live Activity push with the app closed and publishing
 Bonjour (the iPhone connects through the addresses in the pairing link, which also works through a VPN).
 
 ## Requirements

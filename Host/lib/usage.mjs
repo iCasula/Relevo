@@ -11,6 +11,7 @@ const dayKey = (t) => {
 export function usageReport(threads, accountsById, { days = 30 } = {}) {
   const since = days > 0 ? Date.now() / 1000 - days * DAY : 0;
   const byModel = new Map(), byDay = new Map(), byThread = new Map();
+  const heat = Array.from({ length: 7 }, () => Array.from({ length: 24 }, () => ({ tokens: 0, turns: 0, cost: 0 })));
   const total = { turns: 0, tokens: 0, cost: 0 };
   for (const t of threads) {
     for (const item of t.items) {
@@ -24,14 +25,24 @@ export function usageReport(threads, accountsById, { days = 30 } = {}) {
         e.turns++; e.tokens += u.tokens ?? 0; e.cost += cost;
         map.set(k, e);
       };
-      add(byModel, key, { accountId: account?.id ?? null, accountName: account?.name ?? 'Suscripción eliminada', model: item.model ?? 'default' });
-      add(byDay, dayKey(item.date), { day: dayKey(item.date) });
+      add(byModel, key, { accountId: account?.id ?? null, accountName: account?.name ?? 'Suscripción eliminada', model: item.model ?? 'default', kind: account?.kind ?? null });
+      add(byDay, dayKey(item.date), { day: dayKey(item.date), byProvider: {} });
+      const day = byDay.get(dayKey(item.date));
+      const kind = account?.kind ?? 'other';
+      const provider = kind.startsWith('api:') ? kind.slice(4) : kind.split(':')[0]; // claude, codex, gemini, deepseek…
+      day.byProvider[provider] = (day.byProvider[provider] ?? 0) + (u.tokens ?? 0);
+      day.costByProvider = day.costByProvider ?? {};
+      day.costByProvider[provider] = (day.costByProvider[provider] ?? 0) + cost;
+      const d = new Date(item.date * 1000);
+      const cell = heat[(d.getDay() + 6) % 7][d.getHours()]; // Monday first
+      cell.tokens += u.tokens ?? 0; cell.turns++; cell.cost += cost;
+      total.cacheTokens = (total.cacheTokens ?? 0) + (u.cacheShare ? (u.tokens ?? 0) * u.cacheShare : 0);
       add(byThread, t.id, { threadId: t.id, title: t.title });
       total.turns++; total.tokens += u.tokens ?? 0; total.cost += cost;
     }
   }
   return {
-    days, total,
+    days, total, heat,
     byModel: [...byModel.values()].sort((a, b) => b.tokens - a.tokens),
     byDay: [...byDay.values()].sort((a, b) => a.day.localeCompare(b.day)),
     byThread: [...byThread.values()].sort((a, b) => b.tokens - a.tokens).slice(0, 12),

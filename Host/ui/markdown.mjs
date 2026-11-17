@@ -48,7 +48,8 @@ export function markdown(src) {
       i++;
       while (i < lines.length && !new RegExp(`^\\s*${fence[1]}\\s*$`).test(lines[i])) body.push(lines[i++]);
       i++;
-      out.push(`<pre class="code"${lang ? ` data-lang="${esc(lang)}"` : ''}><code>${esc(body.join('\n'))}</code></pre>`);
+      const copy = '<button class="copy-code" data-copy-code title="Copiar"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h2"/></svg></button>';
+      out.push(`<pre class="code"${lang ? ` data-lang="${esc(lang)}"` : ''}>${copy}<code>${esc(body.join('\n'))}</code></pre>`);
       continue;
     }
     let m = HEADING.exec(line);

@@ -9,7 +9,7 @@ const ANSI = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07/g;
 const TIMEOUT_MS = 15 * 60_000;
 
 export class LoginSession extends EventEmitter {
-  constructor({ bin, args, env, cwd }) {
+  constructor({ bin, args, env, cwd, doneWhen }) {
     super();
     this.output = '';
     this.done = false;
@@ -26,6 +26,10 @@ export class LoginSession extends EventEmitter {
     this.proc.on('error', (e) => this._finish(false, e.message));
     this.proc.on('exit', (code) => this._finish(code === 0, code === 0 ? null : `El inicio de sesión terminó con código ${code}`));
     this.timer = setTimeout(() => { this.cancel(); }, TIMEOUT_MS);
+    if (doneWhen) {
+      const since = Date.now();
+      this.poll = setInterval(() => { if (doneWhen(since)) { killTree(this.proc); this._finish(true, null); } }, 1500);
+    }
   }
 
   input(text) {
@@ -42,6 +46,7 @@ export class LoginSession extends EventEmitter {
     if (this.done) return;
     this.done = true;
     clearTimeout(this.timer);
+    clearInterval(this.poll);
     this.emit('done', { ok, error });
   }
 }

@@ -6,6 +6,9 @@ import path from 'node:path';
 import { ClaudeSession, probe as claudeProbe } from './claude.mjs';
 import { CodexSession, codexProbe } from './codex.mjs';
 import { ACPSession, acpProbe } from './acp.mjs';
+import { AntigravitySession, antigravityProbe, antigravityEnv, tokenFile } from './antigravity.mjs';
+import fs from 'node:fs';
+import os from 'node:os';
 
 const CLAUDE_MODELS = [{ id: 'default', name: 'Predeterminado' }, { id: 'opus', name: 'Opus' }, { id: 'sonnet', name: 'Sonnet' }, { id: 'haiku', name: 'Haiku' }];
 
@@ -29,7 +32,8 @@ export const ACP_PRESETS = {
   custom: { name: 'Agente ACP', symbol: 'cpu', tint: '#6B7280', bin: null, args: [], homeVar: null, login: null },
 };
 
-export const TYPES = ['claude', 'codex', 'api', 'acp'];
+export const TYPES = ['claude', 'codex', 'antigravity', 'api', 'acp'];
+const GEMINI_MODELS = ['high', 'medium', 'low'].map((e) => ({ id: `gemini-3.8-flash-${e}`, name: `Gemini 3.8 Flash (${e[0].toUpperCase()}${e.slice(1)})`, efforts: ['low', 'medium', 'high'] }));
 
 /**
  * A runtime account from its stored definition: identity, how to launch it (binary, arguments,
@@ -46,6 +50,16 @@ export function buildAccount(def, { bins, agentEnv, dataDir }) {
     case 'codex':
       return { ...base, kind: 'codex', agentName: 'Codex', symbol: 'hexagon', tint: '#12A380', Session: CodexSession, probe: codexProbe,
         bin: bins.codex, env: { ...agentEnv, CODEX_HOME: home }, home, models: [{ id: 'default', name: 'Predeterminado' }], loginArgs: ['login', '--device-auth'] };
+    case 'antigravity': {
+      // The first Gemini account uses your own agy login; others get their own HOME (another Google login).
+      const agyHome = def.isolated ? home : os.homedir();
+      const started = () => { try { return fs.statSync(tokenFile(agyHome)).mtimeMs; } catch { return 0; } };
+      return { ...base, kind: 'gemini', agentName: 'Antigravity', symbol: 'sparkle', tint: '#4585F5', Session: AntigravitySession,
+        probe: (o) => antigravityProbe({ ...o, home: agyHome }), bin: bins.antigravity, env: antigravityEnv(agentEnv, home, !!def.isolated), home: agyHome,
+        models: [{ id: 'default', name: 'Predeterminado' }, ...GEMINI_MODELS], loginArgs: [],
+        // agy's sign-in is interactive and never exits on its own: it's done when the login file is written.
+        loginDone: (since) => started() > since };
+    }
     case 'api': {
       if (def.preset && !API_PRESETS[def.preset]) return null; // a provider Relevo no longer offers
       const p = API_PRESETS[def.preset] ?? API_PRESETS.custom;
