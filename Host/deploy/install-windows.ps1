@@ -15,9 +15,10 @@
   <Base>\app          the program (a few files)
   <Base>\data         state, transcripts, Claude Code config, Codex home, temp files, caches and logs\host.log
   <Base>\host.env     settings (written once; edit it and run the script again, or restart the task)
-  <Base>\relevo-host.cmd   `relevo-host pair | login | status | update | logs` (the folder goes in your PATH)
+  <Base>\relevo-host.cmd   `relevo-host pair | login | status | update | app | logs` (the folder goes in your PATH)
+  Relevo (Start menu and desktop)   the desktop app: this PC and every other paired host, in an Edge app window
 
-  -Uninstall removes the task, the firewall rule and the PATH entry; <Base> stays (delete it by hand).
+  -Uninstall removes the task, the firewall rule, the PATH entry and the shortcuts; <Base> stays (delete it by hand).
 #>
 [CmdletBinding()]
 param(
@@ -50,11 +51,14 @@ if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
   Start-Sleep -Seconds 6
 }
 
+$shortcuts = @([Environment]::GetFolderPath('Programs'), [Environment]::GetFolderPath('Desktop')) | ForEach-Object { Join-Path $_ 'Relevo.lnk' }
+
 if ($Uninstall) {
   Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+  $shortcuts | Where-Object { Test-Path $_ } | Remove-Item -Force
   Get-NetFirewallRule -DisplayName $TaskName -ErrorAction SilentlyContinue | Remove-NetFirewallRule
   Remove-FromUserPath $Base
-  Write-Host "Quitados la tarea, la regla del firewall y la entrada del PATH. Los datos siguen en $Base."
+  Write-Host "Quitados la tarea, la regla del firewall, la entrada del PATH y los accesos directos. Los datos siguen en $Base."
   return
 }
 
@@ -70,6 +74,8 @@ $data = Join-Path $Base 'data'
 New-Item -ItemType Directory -Force -Path $app, $data, $Projects | Out-Null
 Copy-Item (Join-Path $here 'relevo-host.mjs') $app -Force
 Copy-Item (Join-Path $here 'lib') $app -Recurse -Force
+Copy-Item (Join-Path $here 'ui') $app -Recurse -Force
+if (Test-Path (Join-Path $here 'VERSION')) { Copy-Item (Join-Path $here 'VERSION') $app -Force }
 
 # The CLIs, by absolute path: the task's PATH may not be your terminal's.
 function Find-Cli([string]$cli) {
@@ -109,6 +115,8 @@ if (Test-Path $envFile) {
 if ($claude -and -not $settings.Contains('RELEVO_CLAUDE')) { $settings['RELEVO_CLAUDE'] = $claude }
 if ($codex -and -not $settings.Contains('RELEVO_CODEX')) { $settings['RELEVO_CODEX'] = $codex }
 if ($bash -and -not $settings.Contains('CLAUDE_CODE_GIT_BASH_PATH')) { $settings['CLAUDE_CODE_GIT_BASH_PATH'] = $bash }
+# The desktop app's page, on 127.0.0.1 only (also added to installs from before it existed).
+if (-not $settings.Contains('RELEVO_UI_PORT')) { $settings['RELEVO_UI_PORT'] = '47821' }
 [IO.File]::WriteAllLines($envFile, [string[]]@($settings.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }))
 if ($settings.Contains('RELEVO_PORT')) { $Port = [int]$settings['RELEVO_PORT'] }
 
@@ -135,6 +143,20 @@ $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopI
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $taskSettings `
   -Description 'Relevo host for Relevo Companion (Host\deploy\install-windows.ps1)' -Force | Out-Null
 Start-ScheduledTask -TaskName $TaskName
+
+# The app: Edge (always on Windows) opens the page as its own window, with Relevo's icon. The link carries
+# the token that lets this user in; it lives only in these shortcuts and in <data>\desktop\ui-token.
+$appUrl = & $node (Join-Path $app 'relevo-host.mjs') app --url | Select-Object -Last 1
+$edge = @("${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe", "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe") |
+  Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+$shell = New-Object -ComObject WScript.Shell
+foreach ($path in $shortcuts) {
+  $link = $shell.CreateShortcut($path)
+  if ($edge) { $link.TargetPath = $edge; $link.Arguments = "--app=$appUrl" } else { $link.TargetPath = $appUrl }
+  $link.IconLocation = Join-Path $app 'ui\relevo.ico'
+  $link.Description = 'Relevo: tus agentes en este PC y en tus otros hosts'
+  $link.Save()
+}
 Start-Sleep -Seconds 4
 
 $log = Join-Path $data 'logs\host.log'
@@ -147,6 +169,8 @@ Write-Host ''
 Write-Host 'En una terminal nueva (para que coja el PATH), inicia sesión en cada agente para este host:'
 Write-Host '  relevo-host login claude'
 Write-Host '  relevo-host login codex'
+Write-Host ''
+Write-Host 'La app: «Relevo» en el menú Inicio y en el escritorio (o «relevo-host app»).'
 Write-Host ''
 Write-Host 'Enlace de vinculación (ábrelo en el iPhone o pégalo en Relevo Companion; no lo compartas):'
 & $node (Join-Path $app 'relevo-host.mjs') pair

@@ -1,0 +1,42 @@
+# Publishing a version: bump Host/VERSION, commit, then `git tag vX.Y.Z && git push origin vX.Y.Z`.
+# This creates the GitHub release with the Windows installer; installed hosts see the tag as an update.
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the version
+        run: |
+          if [ "$(tr -d '[:space:]' < Host/VERSION)" != "${GITHUB_REF_NAME#v}" ]; then
+            echo "::warning::Host/VERSION ($(cat Host/VERSION)) doesn't match the tag ${GITHUB_REF_NAME}"
+          fi
+          for f in Host/relevo-host.mjs Host/lib/*.mjs Host/ui/*.mjs; do node --check "$f"; done
+
+      - name: Package
+        run: |
+          mkdir -p dist/relevo-host
+          cp -R Host/relevo-host.mjs Host/lib Host/ui Host/deploy Host/VERSION Host/README.md dist/relevo-host/
+          (cd dist && zip -qr "Relevo-Host-${GITHUB_REF_NAME}.zip" relevo-host)
+          cp Host/deploy/Instalar-Relevo.cmd dist/
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > notes.md <<NOTES
+          **Windows:** descarga \`Instalar-Relevo.cmd\` y ábrelo (doble clic). Instala Relevo como servicio y la app de escritorio, y pide permisos de administrador. Si Windows avisa de que protegió el equipo: «Más información» › «Ejecutar de todas formas».
+
+          **Ya instalado:** la app avisa de la versión nueva (Hosts › Actualizaciones), o \`relevo-host update\`.
+          NOTES
+          gh release create "$GITHUB_REF_NAME" dist/Instalar-Relevo.cmd "dist/Relevo-Host-${GITHUB_REF_NAME}.zip" \
+            --title "Relevo ${GITHUB_REF_NAME}" --notes-file notes.md --generate-notes

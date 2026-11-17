@@ -54,7 +54,13 @@ journalctl --user -u relevo-host -f
 
 ## Install or update (Windows)
 
-From an **administrator** PowerShell, signed in as the user whose logins and projects the agents will use, in a
+The simplest way: download **`Instalar-Relevo.cmd`** from the repository's latest
+[release](https://github.com/iCasula/Relevo/releases/latest) and open it. It asks for administrator rights,
+offers to install Node.js with winget if it's missing, downloads the newest release and runs the installer
+below (asking for your projects folder the first time). SmartScreen may warn about a downloaded script: «Más
+información» › «Ejecutar de todas formas».
+
+By hand, from an **administrator** PowerShell, signed in as the user whose logins and projects the agents will use, in a
 copy of this repository on the PC:
 
 ```powershell
@@ -74,6 +80,7 @@ powershell -ExecutionPolicy Bypass -File Host\deploy\install-windows.ps1 [-Proje
 - Running the script again updates the program and keeps `host.env`; `-Uninstall` removes the task, the rule
   and the PATH entry (the data stays).
 - The PC must not go to sleep while you want to reach it (Settings › System › Power).
+- **Relevo** shortcuts in the Start menu and on the desktop open the desktop app (below).
 
 Then, in a new terminal: `relevo-host login claude`, `relevo-host login codex`, `relevo-host pair`,
 `relevo-host status`, `relevo-host update`, `relevo-host logs`, as on Linux.
@@ -82,6 +89,42 @@ After a login the running service checks the accounts again, so the iPhone shows
 (it also does when the iPhone connects, for any account signed out or not checked in the last two minutes).
 `login` and `update` reach the service through files in `<data>/control`, which it checks every 2 s, so they
 work the same with systemd and on Windows.
+
+## Desktop app
+
+With `RELEVO_UI_PORT` set (the Windows installer sets 47821), the service also serves a desktop app: every
+paired host in one window — this PC, the Mac, a mini PC — with their projects and threads, the conversation
+(Markdown, tools, permission requests and the agents' questions), the composer (subscription and model,
+reasoning, permission mode, what to do when the quota runs out, queue, stop and «send now»), relays, Relevo's
+suggestions, limits of every account, and Windows notifications when a thread finishes or needs you.
+
+- How it's built: the page (`ui/`, plain HTML, CSS and JavaScript modules, no build step) talks only to this
+  service on 127.0.0.1 (`lib/ui-server.mjs`). The service connects to every paired host as the iPhone does,
+  with the same TLS-PSK protocol (`lib/remote.mjs`, `connectCompanion` in `lib/transport.mjs`), this one
+  included. `ui/state.mjs` (pairing links, messages, applying patches) is shared by the page and the
+  service. So the engine, the protocol and the client are the same code on Linux and Windows, and the page
+  opens in any browser.
+- Only this machine reaches the page, and only through the link with the token (`<data>/desktop/ui-token`):
+  the first visit trades it for a cookie bound to 127.0.0.1, and the WebSocket also checks the origin.
+- `relevo-host app` opens it as an app window (Edge or Chrome with `--app`); `relevo-host app --url`
+  prints the link. Paired hosts are kept in `<data>/desktop/hosts.json`; add one in Hosts by pasting its
+  pairing link (the Mac's from Settings › iPhone, a server's from `relevo-host pair`).
+
+## Updates and releases
+
+Installed hosts update from the repository's **release tags** (`vX.Y.Z`); `<app>/VERSION` says which one
+is installed.
+
+- The desktop app checks at start and every 6 hours, shows «Nueva versión» in the sidebar, and installs it
+  from Hosts › Actualizaciones; the service restarts and the window reloads itself.
+- `relevo-host update --check` says whether there's a newer tag; `relevo-host update` installs the newest
+  one (or `main` when there are no tags); `relevo-host update v1.2.3` or `relevo-host update main` install
+  that one.
+- Only `relevo-host.mjs`, `lib/`, `ui/` and `VERSION` are downloaded, into the program's folder, with no git
+  or `tar` needed; each file replaces the old one only once downloaded.
+- To publish a version: bump `Host/VERSION`, commit, and push a tag:
+  `git tag v1.2.3 && git push origin v1.2.3`. The `Release` workflow (`.github/workflows/release.yml`)
+  creates the GitHub release with `Instalar-Relevo.cmd` and a zip of `Host/`.
 
 ## Disk
 

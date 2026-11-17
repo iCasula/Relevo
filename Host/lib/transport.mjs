@@ -1,13 +1,19 @@
 // Relevo Companion transport for Node: TLS 1.2 with a pre-shared key (TLS_PSK_WITH_AES_128_GCM_SHA256, the
-// suite Network.framework offers) and WebSocket framing for JSON messages. No dependencies: the WebSocket
-// server side is small enough to do by hand.
+// suite Network.framework offers) and WebSocket framing for JSON messages. Both ends: the host serves
+// iPhones, and the desktop app connects to hosts as an iPhone would. No dependencies: WebSocket is small
+// enough to do by hand.
 
 import tls from 'node:tls';
 import crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
 
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
-const MAX_MESSAGE = 16 << 20;
+const MAX_MESSAGE = 32 << 20;
+const TLS_OPTIONS = {
+  ciphers: 'PSK-AES128-GCM-SHA256',
+  minVersion: 'TLSv1.2',
+  maxVersion: 'TLSv1.2',
+};
 
 /** Same derivation as CompanionTransport.parameters on Apple platforms. */
 export function pskKey(secret) {
@@ -23,9 +29,7 @@ export function createCompanionServer({ serverId, secret, port, host = '::' }, o
   const server = tls.createServer({
     pskCallback: (_socket, identity) => (identity === serverId ? psk : null),
     pskIdentityHint: serverId,
-    ciphers: 'PSK-AES128-GCM-SHA256',
-    minVersion: 'TLSv1.2',
-    maxVersion: 'TLSv1.2',
+    ...TLS_OPTIONS,
     // Every connection proves the current key (no session tickets to resume).
     secureOptions: crypto.constants.SSL_OP_NO_TICKET,
   }, (socket) => {
@@ -36,6 +40,82 @@ export function createCompanionServer({ serverId, secret, port, host = '::' }, o
   server.on('tlsClientError', () => {}); // wrong key, scanners: nothing to do
   server.listen(port, host);
   return server;
+}
+
+/**
+ * Connects to a host like the iPhone does: TLS-PSK with the pairing secret, then a WebSocket. Resolves with a
+ * WebSocketPeer; rejects with an error whose `reason` is 'key' (the host doesn't know this secret), 'refused'
+ * or 'unreachable'.
+ */
+export function connectCompanion({ host, port, serverId, secret, timeout = 8000 }) {
+  return new Promise((resolve, reject) => {
+    const psk = pskKey(secret);
+    let settled = false;
+    const fail = (reason, message) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      reject(Object.assign(new Error(message), { reason }));
+    };
+    const socket = tls.connect({
+      host, port, ...TLS_OPTIONS,
+      pskCallback: () => ({ psk, identity: serverId }),
+      checkServerIdentity: () => undefined, // no certificate: the key is the proof
+      session: undefined,
+    });
+    const timer = setTimeout(() => fail('unreachable', `${host}: sin respuesta`), timeout);
+    socket.on('error', (e) => {
+      const tlsAlert = /alert|handshake|decrypt|psk/i.test(e.message) || e.code?.startsWith?.('ERR_SSL');
+      fail(e.code === 'ECONNREFUSED' ? 'refused' : tlsAlert ? 'key' : 'unreachable', `${host}: ${e.message}`);
+    });
+    socket.on('close', () => fail('key', `${host}: la conexión se cerró durante el saludo`));
+    socket.once('secureConnect', () => {
+      const key = crypto.randomBytes(16).toString('base64');
+      const authority = host.includes(':') ? `[${host}]:${port}` : `${host}:${port}`;
+      socket.write(`GET / HTTP/1.1\r\nHost: ${authority}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n`
+        + `Sec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n\r\n`);
+      let head = Buffer.alloc(0);
+      const onData = (chunk) => {
+        head = Buffer.concat([head, chunk]);
+        const end = head.indexOf('\r\n\r\n');
+        if (end < 0) { if (head.length > 16_384) fail('unreachable', `${host}: respuesta inválida`); return; }
+        socket.off('data', onData);
+        const response = head.subarray(0, end).toString('latin1');
+        const accept = crypto.createHash('sha1').update(key + WS_GUID).digest('base64');
+        if (!/^HTTP\/1\.1 101/.test(response) || !response.toLowerCase().includes(accept.toLowerCase())) {
+          fail('unreachable', `${host}: no es un host de Relevo`);
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        socket.removeAllListeners('close');
+        socket.removeAllListeners('error');
+        socket.setNoDelay(true);
+        socket.setKeepAlive(true, 5000);
+        const peer = new WebSocketPeer(socket, { client: true });
+        const rest = head.subarray(end + 4);
+        if (rest.length) peer._feed(rest);
+        resolve(peer);
+      };
+      socket.on('data', onData);
+    });
+  });
+}
+
+/** A WebSocket on a plain HTTP server (the desktop app's page on 127.0.0.1); the caller checks who it is. */
+export function acceptHTTPUpgrade(req, socket, head) {
+  const key = req.headers['sec-websocket-key'];
+  if ((req.headers.upgrade || '').toLowerCase() !== 'websocket' || !key) {
+    socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
+    return null;
+  }
+  const accept = crypto.createHash('sha1').update(key + WS_GUID).digest('base64');
+  socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+  socket.setNoDelay(true);
+  const peer = new WebSocketPeer(socket);
+  if (head?.length) peer._feed(head);
+  return peer;
 }
 
 function acceptWebSocket(socket, onPeer) {
@@ -74,9 +154,11 @@ function acceptWebSocket(socket, onPeer) {
 
 /** One WebSocket connection. Emits 'message' (Buffer) and 'close'. */
 export class WebSocketPeer extends EventEmitter {
-  constructor(socket) {
+  /** `client`: frames are masked, as RFC 6455 requires from the connecting side. */
+  constructor(socket, { client = false } = {}) {
     super();
     this.socket = socket;
+    this.client = client;
     this.remote = socket.remoteAddress;
     this.buffer = Buffer.alloc(0);
     this.fragments = [];
@@ -119,6 +201,14 @@ export class WebSocketPeer extends EventEmitter {
     } else {
       header = Buffer.alloc(10);
       header[0] = 0x80 | opcode; header[1] = 127; header.writeBigUInt64BE(BigInt(n), 2);
+    }
+    if (this.client) {
+      header[1] |= 0x80;
+      const mask = crypto.randomBytes(4);
+      const masked = Buffer.from(payload);
+      for (let i = 0; i < masked.length; i++) masked[i] ^= mask[i & 3];
+      this.socket.write(Buffer.concat([header, mask, masked]));
+      return;
     }
     this.socket.write(Buffer.concat([header, payload]));
   }

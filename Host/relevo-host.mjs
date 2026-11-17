@@ -5,7 +5,9 @@
 //   relevo-host.mjs pair      print the pairing link for the iPhone
 //   relevo-host.mjs login [claude|codex]   sign in for this host (interactive; Codex uses a device code)
 //   relevo-host.mjs status    login, limits and models of each agent, without calling a model
-//   relevo-host.mjs update    replace the program with the latest version on GitHub and restart the service
+//   relevo-host.mjs update [--check | <tag> | main]   install the newest release tag (vX.Y.Z) from GitHub, or the
+//                             one given, and restart the service; --check only says whether there's a newer one
+//   relevo-host.mjs app [--url]   open the desktop app (with RELEVO_UI_PORT set), or print its link
 //   relevo-host.mjs logs [n]  last lines of <data>/logs/host.log (where the supervisor writes; on Linux, journalctl)
 //
 // Settings come from the environment and from `host.env` next to the program's folder (<base>/host.env for
@@ -22,7 +24,8 @@
 //   RELEVO_MAX_AGENTS  agent processes alive at once (default 2)
 //   RELEVO_MIN_FREE_GB_DATA / RELEVO_MIN_FREE_GB_PROJECTS   refuse to start a turn below this (default 1 / 2)
 //   RELEVO_FAKE_AGENT=1  echo agent for tests (no Claude calls)
-//   RELEVO_REPO        GitHub repository `update` downloads from (default iCasula/Relevo, branch main)
+//   RELEVO_REPO        GitHub repository updates come from (default iCasula/Relevo)
+//   RELEVO_UI_PORT     serve the desktop app on 127.0.0.1:<port> (the Windows installer sets 47821; off by default)
 //   RELEVO_SUPERVISE   1: `serve` restarts its worker when it exits or after an update, logging to
 //                      <data>/logs/host.log (default on Windows, where no systemd does it)
 
@@ -32,7 +35,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { Host, PROVIDERS } from './lib/host.mjs';
-import { isWindows, which, findIn, spawnCLI, killTree, requestControl, watchControl, loadEnvFile, untarGz } from './lib/platform.mjs';
+import { isWindows, which, findIn, spawnCLI, killTree, requestControl, watchControl, loadEnvFile, openAppWindow } from './lib/platform.mjs';
+import { Gateway } from './lib/remote.mjs';
+import { startUIServer, uiToken, appURL } from './lib/ui-server.mjs';
+import { DEFAULT_REPO, checkForUpdate, installVersion, installedVersion, latestTag } from './lib/updater.mjs';
 
 const SCRIPT = fileURLToPath(import.meta.url);
 const APP_DIR = path.dirname(SCRIPT);
@@ -64,6 +70,8 @@ function config() {
     minFreeDataBytes: Number(env.RELEVO_MIN_FREE_GB_DATA ?? 1) * 1e9,
     minFreeProjectsBytes: Number(env.RELEVO_MIN_FREE_GB_PROJECTS ?? 2) * 1e9,
     fakeAgent: env.RELEVO_FAKE_AGENT === '1',
+    uiPort: Number(env.RELEVO_UI_PORT ?? 0),
+    uiDir: path.join(APP_DIR, 'ui'),
   };
   // Everything the agents write outside the project goes to the data folder, never to the system disk:
   // Claude Code's config and transcripts, temp files and the caches of the tools they run.
@@ -91,8 +99,15 @@ switch (command) {
     if ((process.env.RELEVO_SUPERVISE ?? (isWindows ? '1' : '0')) === '1') { supervise(); break; }
     const host = new Host(cfg);
     host.listen();
+    let gateway = null;
+    if (cfg.uiPort) {
+      // The desktop app: this host and every other paired one, on a page served to this machine only.
+      gateway = new Gateway({ dataDir: cfg.dataDir, localLink: host.pairing, device: `Escritorio (${os.hostname()})`, version: installedVersion(APP_DIR), log: (m) => host.log(m) });
+      gateway.start();
+      startUIServer({ port: cfg.uiPort, dataDir: cfg.dataDir, uiDir: cfg.uiDir, gateway, log: (m) => host.log(m) });
+    }
     host.log(`data ${cfg.dataDir} · projects ${cfg.projectsRoot} · ${cfg.providers.map((p) => `${p.provider} ${p.bin}`).join(' · ')}${cfg.fakeAgent ? ' (fake agent)' : ''}`);
-    const stop = (code = 0) => { for (const s of host.agents.values()) s.close(true); process.exit(code); };
+    const stop = (code = 0) => { gateway?.stop(); for (const s of host.agents.values()) s.close(true); process.exit(code); };
     process.on('SIGTERM', () => stop());
     process.on('SIGINT', () => stop());
     const refresh = (why) => { host.log(`${why}: probing the accounts again`); host.refreshUsage(); };
@@ -103,6 +118,31 @@ switch (command) {
       refresh: () => refresh('login'),
       restart: () => { host.log('restarting for the update'); stop(RESTART_EXIT_CODE); },
     });
+    if (gateway) {
+      // The desktop app looks for new release tags (at start and every 6 h) and installs one on request;
+      // the supervisor or systemd then starts the new version.
+      const repo = process.env.RELEVO_REPO ?? DEFAULT_REPO;
+      const check = async () => {
+        try { gateway.setUpdate(await checkForUpdate({ appDir: APP_DIR, repo })); } catch (e) {
+          gateway.setUpdate({ ...gateway.update, checkedAt: Date.now() / 1000, error: `No he podido buscar actualizaciones: ${e.message}` });
+        }
+      };
+      gateway.onCheckUpdate = check;
+      gateway.onApplyUpdate = async () => {
+        const target = gateway.update.latest;
+        if (!target || gateway.update.applying) return;
+        gateway.setUpdate({ ...gateway.update, applying: true, error: null });
+        try {
+          const r = await installVersion({ appDir: APP_DIR, ref: target, repo });
+          host.log(`updated to ${r.version}; restarting`);
+          setTimeout(() => stop(RESTART_EXIT_CODE), 300);
+        } catch (e) {
+          gateway.setUpdate({ ...gateway.update, applying: false, error: `La actualización ha fallado: ${e.message}` });
+        }
+      };
+      setTimeout(check, 5000).unref();
+      setInterval(check, 6 * 3600_000).unref();
+    }
     // Under the supervisor: if it's gone (a scheduled task stopped by force), don't stay behind holding the port.
     const parent = Number(process.env.RELEVO_SUPERVISOR_PID);
     if (parent > 0) setInterval(() => { try { process.kill(parent, 0); } catch { stop(); } }, 5000).unref();
@@ -140,22 +180,18 @@ switch (command) {
     break;
   }
   case 'update': {
-    // Only Host/ from the repository's latest commit: no git checkout, no `tar` binary (Windows may lack one)
-    // and nothing outside the program's folder.
-    const repo = process.env.RELEVO_REPO ?? 'iCasula/Relevo';
+    // Release tags (vX.Y.Z) by default; `main` or a given tag on request; `--check` only says what's there.
+    const repo = process.env.RELEVO_REPO ?? DEFAULT_REPO;
+    const arg = process.argv[3];
     try {
-      const res = await fetch(`https://codeload.github.com/${repo}/tar.gz/refs/heads/main`);
-      if (!res.ok) throw new Error(`GitHub: HTTP ${res.status}`);
-      const wanted = /^([^/]+)\/Host\/(relevo-host\.mjs|lib\/[\w.-]+\.mjs)$/;
-      const files = [...untarGz(Buffer.from(await res.arrayBuffer()))].map(([name, data]) => [wanted.exec(name), data]).filter(([m]) => m);
-      if (!files.some(([m]) => m[2] === 'relevo-host.mjs')) throw new Error('relevo-host.mjs is not in the archive');
-      fs.mkdirSync(path.join(APP_DIR, 'lib'), { recursive: true });
-      for (const [m, data] of files) {
-        const dest = path.join(APP_DIR, ...m[2].split('/'));
-        fs.writeFileSync(`${dest}.new`, data);
-        fs.renameSync(`${dest}.new`, dest);
+      if (arg === '--check') {
+        const u = await checkForUpdate({ appDir: APP_DIR, repo });
+        console.log(u.available ? `Update available: ${u.current} → ${u.latest} (relevo-host update)` : `Up to date: ${u.current}${u.latest ? ` (latest tag ${u.latest})` : ' (the repository has no release tags)'}`);
+        break;
       }
-      console.log(`Updated from ${repo} (${files[0][0][1]}, ${files.length} files).`);
+      const ref = arg ?? await latestTag(repo) ?? 'main';
+      const r = await installVersion({ appDir: APP_DIR, ref, repo });
+      console.log(`Installed ${r.version} from ${repo} (${r.files} files).`);
     } catch (e) {
       console.error(`Update failed: ${e.message}`);
       process.exitCode = 1;
@@ -172,6 +208,13 @@ switch (command) {
     }
     break;
   }
+  case 'app': {
+    if (!cfg.uiPort) { console.error('The desktop app is off: set RELEVO_UI_PORT (e.g. 47821) in host.env and restart the service.'); process.exit(2); }
+    const url = appURL(cfg.uiPort, uiToken(cfg.dataDir));
+    if (process.argv[3] === '--url') { console.log(url); break; }
+    if (!openAppWindow(url)) console.log(`Open ${url}`);
+    break;
+  }
   case 'logs': {
     const file = path.join(cfg.dataDir, 'logs', 'host.log');
     let text = '';
@@ -180,7 +223,7 @@ switch (command) {
     break;
   }
   default:
-    console.error('usage: relevo-host.mjs [serve|pair|login|status|update|logs]');
+    console.error('usage: relevo-host.mjs [serve|pair|login|status|update|app|logs]');
     process.exit(2);
 }
 

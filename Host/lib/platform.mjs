@@ -107,6 +107,39 @@ export function watchControl(dataDir, handlers) {
   return timer;
 }
 
+// MARK: - Desktop app window
+
+/** Candidates for a Chromium browser that can open a page as an app window (`--app=`), per platform. */
+function appBrowsers() {
+  if (isWindows) {
+    const roots = [process.env['ProgramFiles(x86)'], process.env.ProgramFiles, process.env.LOCALAPPDATA].filter(Boolean);
+    return roots.flatMap((r) => [
+      path.join(r, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+      path.join(r, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    ]);
+  }
+  if (process.platform === 'darwin') {
+    return ['Google Chrome', 'Microsoft Edge', 'Chromium', 'Brave Browser']
+      .map((n) => `/Applications/${n}.app/Contents/MacOS/${n}`);
+  }
+  return ['microsoft-edge', 'google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser'].map((n) => which(n)).filter(Boolean);
+}
+
+/** The first app-capable browser installed (Edge always is on Windows), or null. */
+export function appBrowser() {
+  return appBrowsers().find((p) => isExecutable(p)) ?? null;
+}
+
+/** Opens the desktop app as its own window; false if only a normal browser tab was possible. */
+export function openAppWindow(url) {
+  const browser = appBrowser();
+  const detached = { detached: true, stdio: 'ignore', windowsHide: false };
+  if (browser) { spawn(browser, [`--app=${url}`], detached).unref(); return true; }
+  const opener = isWindows ? ['cmd.exe', ['/d', '/c', 'start', '""', url]] : process.platform === 'darwin' ? ['open', [url]] : ['xdg-open', [url]];
+  try { spawn(opener[0], opener[1], detached).unref(); } catch {}
+  return false;
+}
+
 // MARK: - Settings file
 
 /** KEY=VALUE lines (as install.sh and install-windows.ps1 write them); variables already set win. */
