@@ -458,6 +458,18 @@ export class FakeSession extends EventEmitter {
       }, 100);
       return;
     }
+    // «temporizador …»: says it (orders included) and then waits on a 12 s timer, unless interrupted.
+    if (/^temporizador/i.test(text)) {
+      this.emit('textDelta', `t${turn}`, `Eco (${this.model}, ${this.mode}): ${text}`);
+      this.emit('toolStarted', `sched${turn}`, 'schedule', 'schedule', {});
+      setTimeout(() => {
+        if (!this.turnActive || this.n !== turn) return;
+        this.emit('toolFinished', `sched${turn}`, true, '');
+        this.turnActive = false;
+        this.emit('turnFinished');
+      }, 12_000);
+      return;
+    }
     // «segundo plano»: leaves a job running and ends the turn; when it ends, wakes up and reports.
     if (/^segundo plano/i.test(text)) {
       setTimeout(() => {

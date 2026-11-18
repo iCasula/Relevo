@@ -502,7 +502,7 @@ export class Teams {
     const h = this.host;
     if (member.role === 'orchestrator') {
       const orders = parseOrders(text);
-      for (const o of orders) this._order(team, member, o);
+      this._dispatch(team, member, thread, orders);
       // A turn with no orders is the orchestrator talking to you (a question, a decision, a summary).
       const said = withoutOrders(text).trim();
       if (!orders.length && said && team.status !== 'done') this._attention(thread, 'orquestador', said);
@@ -551,6 +551,32 @@ export class Teams {
       } else report.push(`(${target.name} está trabajando: no se le ha enviado. Pásale lo que le sirva junto con su siguiente tarea.)`);
     }
     this._toLead(team, member, kind, report.join('\n\n'));
+  }
+
+  /** The orders of the orchestrator's turn not sent yet (some may have gone when it started waiting on a timer). */
+  _dispatch(team, member, thread, orders) {
+    const r = this.host._rt(thread);
+    r.sentOrders ??= new Set();
+    for (const o of orders) {
+      const sig = `${o.type}|${o.to ?? ''}|${o.body}`;
+      if (r.sentOrders.has(sig)) continue;
+      r.sentOrders.add(sig);
+      this._order(team, member, o);
+    }
+  }
+
+  /**
+   * A tool started in a team thread. The orchestrator waiting on a timer (Antigravity's schedule, a sleep) keeps
+   * its turn open: the orders it wrote so far go now instead of when the timer ends, and while it only waits, a
+   * message for it interrupts the wait (see _deliver).
+   */
+  onToolStarted(thread, name, title, input, turnText) {
+    const member = this.memberOf(thread);
+    const team = this.of(thread);
+    if (!team || member?.role !== 'orchestrator') return;
+    const r = this.host._rt(thread);
+    r.waitingTimer = isWaitTool(name, title, input);
+    if (r.waitingTimer) this._dispatch(team, member, thread, parseOrders(turnText));
   }
 
   /** Something in this thread is for you: the apps notify it until you write there. */
@@ -750,6 +776,12 @@ export class Teams {
       const waiting = t.queued.find((q) => q.team);
       if (waiting) this._merge(waiting, header, text, prompt, member.role);
       else t.queued.push({ id: h._uuid(), text, prompt, header, from: meta.from, team: true });
+      // An orchestrator only waiting on its own timer stops waiting: what it was waiting for has arrived.
+      if (member.role === 'orchestrator' && r.waitingTimer && !r.approvals.size) {
+        r.waitingTimer = false;
+        r.statusLine = `Llega un mensaje de ${from.name}: deja de esperar…`;
+        h.agents.get(t.id)?.interrupt();
+      }
       h._changed(t);
       return;
     }
@@ -799,6 +831,14 @@ export class Teams {
     }).filter(Boolean);
     return `Estado del equipo: ${parts.join(' | ')}`;
   }
+}
+
+/** A timer or a plain wait: Antigravity's schedule, sleep / Start-Sleep / timeout. */
+export function isWaitTool(name, title, input) {
+  const n = String(name ?? '').toLowerCase();
+  if (['schedule', 'wait', 'sleep', 'timer', 'set_timer', 'wait_for', 'scheduler'].includes(n)) return true;
+  const cmd = String(input?.command ?? title ?? '').trim();
+  return /^(sleep|Start-Sleep|timeout(\.exe)?\s+\/t)\b/i.test(cmd);
 }
 
 /** Tools the orchestrator and the researcher use without asking: reading and searching, never writing. */

@@ -1179,6 +1179,8 @@ export class Host {
     const turnBefore = gitops.snapshot(t.projectPath);
     const userItem = this._append(t, { id: uuid(), kind: 'user', text, turnBefore, from: meta.from, started: true });
     r.turnUserItem = userItem.id;
+    r.sentOrders = new Set();
+    r.waitingTimer = false;
     r.stopRequested = false;
     r.suggestion = null;
     r.suggestionDismissed = false;
@@ -1236,7 +1238,7 @@ export class Host {
     s.on('session', (id) => { t.sessionId = id; this._saveThread(t); });
     s.on('models', (models) => { account.models = models; this._saveState(); this._broadcastSnapshot(); });
     s.on('status', (text) => { r.statusLine = text; this._changed(t, false); });
-    s.on('textDelta', (key, text) => { const it = item(`a:${key}`, assistant); it.text += text; this._touch(t, it); this._changed(t, false); });
+    s.on('textDelta', (key, text) => { r.waitingTimer = false; const it = item(`a:${key}`, assistant); it.text += text; this._touch(t, it); this._changed(t, false); });
     s.on('textFinal', (key, text) => { const it = item(`a:${key}`, assistant); it.text = text; this._touch(t, it); this._changed(t, false); });
     s.on('reasoningDelta', (key, text) => {
       const it = item(`r:${key}`, () => ({ id: uuid(), kind: 'reasoning', text: '' }));
@@ -1251,6 +1253,10 @@ export class Host {
       // Some agents (Antigravity) announce a tool before its parameters: the real title comes later.
       if (title && title !== name && it.title !== title) { it.title = title; it.text = title; }
       if (input?.command && !it.output) it.output = `$ ${input.command}`;
+      if (t.team) {
+        const said = (r.turnItems ?? []).map((id) => this._item(t, id)).filter((x) => x?.kind === 'assistant').map((x) => x.text).join('\n\n');
+        this.teams.onToolStarted(t, name, title, input, said);
+      }
       // Claude's plan, as a checklist: the handoff carries the latest one.
       if (name === 'TodoWrite' && Array.isArray(input?.todos)) {
         it.plan = input.todos.map((x) => `${x.status === 'completed' ? '[x]' : x.status === 'in_progress' ? '[~]' : '[ ]'} ${x.content ?? x.activeForm ?? ''}`).join('\n');

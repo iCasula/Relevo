@@ -185,7 +185,10 @@ export class AntigravitySession extends EventEmitter {
       const r = o.result;
       if (r.conversation_id && r.conversation_id !== this.conversationId) { this.conversationId = r.conversation_id; this.emit('session', r.conversation_id); }
       if (!this.anyText && r.response?.trim()) this.emit('textFinal', this._key(999), r.response.trim());
-      if (r.status === 'ERROR' || r.error) {
+      // agy ends a turn whose agent left a timer or task running with this «error»: it isn't one.
+      if ((r.status === 'ERROR' || r.error) && /root agent idle; waiting for \d+ background task/i.test(String(r.error ?? ''))) {
+        this.emit('notice', 'Antigravity terminó el turno con un temporizador o una tarea en segundo plano pendiente');
+      } else if (r.status === 'ERROR' || r.error) {
         const message = r.error ?? 'Antigravity devolvió un error.';
         if (this.turn === 1 && this.resumed && /not found|conversation.*invalid/i.test(message)) this._fail('sessionLost', message);
         else this._fail(AUTH_MARKER.test(message) ? 'auth' : classify(message), message);
@@ -248,14 +251,18 @@ export class AntigravitySession extends EventEmitter {
   _exited(code, tail) {
     this.proc = null;
     if (this.closed) return;
-    if (code !== 0 && code !== 2 && code !== 15 && code !== null && !this.failed) {
+    const stopped = this.interrupted;
+    this.interrupted = false;
+    if (/root agent idle; waiting for \d+ background task/i.test(tail ?? '')) {
+      this.emit('notice', 'Antigravity terminó el turno con un temporizador o una tarea en segundo plano pendiente');
+    } else if (!stopped && code !== 0 && code !== 2 && code !== 15 && code !== null && !this.failed) {
       const message = tail || `Antigravity terminó con código ${code}.`;
       this._fail(AUTH_MARKER.test(message) ? 'auth' : classify(message), message.slice(-1200));
     }
     if (this.turnActive) { this.turnActive = false; this.emit('turnFinished'); }
   }
 
-  interrupt() { if (this.proc) killTree(this.proc); }
+  interrupt() { if (this.proc) { this.interrupted = true; killTree(this.proc); } }
   setModel(model) { this.model = model === 'default' ? '' : model; }
   setMode(mode) { this.mode = mode; }
   setEffort(effort) { this.effort = effort; }

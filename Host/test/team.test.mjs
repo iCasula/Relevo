@@ -298,3 +298,16 @@ test("each role's fallback is its thread's out-of-quota plan, and the orchestrat
   assert.ok(r2.ok, r2.error);
   await next((m) => m.snapshot?._0.hostTeams?.find((x) => x.goal === 'Fallbacks')?.members[1].fallback === '');
 });
+
+test("an orchestrator waiting on a timer sends its orders at once and stops waiting when a report arrives", async () => {
+  const claude = snapshot.accounts.find((a) => a.kind === 'claude');
+  const r = await request('createTeam', { team: { projectId: demo(), goal: 'Temporizador', orchestrator: { accountId: claude.id }, executors: [{ accountId: claude.id }], researcher: null } });
+  const boss = r.threadId;
+  peer.send(Client.subscribe(boss));
+  await next(firstDone(boss));
+  const sent = Date.now();
+  peer.send(Client.send(boss, 'temporizador <relevo:tarea para="Ejecutor">haz T</relevo:tarea>'));
+  const report = await next((m) => m.threadPatch?._0.id === boss && m.threadPatch._0.upserts.some((i) => i.kind === 'user' && (i.from?.name === 'Ejecutor' || i.text?.includes('[Ejecutor ·'))), 20_000);
+  assert.ok(Date.now() - sent < 9_000, `the report arrived ${Date.now() - sent} ms later: the order or the report waited for the 12 s timer`);
+  assert.match(report.threadPatch._0.upserts.find((i) => i.kind === 'user' && (i.from?.name === 'Ejecutor' || i.text?.includes('[Ejecutor ·'))).text, /haz T/);
+});
