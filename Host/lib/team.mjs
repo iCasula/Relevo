@@ -138,6 +138,22 @@ export class Teams {
   constructor(host) {
     this.host = host;
     host.state.teams ??= [];
+    this._dropOrphans();
+  }
+
+  /**
+   * Threads pointing at a team that doesn't exist (a creation that failed halfway in 0.6.x) go back to being
+   * normal threads, and the empty ones that creation made are removed.
+   */
+  _dropOrphans() {
+    const h = this.host;
+    const ids = new Set(this.list.map((x) => x.id));
+    for (const t of [...h.threads.values()]) {
+      if (!t.team || ids.has(t.team.id)) continue;
+      if (!t.items.length) h.deleteThread(t, false);
+      else { delete t.team; delete t.teamPrimed; }
+      h._saveState();
+    }
   }
 
   get list() { return this.host.state.teams; }
@@ -181,6 +197,12 @@ export class Teams {
     const mode = ['ask', 'autoEdit', 'full'].includes(spec.mode) ? spec.mode : 'autoEdit';
     const count = executors.length + (existing ? 1 : 0);
     const execName = (i) => (count > 1 ? `Ejecutor ${i + 1}` : 'Ejecutor');
+    const projectPath = h.projects().find((p) => p.id === spec.projectId)?.path;
+    // Worktrees need a git repository with a commit; without one the executors share the folder.
+    const worktrees = !!spec.worktrees && count > 1 && executors.length > 0 && gitops.hasCommits(projectPath);
+    if (spec.worktrees && count > 1 && executors.length && !worktrees) {
+      h._append(lead, { id: h._uuid(), kind: 'notice', text: 'Sin worktrees: el proyecto no es un repositorio git con algún commit, así que los ejecutores comparten la carpeta' });
+    }
     if (existing) {
       const name = execName(0);
       existing.team = { id: team.id, role: 'executor', name };
@@ -189,8 +211,23 @@ export class Teams {
       h._append(existing, { id: h._uuid(), kind: 'notice', text: `Este hilo es ahora ${name} de un equipo: el Orquestador le irá dando tareas. Puedes seguir escribiéndole tú.` });
       h._changed(existing);
     }
-    executors.forEach((e, i) => make('executor', execName(i + (existing ? 1 : 0)), e, mode, !!spec.worktrees && count > 1));
-    if (spec.researcher) make('researcher', 'Investigador', spec.researcher, 'ask', false);
+    try {
+      executors.forEach((e, i) => make('executor', execName(i + (existing ? 1 : 0)), e, mode, worktrees));
+      if (spec.researcher) make('researcher', 'Investigador', spec.researcher, 'ask', false);
+    } catch (e) {
+      // All or nothing: the threads made so far go, and the thread that was joining is left as it was.
+      for (const m of team.members) {
+        const t = h.threads.get(m.threadId);
+        if (!t) continue;
+        if (t === existing) { delete t.team; delete t.teamPrimed; t.items = t.items.filter((i) => !/^Este hilo es ahora/.test(i.text ?? '')); h._changed(t); } else {
+          if (t.worktree) { try { h.removeWorktree(t, true, false); } catch {} }
+          h.deleteThread(t, false);
+        }
+      }
+      h._saveState();
+      h._broadcastSnapshot();
+      throw e;
+    }
     this.list.push(team);
     // Each agent needs its own process to work at the same time.
     if (h.settings.maxAgents < team.members.length) {

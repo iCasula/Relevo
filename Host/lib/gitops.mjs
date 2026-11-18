@@ -218,6 +218,11 @@ export function changesBetween(cwd, before, after) {
 export const currentBranch = (cwd) => git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD']).out.trim() || null;
 
 /** A new worktree on its own branch from the repository's current commit (the Mac's «hilo en un worktree»). */
+/** A repository with at least one commit (what a worktree needs). */
+export function hasCommits(cwd) {
+  return isRepo(cwd) && git(cwd, ['rev-parse', '--verify', 'HEAD']).ok;
+}
+
 export function addWorktree(repo, dir, branch) {
   if (!isRepo(repo)) throw new Error('El proyecto no es un repositorio git');
   if (!git(repo, ['rev-parse', '--verify', 'HEAD']).ok) throw new Error('El repositorio aún no tiene ningún commit');

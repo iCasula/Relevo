@@ -155,3 +155,16 @@ test('a coordinator joins a thread that already did work: the thread becomes the
   peer.send(Client.send(lead, '<relevo:tarea para="Ejecutor">sigue con los diálogos</relevo:tarea>'));
   await next(fromMember('Ejecutor', 'informe'));
 });
+
+test('worktrees in a folder without git: the executors share it instead of the team failing', async () => {
+  const claude = snapshot.accounts.find((a) => a.kind === 'claude');
+  const r = await request('createTeam', { team: {
+    projectId: snapshot.projects[0].id, goal: 'Dos ejecutores sin git', worktrees: true,
+    orchestrator: { accountId: claude.id }, executors: [{ accountId: claude.id }, { accountId: claude.id }], researcher: null,
+  } });
+  assert.ok(r.ok, r.error);
+  peer.send(Client.subscribe(r.threadId));
+  const t = (await next((m) => m.thread?._0.id === r.threadId)).thread._0;
+  assert.ok(t.items.some((i) => i.kind === 'notice' && /Sin worktrees/.test(i.text)));
+  assert.ok(t.items.some((i) => i.kind === 'user' && i.text === 'Dos ejecutores sin git'), 'the orchestrator started');
+});
