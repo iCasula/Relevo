@@ -163,7 +163,40 @@ function latestPlan(items) {
  * The text that goes before the new message when another agent takes the thread over.
  * `traceFile`: where the whole conversation was saved (see `saveTrace`), so the agent can look details up.
  */
-export function handoffText({ items, accounts, projectPath, target, pendingRequest, workState = null, traceFile = null, budget = BRIEF_BUDGET, fresh = false }) {
+/** What ran in the background lately (a build, an emulator), so whoever takes over checks it before relaunching. */
+function backgroundBlock(background) {
+  if (!background?.length) return '';
+  const hm = (at) => new Date(at * 1000).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
+  return `\n- Trabajos lanzados en segundo plano hace poco (mira su salida o sus logs antes de relanzarlos):\n${background.map((b) => `  - ${clip(b.description, 160)}: empezó a las ${hm(b.startedAt)}${b.endedAt ? `, terminó a las ${hm(b.endedAt)}` : ', seguía en marcha (el cambio de agente lo ha cortado)'}`).join('\n')}`;
+}
+
+/**
+ * Back in its own earlier session (it kept everything it knew): only what other agents did in this thread
+ * while it was away, and the git state now.
+ */
+export function catchUpText({ items, accounts, workState = null, pendingRequest = false, budget = 6000 }) {
+  const turns = turnsOf(items);
+  const lines = [];
+  let room = budget;
+  for (let i = turns.length - 1; i >= 0; i--) {
+    const line = turnLine(turns[i], i + 1, accounts, { isFirst: false });
+    if (line.length > room) { lines.unshift(`- (${i + 1} turno${i ? 's' : ''} anterior${i ? 'es' : ''} sin resumir aquí)`); break; }
+    lines.unshift(line);
+    room -= line.length + 1;
+  }
+  const agents = [...new Set(items.filter((i) => i.kind === 'assistant').map((i) => accounts.get(i.accountId)?.agentName).filter(Boolean))].join(', ');
+  return `<relevo_mientras_tanto>
+Vuelves a este hilo en tu propia sesión: conservas todo lo que sabías. Mientras no estabas, ${agents || 'otro agente'} siguió con él (por cuota). Lo que hizo:
+${lines.join('\n') || '- Nada que contar.'}
+${workState ? `\nEstado de git ahora:\n${clip(workState, STATE_MAX)}\n` : ''}Comprueba en disco lo que haya cambiado antes de seguir.
+</relevo_mientras_tanto>
+
+${pendingRequest ? 'La última petición del usuario quedó sin terminar. Continúa con ella desde donde se quedó:' : 'Nuevo mensaje del usuario:'}
+
+`;
+}
+
+export function handoffText({ items, accounts, projectPath, target, pendingRequest, workState = null, traceFile = null, budget = BRIEF_BUDGET, fresh = false, background = [] }) {
   const agents = [...new Set(items.filter((i) => i.kind === 'assistant').map((i) => accounts.get(i.accountId)?.agentName).filter(Boolean))].join(', ');
   const intro = fresh
     ? 'Sigues con tu propio trabajo en una sesión nueva: Relevo la ha renovado porque la anterior se había hecho muy larga. Esto es un resumen de lo que llevabas, no la conversación entera.'
@@ -172,7 +205,7 @@ export function handoffText({ items, accounts, projectPath, target, pendingReque
 ${intro}
 - Proyecto: ${projectPath}
 - El código y los cambios ya están en disco: léelos de los ficheros (git status, git diff), no esperes encontrarlos aquí.
-- Comprueba lo que quedó a medias antes de repetirlo y no rehagas lo que ya está hecho.${traceFile ? `\n- Si te falta algún detalle, la conversación completa está en ${traceFile} (léela solo si hace falta).` : ''}`;
+- Comprueba lo que quedó a medias antes de repetirlo y no rehagas lo que ya está hecho.${traceFile ? `\n- Si te falta algún detalle, la conversación completa está en ${traceFile} (léela solo si hace falta).` : ''}${backgroundBlock(background)}`;
   const body = threadBrief({ items, accounts, pendingRequest, workState, traceFile, budget: budget - head.length });
   return `${head}
 

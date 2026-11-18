@@ -109,9 +109,16 @@ struct TeamStrip: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
                 Button(action: showTeam) {
-                    Label(team.isPaused ? "En pausa" : "Equipo", systemImage: team.isPaused ? "pause.circle.fill" : "person.3.sequence")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(team.isPaused ? .orange : .secondary)
+                    HStack(spacing: 5) {
+                        Label(team.isPaused ? "En pausa" : "Equipo", systemImage: team.isPaused ? "pause.circle.fill" : "person.3.sequence")
+                        if let count = team.milestones?.count, count > 0 {
+                            Text("\(team.milestonesDone)/\(count)")
+                                .monospacedDigit()
+                                .foregroundStyle(.green)
+                        }
+                    }
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(team.isPaused ? .orange : .secondary)
                 }
                 .buttonStyle(.plain)
                 ForEach(team.members) { member in
@@ -175,11 +182,19 @@ struct TeamSheet: View {
                             .buttonStyle(.plain)
                         }
                     } header: {
-                        Text("Agentes")
+                        HStack {
+                            Text("Agentes")
+                            Spacer()
+                            if let total = TeamSpend.total(team) { Text("\(total) hoy").textCase(nil) }
+                        }
                     } footer: {
                         Text("Cambia nombres, modelos o el plan si se acaba la cuota desde Relevo en el ordenador.")
                     }
+                    MilestonesSection(team: team, client: client)
                     DecisionsSection(team: team, client: client)
+                    if let findings = team.findings, !findings.isEmpty {
+                        FindingsSection(team: team, findings: findings, client: client)
+                    }
                     Section {
                         if team.isPaused {
                             Button("Reanudar el equipo", systemImage: "play.fill") { client.send(.teamAction(teamId: team.id, action: "resume")) }
@@ -203,6 +218,129 @@ struct TeamSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) { Button("Listo") { dismiss() } }
+            }
+        }
+    }
+}
+
+enum TeamSpend {
+    static func text(_ spend: RemoteSpend?) -> String? {
+        guard let spend, spend.tokens > 0 else { return nil }
+        let tokens = TurnUsageLine.short(spend.tokens) + " tokens"
+        guard let cost = spend.cost, cost > 0 else { return tokens }
+        return tokens + " · " + (spend.estimated == true ? "≈ " : "") + TurnUsageLine.usd(cost)
+    }
+
+    static func total(_ team: RemoteTeam) -> String? {
+        let cost = team.members.compactMap { $0.today?.cost }.reduce(0, +)
+        let tokens = team.members.compactMap { $0.today?.tokens }.reduce(0, +)
+        if cost > 0 { return (team.members.contains { $0.today?.estimated == true } ? "≈ " : "") + TurnUsageLine.usd(cost) }
+        return tokens > 0 ? TurnUsageLine.short(tokens) + " tokens" : nil
+    }
+}
+
+/// The goal's milestones with the team's progress. Tap one to mark it done or pending.
+private struct MilestonesSection: View {
+    let team: RemoteTeam
+    let client: CompanionClient
+    @State private var draft = ""
+
+    var body: some View {
+        let list = team.milestones ?? []
+        Section {
+            if !list.isEmpty {
+                ProgressView(value: Double(team.milestonesDone), total: Double(list.count))
+                    .tint(.green)
+            }
+            ForEach(list) { milestone in
+                Button {
+                    client.send(.teamMemory(teamId: team.id, kind: "milestone", add: nil, remove: nil, toggle: String(milestone.id)))
+                } label: {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Image(systemName: milestone.done ? "checkmark.circle.fill" : milestone.id == team.currentMilestone?.id ? "largecircle.fill.circle" : "circle")
+                            .foregroundStyle(milestone.done ? .green : .secondary)
+                        Text(milestone.text)
+                            .font(.callout)
+                            .fontWeight(milestone.id == team.currentMilestone?.id ? .semibold : .regular)
+                            .foregroundStyle(milestone.done ? .secondary : .primary)
+                            .strikethrough(milestone.done, color: .secondary)
+                    }
+                }
+                .buttonStyle(.plain)
+                .disabled(!client.isConnected)
+                .swipeActions {
+                    Button("Quitar", systemImage: "trash", role: .destructive) {
+                        client.send(.teamMemory(teamId: team.id, kind: "milestone", add: nil, remove: String(milestone.id), toggle: nil))
+                    }
+                }
+            }
+            HStack {
+                TextField("Añadir un hito", text: $draft, axis: .vertical)
+                    .lineLimit(1...3)
+                    .submitLabel(.done)
+                    .onSubmit(add)
+                Button("Añadir", systemImage: "plus.circle.fill", action: add)
+                    .labelStyle(.iconOnly)
+                    .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !client.isConnected)
+            }
+        } header: {
+            HStack {
+                Text("Hitos")
+                Spacer()
+                if !list.isEmpty { Text("\(team.milestonesDone)/\(list.count)").textCase(nil) }
+            }
+        } footer: {
+            Text("Los pasos hacia el objetivo. El orquestador los escribe y marca los conseguidos; toca uno para cambiarlo tú.")
+        }
+    }
+
+    private func add() {
+        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        client.send(.teamMemory(teamId: team.id, kind: "milestone", add: text, remove: nil, toggle: nil))
+        draft = ""
+    }
+}
+
+/// What the researcher found, kept so nobody searches for it again.
+private struct FindingsSection: View {
+    let team: RemoteTeam
+    let findings: [RemoteTeamFinding]
+    let client: CompanionClient
+
+    var body: some View {
+        Section("Investigado") {
+            ForEach(findings.reversed()) { finding in
+                DisclosureGroup {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(finding.summary)
+                            .font(.caption)
+                            .textSelection(.enabled)
+                        ForEach(finding.links ?? [], id: \.self) { link in
+                            if let url = URL(string: link) {
+                                Link(link.replacingOccurrences(of: "https://", with: ""), destination: url)
+                                    .font(.caption2)
+                                    .lineLimit(1)
+                            }
+                        }
+                    }
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(finding.topic)
+                            .font(.callout)
+                            .lineLimit(2)
+                        if let at = finding.at {
+                            Text(at, format: .dateTime.day().month(.abbreviated).hour().minute())
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                }
+                .swipeActions {
+                    Button("Quitar", systemImage: "trash", role: .destructive) {
+                        client.send(.teamMemory(teamId: team.id, kind: "finding", add: nil, remove: String(finding.id), toggle: nil))
+                    }
+                }
             }
         }
     }
@@ -290,6 +428,11 @@ private struct MemberRow: View {
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
+                }
+                if let spend = TeamSpend.text(member.today) {
+                    Text("Hoy: \(spend)")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.tertiary)
                 }
                 if let attention = thread?.attention?.text {
                     Label(attention, systemImage: "text.bubble.fill")

@@ -196,6 +196,12 @@ private struct TeamHeader: View {
                     .lineLimit(1)
             }
             Spacer()
+            if let count = team.milestones?.count, count > 0, !team.isPaused {
+                Text("\(team.milestonesDone)/\(count) hitos")
+                    .textCase(nil)
+                    .monospacedDigit()
+                    .foregroundStyle(.green)
+            }
             if team.isPaused {
                 Label("En pausa", systemImage: "pause.circle.fill")
                     .labelStyle(.titleAndIcon)

@@ -12,7 +12,7 @@ import { createCompanionServer } from './transport.mjs';
 import { killTree } from './platform.mjs';
 import { ClaudeSession, FakeSession, probe, fakeProbe } from './claude.mjs';
 import { CodexSession, codexProbe } from './codex.mjs';
-import { handoffText, saveTrace } from './handoff.mjs';
+import { handoffText, catchUpText, saveTrace } from './handoff.mjs';
 import * as gitops from './gitops.mjs';
 import { listDirectory, readThreadImage } from './files.mjs';
 import { usageReport } from './usage.mjs';
@@ -30,10 +30,26 @@ const STALE_AFTER_S = 120;
 const CODEX_SESSIONS_DAYS = 30;
 const SKIP_DIRS = new Set(['$RECYCLE.BIN', 'System Volume Information', 'lost+found']);
 const MODES = new Set(['ask', 'autoEdit', 'full', 'plan']);
-const PLAN_MODES = new Set(['ask', 'mostQuota', 'chain', 'wait']);
+const PLAN_MODES = new Set(['ask', 'mostQuota', 'chain', 'wait', 'smart']);
+/** Providers whose CLI can pick up an earlier session by its id, to go back to it without a full handoff. */
+const RESUMABLE = (a) => a && (a.kind === 'claude' || a.kind.startsWith('api:') || a.kind === 'codex');
+/** Going back to a provider resumes its own session if it left it less than this ago (seconds). */
+const RESUME_WITHIN = 12 * 3600;
+
+/**
+ * How well a model fits a role, from its name: «heavy» (executors: the strongest) or «light» (orchestrator,
+ * researcher: cheap and quick but able).
+ */
+export function modelScore(m, tier) {
+  const n = `${m.id} ${m.name ?? ''}`.toLowerCase();
+  const heavy = [[/opus/, 100], [/gpt-?6|terra/, 95], [/flash-?lite|lite/, 30], [/flash/, 45], [/haiku/, 40], [/mini|luna|nano/, 35], [/\bpro\b|-pro/, 85], [/sonnet/, 82], [/gpt-?5|codex/, 78], [/default/, 65]];
+  const light = [[/flash-?lite/, 85], [/flash/, 100], [/haiku/, 95], [/mini|luna|nano|lite/, 90], [/sonnet/, 70], [/gpt-?5/, 60], [/default/, 55], [/opus|gpt-?6|terra|\bpro\b|-pro/, 30]];
+  for (const [re, score] of tier === 'light' ? light : heavy) if (re.test(n)) return score;
+  return 60;
+}
 /** What this host does beyond the shared protocol; clients show those controls only when listed. */
 export const HOST_FEATURES = ['teams', 'projects', 'threads', 'git', 'images', 'usage', 'login', 'settings', 'limitPlans', 'history', 'titles', 'accounts',
-  'turns', 'worktrees', 'pullRequests', 'suggest', 'quickActions', 'attachments', 'teamRename', 'teamDecisions'];
+  'turns', 'worktrees', 'pullRequests', 'suggest', 'quickActions', 'attachments', 'teamRename', 'teamDecisions', 'teamMemory', 'smartFallback', 'teamBudget'];
 const IMAGE_UPLOAD = /\.(png|jpe?g|gif|webp)$/i;
 
 /** Providers this host can run. Each account is one provider with its own CLI login on this machine. */
@@ -461,6 +477,7 @@ export class Host {
       case 'teamAction': run(() => this.teams.action(a.teamId, a.action)); break;
       case 'updateTeam': run(() => this.teams.update(String(a.teamId).toUpperCase(), a.changes ?? {})); break;
       case 'teamDecisions': run(() => this.teams.editDecisions(String(a.teamId).toUpperCase(), { add: a.add, remove: a.remove })); break;
+      case 'teamMemory': run(() => this.teams.editMemory(String(a.teamId).toUpperCase(), { kind: a.kind, add: a.add, remove: a.remove, toggle: a.toggle })); break;
       case 'pullRequest': if (t) run(async () => ({ pr: await gitops.pullRequest(t.projectPath) })); break;
       case 'createPullRequest': if (t) run(async () => {
         const url = await gitops.createPullRequest(t.projectPath);
@@ -569,7 +586,9 @@ export class Host {
     const mode = PLAN_MODES.has(plan?.mode) ? plan.mode : 'ask';
     const targets = (plan?.targets ?? []).filter((x) => this.accountsById.has(String(x.accountId).toUpperCase()))
       .map((x) => ({ accountId: String(x.accountId).toUpperCase(), model: String(x.model || 'default') }));
-    return { mode: mode === 'chain' && !targets.length ? 'ask' : mode, targets };
+    const out = { mode: mode === 'chain' && !targets.length ? 'ask' : mode, targets };
+    if (mode === 'smart') out.tier = plan.tier === 'light' ? 'light' : 'heavy';
+    return out;
   }
 
   deleteThread(t, broadcast = true) {
@@ -1076,9 +1095,11 @@ export class Host {
    * Model or subscription for the thread. Another provider means a new agent that gets the thread's context
    * with the next message (`relay` sends that message right away, to carry on with the task).
    */
-  select(t, accountId, model, carryOn) {
+  select(t, accountId, model, carryOn, auto = false) {
     const target = this.accountsById.get(accountId) ?? this._account(t);
     const r = this._rt(t);
+    // You chose: no going back to the earlier model by itself.
+    if (!auto) t.home = null;
     if (target.id === t.accountId) {
       const before = t.model;
       t.model = model || 'default';
@@ -1088,9 +1109,12 @@ export class Host {
       if (carryOn && !r.isRunning) this._startTurn(t, 'Sigue con la tarea donde lo dejaste.');
       return;
     }
-    if (r.isRunning) {
-      r.pendingSwitch = { accountId: target.id, model, carryOn };
-      r.statusLine = `Cambiará a ${target.name} al terminar este turno`;
+    // Closing the agent would kill what it left running in the background (a long build, an emulator): the
+    // switch waits for it, like it waits for a turn.
+    if (r.isRunning || r.backgroundTasks?.length) {
+      r.pendingSwitch = { accountId: target.id, model, carryOn, auto };
+      r.statusLine = r.isRunning ? `Cambiará a ${target.name} al terminar este turno` : `Cambiará a ${target.name} cuando termine lo que corre en segundo plano`;
+      if (!r.isRunning) this._append(t, { id: uuid(), kind: 'notice', text: `El cambio a ${target.name} · ${this._modelName(target, model || 'default')} espera a que termine lo que corre en segundo plano (cambiar ahora lo cortaría)` });
       this._changed(t);
       return;
     }
@@ -1098,20 +1122,32 @@ export class Host {
     this.agents.delete(t.id);
     const from = this._account(t);
     const fromModel = t.model;
+    // Its session stays available: coming back to this provider resumes it instead of a full handoff.
+    t.sessions ??= {};
+    if (t.sessionId && RESUMABLE(from)) t.sessions[from.id] = { sessionId: t.sessionId, model: fromModel, at: now(), upTo: t.items.length };
     t.accountId = target.id;
     t.model = model || 'default';
     t.effort = null;
     t.sessionId = null;
     t.handoffPending = t.items.some((i) => i.kind === 'user');
+    const saved = t.sessions[target.id];
+    delete t.sessions[target.id];
+    let resumed = false;
+    if (saved && t.handoffPending && RESUMABLE(target) && now() - saved.at < RESUME_WITHIN && saved.upTo <= t.items.length) {
+      t.sessionId = saved.sessionId;
+      t.handoffPending = false;
+      t.catchUpFrom = saved.upTo;
+      resumed = true;
+    }
     r.limit = null;
     r.sessionTokens = 0;
     r.context = null;
     this._append(t, {
       id: uuid(), kind: 'notice', accountId: target.id,
-      text: `Relevo: ${from.name} · ${this._modelName(from, fromModel)} → ${target.name} · ${this._modelName(target, t.model)}${t.handoffPending ? ' · contexto y traza traspasados' : ''}`,
+      text: `Relevo: ${from.name} · ${this._modelName(from, fromModel)} → ${target.name} · ${this._modelName(target, t.model)}${resumed ? ' · retoma su sesión anterior y recibe solo lo nuevo' : t.handoffPending ? ' · contexto y traza traspasados' : ''}`,
     });
     this._changed(t);
-    if (carryOn && t.handoffPending) this._startTurn(t, 'Sigue con la tarea donde lo dejó el agente anterior.', true);
+    if (carryOn && (t.handoffPending || t.catchUpFrom != null)) this._startTurn(t, 'Sigue con la tarea donde lo dejó el agente anterior.', true);
   }
 
   _diskProblem(t) {
@@ -1124,6 +1160,7 @@ export class Host {
 
   _startTurn(t, text, pendingRequest = false, meta = {}) {
     const r = this._rt(t);
+    this._preTurnSwitch(t);
     const account = this._account(t);
     const problem = this._diskProblem(t);
     if (problem) {
@@ -1170,9 +1207,16 @@ export class Host {
       const accounts = new Map(this.accounts.map((a) => [a.id, a]));
       const workState = gitops.workState(t.projectPath);
       const traceFile = saveTrace({ dir: this._traceDir(t), threadId: t.id, title: t.title, items: t.items, accounts, workState });
-      prompt = handoffText({ items: t.items, accounts, projectPath: t.projectPath, target: account, pendingRequest, workState, traceFile, fresh: !!t.freshSession }) + text;
+      const background = (t.bgLog ?? []).filter((b) => now() - (b.endedAt ?? now()) < 3 * 3600);
+      prompt = handoffText({ items: t.items, accounts, projectPath: t.projectPath, target: account, pendingRequest, workState, traceFile, fresh: !!t.freshSession, background }) + text;
       t.freshSession = false;
       t.handoffPending = false;
+      t.catchUpFrom = null;
+    } else if (t.catchUpFrom != null) {
+      // Back in its own session: only what happened while it was away.
+      const accounts = new Map(this.accounts.map((a) => [a.id, a]));
+      prompt = catchUpText({ items: t.items.slice(t.catchUpFrom), accounts, workState: gitops.workState(t.projectPath), pendingRequest }) + prompt;
+      t.catchUpFrom = null;
     }
     if (t.restoreNote) { prompt = `${t.restoreNote}\n\n${prompt}`; t.restoreNote = null; }
     prompt = teamPrefix + prompt;
@@ -1285,7 +1329,25 @@ export class Host {
       this._changed(t);
     });
     s.on('notice', (text) => { this._append(t, { id: uuid(), kind: 'notice', text }); this._changed(t); });
-    s.on('backgroundTasks', (list) => { r.backgroundTasks = list; this._changed(t); this._checkRestart(); });
+    s.on('backgroundTasks', (list) => {
+      // What ran in the background lately, for the brief of whoever takes over.
+      const before = new Set((r.backgroundTasks ?? []).map((b) => b.id));
+      const nowIds = new Set(list.map((b) => b.id));
+      t.bgLog ??= [];
+      for (const b of list) if (!before.has(b.id) && !t.bgLog.some((x) => x.id === b.id)) t.bgLog.push({ id: b.id, description: b.description, startedAt: b.startedAt ?? now() });
+      for (const x of t.bgLog) if (!x.endedAt && before.has(x.id) && !nowIds.has(x.id)) x.endedAt = now();
+      t.bgLog = t.bgLog.slice(-8);
+      r.backgroundTasks = list;
+      this._changed(t);
+      this._checkRestart();
+      // A switch waiting for this work happens now that it's over.
+      if (!list.length && r.pendingSwitch && !r.isRunning) {
+        const { accountId, model, carryOn, auto } = r.pendingSwitch;
+        r.pendingSwitch = null;
+        r.statusLine = null;
+        this.select(t, accountId, model, carryOn, auto);
+      }
+    });
     s.on('context', (used, window) => { r.context = { used, window: window ?? null }; });
     s.on('failure', (f) => {
       this._append(t, { id: uuid(), kind: 'error', text: f.message, accountId: account.id });
@@ -1295,7 +1357,7 @@ export class Host {
       }
       if (f.kind === 'limit' || f.kind === 'unavailable') {
         r.limit = { accountId: account.id, message: f.message, resetsAt: f.resetsAt ?? null, isCapacity: f.kind === 'unavailable', isNoPlan: false };
-        if (f.kind === 'limit') r.limitHit = true;
+        if (f.kind === 'limit') { r.limitHit = true; this._noteLimit(account, t.model, f.resetsAt); }
       }
       if (f.kind === 'sessionLost') {
         // The CLI lost its session: a fresh one gets the thread's context instead.
@@ -1362,10 +1424,10 @@ export class Host {
         });
       }
       if (r.pendingSwitch) {
-        const { accountId, model, carryOn } = r.pendingSwitch;
+        const { accountId, model, carryOn, auto } = r.pendingSwitch;
         r.pendingSwitch = null;
-        this.select(t, accountId, model, carryOn);
-        return;
+        this.select(t, accountId, model, carryOn, auto);
+        if (r.pendingSwitch || r.isRunning) return; // still waiting for its background work, or carrying on
       }
       if (r.sendNow) { const text = r.sendNow, meta = r.sendNowMeta ?? {}; r.sendNow = null; r.sendNowMeta = null; this._startTurn(t, text, false, meta); return; }
       this._checkRestart();
@@ -1410,6 +1472,7 @@ export class Host {
     switch (plan?.mode) {
       case 'mostQuota': return 'pasar a la de más cuota';
       case 'wait': return 'esperar a que se reinicie y seguir';
+      case 'smart': return plan.tier === 'light' ? 'automático: un modelo ligero con cuota' : 'automático: el modelo más potente con cuota';
       case 'chain': return plan.targets.map((x) => {
         const a = this.accountsById.get(x.accountId);
         return `${a?.name ?? '?'} · ${a?.models.find((m) => m.id === x.model)?.name ?? x.model}`;
@@ -1426,30 +1489,82 @@ export class Host {
     r.resumeAt = null;
   }
 
+  // MARK: - Out of quota: where to go
+
+  /** A limit hit, remembered for every thread: per model in Antigravity (each family has its quota), per account elsewhere. */
+  _noteLimit(account, model, resetsAt) {
+    this.modelLimits ??= new Map();
+    const key = account.kind === 'gemini' ? `${account.id}|${model || 'default'}` : `${account.id}|*`;
+    this.modelLimits.set(key, resetsAt ?? now() + 3600);
+  }
+
+  _limitedUntil(accountId, model) {
+    const m = this.modelLimits ?? new Map();
+    const until = Math.max(m.get(`${accountId}|${model || 'default'}`) ?? 0, m.get(`${accountId}|*`) ?? 0);
+    return until > now() ? until : 0;
+  }
+
+  _used(a) { return Math.max(0, ...(a?.status?.windows ?? []).map((w) => w.percent)); }
+
+  /** A subscription and model a thread can move to now (signed in, with quota, under `maxUsed` %). */
+  _usableTarget(accountId, model, maxUsed = 100) {
+    const a = this.accountsById.get(accountId);
+    if (!a || a.status?.loggedIn === false || this._exhausted(a) || this._limitedUntil(a.id, model)) return false;
+    return this._used(a) < maxUsed;
+  }
+
+  /** The best model with quota for a role: the strongest («heavy») or a cheap, able one («light»). */
+  _smartTarget(t, tier, includeCurrent = false) {
+    const current = includeCurrent ? null : this._account(t);
+    const out = [];
+    for (const a of this.accounts) {
+      for (const m of a.models.filter((x) => !(a.def?.hiddenModels ?? []).includes(x.id))) {
+        // The same account only for another model with its own quota (Antigravity's families).
+        if (a.id === current?.id && (a.kind !== 'gemini' || (m.id || 'default') === (t.model || 'default'))) continue;
+        if (!this._usableTarget(a.id, m.id)) continue;
+        const used = this._used(a);
+        out.push({ accountId: a.id, model: m.id, score: modelScore(m, tier) - (used >= 90 ? 50 : used / 5) });
+      }
+    }
+    out.sort((x, y) => y.score - x.score);
+    return out[0] ? { accountId: out[0].accountId, model: out[0].model } : null;
+  }
+
+  /** Where a thread's plan sends it when its model runs out (null: nowhere with quota). */
+  _planTarget(t, plan) {
+    const current = this._account(t);
+    const other = (x) => !(x.accountId === current?.id && (current.kind !== 'gemini' || (x.model || 'default') === (t.model || 'default')));
+    if (plan.mode === 'mostQuota') {
+      const best = this.accounts.filter((a) => a !== current && this._usableTarget(a.id, a.defaultModel)).sort((x, y) => this._used(x) - this._used(y))[0];
+      return best ? { accountId: best.id, model: best.defaultModel } : null;
+    }
+    if (plan.mode === 'chain') {
+      const ok = plan.targets.filter((x) => other(x) && this._usableTarget(x.accountId, x.model));
+      // One nearly used up is only taken when there's nothing better.
+      return ok.find((x) => this._usableTarget(x.accountId, x.model, 90)) ?? ok[0] ?? null;
+    }
+    if (plan.mode === 'smart') return this._smartTarget(t, plan.tier);
+    return null;
+  }
+
   /** The turn hit the quota: follow the thread's plan (or the host's): relay after a countdown, or wait. */
   _onLimit(t) {
     const r = this._rt(t);
     const plan = t.limitPlan ?? this.settings.limitPlan;
     const current = this._account(t);
-    const usable = (a) => a && a !== current && a.status?.loggedIn !== false && !this._exhausted(a);
-    const used = (a) => Math.max(0, ...(a.status?.windows ?? []).map((w) => w.percent));
     this._clearLimitTimers(t);
-    let target = null;
-    if (plan.mode === 'mostQuota') {
-      const best = this.accounts.filter(usable).sort((x, y) => used(x) - used(y))[0];
-      if (best) target = { accountId: best.id, model: best.defaultModel };
-    } else if (plan.mode === 'chain') {
-      target = plan.targets.find((x) => usable(this.accountsById.get(x.accountId))) ?? null;
-    } else if (plan.mode === 'wait') {
-      const resets = [r.limit?.resetsAt, ...(current?.status?.windows ?? []).filter((w) => w.percent >= 99).map((w) => w.resetsAt)].filter(Boolean);
-      const at = resets.length ? Math.max(...resets) + 30 : null;
-      if (!at) return;
+    if (plan.mode === 'ask') return;
+    const target = plan.mode === 'wait' ? null : this._planTarget(t, plan);
+    if (!target) {
+      // Waiting by choice, or nowhere else with quota: the same agent carries on when its quota comes back.
+      const resets = [r.limit?.resetsAt, this._limitedUntil(current?.id, t.model) || null, ...(current?.status?.windows ?? []).filter((w) => w.percent >= 99).map((w) => w.resetsAt)].filter(Boolean);
+      const at = resets.length ? Math.max(...resets) + 30 : now() + 3600;
+      if (plan.mode !== 'wait') this._append(t, { id: uuid(), kind: 'notice', text: `Ningún otro modelo del plan tiene cuota: sigue el mismo agente ${resets.length ? 'cuando se reinicie' : 'dentro de una hora (no se sabe cuándo se reinicia)'}` });
       r.resumeAt = at;
       r.relayTimer = setTimeout(() => this._resumeAfterLimit(t), Math.min(2 ** 31 - 1, Math.max(5, at - now()) * 1000));
       this._changed(t);
       return;
     }
-    if (!target) return;
     const delay = this.settings.relayDelay;
     r.pendingRelay = { ...target, at: now() + delay };
     r.relayTimer = setTimeout(() => this._relayNow(t), delay * 1000);
@@ -1463,8 +1578,41 @@ export class Host {
     if (!target) return;
     t.queuePaused = false;
     const to = this.accountsById.get(target.accountId);
+    // Where it was: it goes back there when that quota comes back.
+    t.home ??= { accountId: t.accountId, model: t.model };
     this._append(t, { id: uuid(), kind: 'notice', accountId: target.accountId, text: `Relevo automático a ${to?.name ?? '?'} · ${this._modelName(to, target.model)}` });
-    this.select(t, target.accountId, target.model, true);
+    this.select(t, target.accountId, target.model, true, true);
+  }
+
+  /**
+   * Before a turn: back to the model it had before an automatic relay once its quota is back, or, with a plan
+   * that relays, off a model about to run out (so the turn isn't cut halfway).
+   */
+  _preTurnSwitch(t) {
+    const r = this._rt(t);
+    if (r.backgroundTasks?.length || r.pendingSwitch) return;
+    const plan = t.limitPlan ?? this.settings.limitPlan;
+    if (t.home) {
+      const h = t.home;
+      if (h.accountId === t.accountId && (h.model || 'default') === (t.model || 'default')) t.home = null;
+      else if (plan.mode !== 'ask' && this._usableTarget(h.accountId, h.model, 95)) {
+        const a = this.accountsById.get(h.accountId);
+        t.home = null;
+        this._append(t, { id: uuid(), kind: 'notice', accountId: h.accountId, text: `Vuelve a ${a.name} · ${this._modelName(a, h.model)}: ya tiene cuota otra vez` });
+        this.select(t, h.accountId, h.model, false, true);
+        return;
+      }
+    }
+    if (plan.mode === 'ask' || plan.mode === 'wait') return;
+    const a = this._account(t);
+    const used = this._used(a);
+    if (used < 97 && !this._limitedUntil(a?.id, t.model)) return;
+    const target = this._planTarget(t, plan);
+    if (!target) return;
+    t.home ??= { accountId: a.id, model: t.model };
+    const to = this.accountsById.get(target.accountId);
+    this._append(t, { id: uuid(), kind: 'notice', accountId: target.accountId, text: `Relevo preventivo a ${to.name} · ${this._modelName(to, target.model)}: ${a.name} está ${used >= 97 ? `al ${Math.round(used)} %` : 'sin cuota'} y el turno se cortaría a medias` });
+    this.select(t, target.accountId, target.model, false, true);
   }
 
   _resumeAfterLimit(t) {
@@ -1606,13 +1754,37 @@ export class Host {
       autoRelay: settings.limitPlan.mode !== 'ask', pushReady: false,
       // Beyond the shared protocol (the Mac and the iPhone ignore unknown fields).
       hostFeatures: HOST_FEATURES, hostVersion: this.config.version ?? 'dev', hostPlatform: process.platform, hostCLIs: this.config.bins ?? {},
-      hostTeams: this.teams.list.map((x) => ({ id: x.id, projectId: x.projectId, goal: x.goal, status: x.status, auto: x.auto, held: x.held.length, decisions: (x.decisions ?? []).map((d) => ({ id: d.id, text: d.text, by: d.by, at: d.at })), members: x.members.map((m) => { const t = this.threads.get(m.threadId); return clean({ threadId: m.threadId, role: m.role, name: m.name, notes: m.notes, accountId: t?.accountId, model: t?.model ?? 'default', task: m.task ?? undefined, stash: m.stash?.length || undefined, fallback: t ? fallbackOf(t.limitPlan) : undefined }); }) })),
+      hostTeams: this.teams.list.map((x) => ({ id: x.id, projectId: x.projectId, goal: x.goal, status: x.status, auto: x.auto, held: x.held.length, decisions: (x.decisions ?? []).map((d) => ({ id: d.id, text: d.text, by: d.by, at: d.at })),
+        milestones: (x.milestones ?? []).map((m) => clean({ id: m.id, text: m.text, done: m.done, at: m.at, doneAt: m.doneAt })),
+        findings: (x.findings ?? []).map((f) => ({ id: f.id, topic: f.topic, summary: f.summary, links: f.links ?? [], by: f.by, at: f.at })),
+        budget: x.budget ?? undefined,
+        members: x.members.map((m) => { const t = this.threads.get(m.threadId); return clean({ threadId: m.threadId, role: m.role, name: m.name, notes: m.notes, accountId: t?.accountId, model: t?.model ?? 'default', task: m.task ?? undefined, stash: m.stash?.length || undefined, fallback: t ? fallbackOf(t.limitPlan) : undefined, today: t ? this._spendToday(t) : undefined }); }) })),
       hostSettings: { ...settings, limitPlanSummary: this._planSummary(settings.limitPlan), accounts: this._accountDefs() },
       hostProviders: {
         api: Object.entries(API_PRESETS).map(([id, p]) => ({ id, name: p.name, keyURL: p.keyURL ?? null })),
         acp: Object.entries(ACP_PRESETS).map(([id, p]) => ({ id, name: p.name, login: !!p.login })),
       },
     };
+  }
+
+  /** Tokens and cost of a thread's turns since midnight (host time), remembered until it changes. */
+  _spendToday(t) {
+    const midnight = new Date(); midnight.setHours(0, 0, 0, 0);
+    const since = midnight.getTime() / 1000;
+    const key = `${since}|${t.items.length}|${t.items[t.items.length - 1]?.usage?.tokens ?? 0}`;
+    if (t._spend?.key === key) return t._spend.value;
+    let tokens = 0, cost = 0, estimated = false;
+    for (let i = t.items.length - 1; i >= 0; i--) {
+      const it = t.items[i];
+      if ((it.date ?? 0) < since) break;
+      if (!it.usage) continue;
+      tokens += it.usage.tokens ?? 0;
+      cost += it.usage.cost ?? 0;
+      if (it.usage.costEstimated) estimated = true;
+    }
+    const value = tokens ? { tokens, cost: Math.round(cost * 1000) / 1000, estimated } : undefined;
+    Object.defineProperty(t, '_spend', { value: { key, value }, writable: true, configurable: true, enumerable: false });
+    return value;
   }
 
   _runtime(t) {

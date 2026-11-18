@@ -25,11 +25,19 @@ export const ROLES = {
 };
 
 /** Bumped when the agents' instructions change: teams made before get them again. */
-const RULES_VERSION = 5;
+const RULES_VERSION = 6;
 /** The orchestrator gets a fresh session (with a brief of its own thread) past any of these. */
 const LEAD_REFRESH = { context: 150_000, conversation: 1_200_000, turns: 60, share: 0.6 };
 /** Decisions the team keeps (the oldest go first past this). */
 const DECISIONS_MAX = 40;
+/** Research reports the team keeps, and how many the agents are reminded of. */
+const FINDINGS_MAX = 60, FINDINGS_SHOWN = 15;
+/** A background job older than this (seconds) gets its agent asked to check it, then again every so often. */
+export const BG_CHECK = Number(process.env.RELEVO_BG_CHECK ?? 1800);
+/** From this hour (host time) each team that worked today gets its day's summary. */
+const SUMMARY_HOUR = 21;
+/** Executors and the researcher start a fresh session past this share of their window (or LEAD_REFRESH.context). */
+const MEMBER_REFRESH = { share: 0.7, context: 180_000, conversation: 2_000_000 };
 
 /** Automatic messages in a row (with no message from you) before the team pauses itself. */
 export const AUTO_LIMIT = 60;
@@ -37,7 +45,7 @@ const REPORT_MAX = 2_500;
 
 // MARK: - Orders in the agents' replies
 
-const TAG = /<relevo:(tarea|urgente|investigar|respuesta|pregunta|integrar|fin|decisi[oó]n|descartar)\b([^>]*?)(?:\/>|>([\s\S]*?)<\/relevo:\1\s*>)/gi;
+const TAG = /<relevo:(tarea|urgente|investigar|respuesta|pregunta|integrar|fin|decisi[oó]n|descartar|hito|hecho)\b([^>]*?)(?:\/>|>([\s\S]*?)<\/relevo:\1\s*>)/gi;
 const FENCED = /```[\s\S]*?(?:```|$)/g;
 
 /** The orders in a reply, outside code blocks: [{ type, to, body }]. */
@@ -93,16 +101,20 @@ function rosterLine(host, team, m) {
  * A member's fallback when its subscription runs out: '' (as in Ajustes), 'wait' (until it resets), or
  * '<accountId>|<model>' (relay to that one). As the thread's out-of-quota plan, and back.
  */
-export function planFromFallback(host, fallback) {
+export function planFromFallback(host, fallback, role = 'executor') {
   if (fallback === undefined) return undefined;
   if (!fallback) return null;
   if (fallback === 'wait') return { mode: 'wait', targets: [] };
+  // The best model with quota for its role, chosen when it runs out: the strongest for an executor, a light
+  // one for the orchestrator and the researcher.
+  if (fallback === 'auto') return { mode: 'smart', targets: [], tier: role === 'executor' ? 'heavy' : 'light' };
   const [accountId, model] = String(fallback).split('|');
   return host._validPlan({ mode: 'chain', targets: [{ accountId, model: model || 'default' }] });
 }
 export function fallbackOf(plan) {
   if (!plan) return '';
   if (plan.mode === 'wait') return 'wait';
+  if (plan.mode === 'smart') return 'auto';
   const t = plan.mode === 'chain' && plan.targets?.[0];
   return t ? `${t.accountId}|${t.model || 'default'}` : '';
 }
@@ -120,6 +132,21 @@ export function decisionsBlock(team) {
   return `\nDecisiones del equipo (ya tomadas: síguelas y no las reabras salvo que aparezca evidencia nueva que las contradiga; en ese caso dilo antes de cambiar de rumbo):\n${list.map((d) => `#${d.id} ${d.text}`).join('\n')}\n`;
 }
 
+/** The goal's milestones: done, and the one in progress (the first not done). */
+export function milestonesBlock(team, forLead = false) {
+  const list = team.milestones ?? [];
+  if (!list.length) return forLead ? '\nHitos: aún no hay. Escríbelos al planificar (de 3 a 8, comprobables, en orden).\n' : '';
+  const current = list.find((m) => !m.done);
+  return `\nHitos del objetivo (${list.filter((m) => m.done).length}/${list.length}):\n${list.map((m) => `${m.done ? '✓' : m === current ? '→' : '○'} #${m.id} ${m.text}`).join('\n')}\n`;
+}
+
+/** What the researcher already found: reuse it, ask only for what's new. */
+export function findingsBlock(team) {
+  const list = (team.findings ?? []).slice(-FINDINGS_SHOWN);
+  if (!list.length) return '';
+  return `\nYa investigado en este equipo (reutilízalo; investiga solo lo nuevo o para ampliar algo concreto):\n${list.map((f) => `#${f.id} ${clip(f.topic, 110)} — ${clip(f.summary.split('\n').find((l) => l.trim()) ?? '', 170)}`).join('\n')}\n`;
+}
+
 /** Where the team stood when the orchestrator starts a fresh session: the board and each agent's last report. */
 function boardBlock(host, team, lead) {
   const reports = team.members.filter((m) => m !== lead && m.lastReport).map((m) => `- ${m.name} (${new Date(m.lastReport.at * 1000).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}): ${m.lastReport.text}`);
@@ -127,6 +154,7 @@ function boardBlock(host, team, lead) {
 }
 
 export function preamble(host, team, member, fresh = false) {
+  const taskLine = fresh && member.role !== 'orchestrator' && member.task?.text ? `\nVienes de una sesión anterior. Tu tarea actual (${member.task.state}): ${member.task.text}\n` : '';
   const t = host.threads.get(member.threadId);
   const roster = team.members.map((m) => rosterLine(host, team, m)).join('\n');
   const executors = team.members.filter((m) => m.role === 'executor');
@@ -143,6 +171,7 @@ Para dar órdenes, escríbelas tal cual en tu respuesta (fuera de bloques de có
 <relevo:tarea para="${executors[0]?.name ?? 'Ejecutor 1'}">qué hacer, criterio de terminado, ficheros o pistas</relevo:tarea>
 ${researcher ? `<relevo:investigar para="${executors[0]?.name ?? 'Ejecutor 1'}">qué averiguar y para qué</relevo:investigar>  (para= es opcional: a quién más le llega el informe)\n` : ''}<relevo:respuesta para="${executors[0]?.name ?? 'Ejecutor 1'}">respuesta a su duda o cómo desbloquearse</relevo:respuesta>
 ${executors.some((e) => host.threads.get(e.threadId)?.worktree) ? '<relevo:integrar de="Ejecutor 2"/>  fusiona en la rama principal el worktree de un ejecutor que ha terminado (lo hace Relevo, sin que tú toques git).\n' : ''}<relevo:fin>resumen para el usuario</relevo:fin>  cuando el objetivo esté cumplido y revisado.
+<relevo:hito>un paso comprobable hacia el objetivo</relevo:hito>  añade un hito (en orden); <relevo:hecho>2</relevo:hecho> marca el #2 como conseguido cuando lo hayas comprobado. Relevo los muestra al usuario como progreso y te los recuerda siempre.
 <relevo:decision>una decisión firme, en una línea (qué y por qué)</relevo:decision>  Relevo la guarda y se la recuerda a todo el equipo, también a ti en tus sesiones nuevas. Úsala para lo que no debe reabrirse: tecnologías y proyectos elegidos (p. ej. «usamos shadPS4 como referencia para GNM»), enfoques descartados y por qué, criterios del usuario. <relevo:descartar>3</relevo:descartar> retira la decisión #3 si deja de valer.
 
 <relevo:urgente para="${executors[0]?.name ?? 'Ejecutor 1'}">…</relevo:urgente>  solo si lo que está haciendo ahora es claramente erróneo o ya no sirve: interrumpe su turno.
@@ -156,7 +185,7 @@ Cómo funciona la entrega: a un agente que está trabajando solo le llega lo urg
 - Tareas pequeñas y comprobables. No des a dos ejecutores los mismos ficheros a la vez.
 ${researcher ? `- Antes de que un ejecutor construya algo que ya puede existir (una librería, un proyecto open source, un ejemplo), o en cuanto lleve dos intentos fallidos con el mismo problema, pide al ${researcher.name} que lo busque, y pasa al ejecutor la recomendación concreta.\n` : '- Si un ejecutor lleva dos intentos fallidos con el mismo problema, para y busca otro enfoque (librerías o proyectos open source que ya lo resuelvan) antes de insistir.\n'}- Responde tú las dudas que puedas. Si solo el usuario puede decidir, pregúntaselo en tu respuesta sin dar órdenes y espera.
 - Sé breve y gasta poco: todos ven el código en disco, no lo copies en los mensajes; no leas el proyecto entero, apóyate en los informes y lee solo lo que necesites para decidir.
-${notesOf(member)}${decisionsBlock(team)}${fresh ? boardBlock(host, team, member) : ''}
+${notesOf(member)}${milestonesBlock(team, true)}${decisionsBlock(team)}${findingsBlock(team)}${fresh ? boardBlock(host, team, member) : ''}
 Objetivo del usuario:
 ${team.goal}
 </relevo_equipo>
@@ -174,7 +203,8 @@ Tu trabajo es averiguar, no implementar: no modifiques ficheros del proyecto.
 - Busca en internet (buscador, documentación, GitHub, issues, foros) y en el código del proyecto lo que acorte el camino: librerías, proyectos open source, ejemplos y soluciones a errores conocidos.
 - Responde con un informe accionable y corto (unas 40 líneas como mucho): las opciones que recomiendas con enlace, licencia y lo madura que parece cada una, por qué encaja aquí, cómo aplicarla en pasos concretos, y los riesgos. Nada de volcados de código largos.
 - Si la petición no está clara, termina con <relevo:pregunta>tu duda</relevo:pregunta>.
-${notesOf(member)}${decisionsBlock(team)}</relevo_equipo>
+- Relevo guarda cada informe tuyo en la biblioteca del equipo: empieza con una línea de conclusión («Conclusión: …»).
+${notesOf(member)}${decisionsBlock(team)}${findingsBlock(team)}${taskLine}</relevo_equipo>
 
 `;
   }
@@ -188,7 +218,7 @@ ${roster}
 - Si dejas algo en segundo plano (una compilación, un emulador) y terminas el turno para esperarlo, no hace falta que informes: Relevo lo sabe y el orquestador no te escribirá hasta que acabes.
 - Si te bloqueas o necesitas una decisión, termina tu respuesta con <relevo:pregunta>tu duda concreta</relevo:pregunta> y espera la respuesta.${researcher ? ` Si llevas dos intentos fallidos con el mismo problema, pregunta: el ${researcher.name} puede buscar soluciones que ya existan.` : ''}
 - Otros agentes pueden estar trabajando en el mismo proyecto: toca solo lo que te pidan.
-${notesOf(member)}${decisionsBlock(team)}</relevo_equipo>
+${notesOf(member)}${decisionsBlock(team)}${taskLine}</relevo_equipo>
 
 `;
 }
@@ -201,6 +231,10 @@ export class Teams {
     host.state.teams ??= [];
     this._dropOrphans();
     this._upgrade();
+    this._watch = setInterval(() => {
+      try { this.watchBackground(); this._maybeSummary(); } catch (e) { host.log?.(`team watch: ${e.message}`); }
+    }, Math.min(60, BG_CHECK / 2) * 1000);
+    this._watch.unref?.();
   }
 
   /**
@@ -291,7 +325,7 @@ export class Teams {
       const name = execName(0);
       existing.team = { id: team.id, role: 'executor', name };
       existing.teamPrimed = false;
-      const plan = planFromFallback(h, spec.threadFallback);
+      const plan = planFromFallback(h, spec.threadFallback, 'executor');
       if (plan !== undefined) existing.limitPlan = plan;
       team.members.push(clean({ threadId: existing.id, role: 'executor', name, notes: noteOf(spec.threadNotes) }));
       h._append(existing, { id: h._uuid(), kind: 'notice', text: `Este hilo es ahora ${name} de un equipo: el Orquestador le irá dando tareas. Puedes seguir escribiéndole tú.` });
@@ -348,7 +382,7 @@ export class Teams {
     t.title = `${name} · ${clip(team.goal.split('\n')[0], 48)}`;
     t.team = { id: team.id, role, name };
     t.aiTitled = true; // the role and the goal are a better title than one guessed from the first message
-    const plan = planFromFallback(h, pick?.fallback);
+    const plan = planFromFallback(h, pick?.fallback, role);
     if (plan !== undefined) t.limitPlan = plan;
     team.members.push(clean({ threadId: t.id, role, name, notes: noteOf(pick?.notes) }));
     return t;
@@ -402,6 +436,11 @@ export class Teams {
       }
       news.push(m.role === 'orchestrator' ? `Ahora te llamas ${name}` : `${old} ahora se llama ${name}: usa ese nombre en para="…"`);
     }
+    if (changes.budget !== undefined) {
+      const usd = Number(changes.budget?.usd);
+      team.budget = usd > 0 ? { usd: Math.round(usd * 100) / 100, action: changes.budget.action === 'light' ? 'light' : 'pause' } : null;
+      team.budgetDay = null;
+    }
     const goal = String(changes.goal ?? '').trim();
     if (goal && goal !== team.goal) { team.goal = goal; news.push(`Nuevo objetivo:\n${goal}`); }
 
@@ -415,7 +454,7 @@ export class Teams {
         if (m.role !== 'orchestrator') news.push(`${m.name} tiene indicaciones nuevas${m.notes ? `: ${clip(m.notes.replace(/\s+/g, ' '), 300)}` : ' (ninguna)'}`);
         else news.push(`Tus indicaciones han cambiado${m.notes ? `:\n${m.notes}` : ': ya no hay ninguna'}`);
       }
-      const plan = planFromFallback(h, c.fallback);
+      const plan = planFromFallback(h, c.fallback, m.role);
       if (plan !== undefined && JSON.stringify(plan) !== JSON.stringify(t.limitPlan ?? null)) { t.limitPlan = plan; h._changed(t); }
       const account = c.accountId && h.accountsById.get(String(c.accountId).toUpperCase());
       const model = c.model || 'default';
@@ -535,7 +574,7 @@ export class Teams {
     if (thread.teamPrimed && !freshSession) return notes;
     thread.teamPrimed = true;
     member.decisionsSeen = team.nextDecision ?? 0; // the preamble lists them all
-    return preamble(this.host, team, member, !!freshSession && member.role === 'orchestrator') + notes;
+    return preamble(this.host, team, member, !!freshSession) + notes;
   }
 
   /**
@@ -567,12 +606,13 @@ export class Teams {
     const member = this.memberOf(thread);
     if (!team || !member || team.status === 'done') return;
     const h = this.host;
+    this._checkBudget(team);
     if (member.role === 'orchestrator') {
       const orders = parseOrders(text);
       this._dispatch(team, member, thread, orders);
       // A turn with no orders is the orchestrator talking to you (a question, a decision, a summary).
       const said = withoutOrders(text).trim();
-      if (!orders.some((o) => !['decision', 'descartar'].includes(o.type)) && said && team.status !== 'done') this._attention(thread, 'orquestador', said);
+      if (!orders.some((o) => !['decision', 'descartar', 'hito', 'hecho'].includes(o.type)) && said && team.status !== 'done') this._attention(thread, 'orquestador', said);
       team.leadTurns = (team.leadTurns ?? 0) + 1;
       this._maybeRefreshLead(team, thread);
       h._saveState();
@@ -606,6 +646,16 @@ export class Teams {
     const kind = member.role === 'researcher' ? 'informe de investigación' : errors?.length && !body ? 'error'
       : state === 'esperando' ? 'espera (no necesita respuesta)' : 'informe';
     this._setTask(member, state === 'bloqueado' ? 'bloqueado' : state === 'esperando' ? 'esperando' : 'hecha');
+    if (member.role === 'researcher' && body.trim()) {
+      this.addFinding(team, { topic: member.inquiry || clip(body.split('\n').find((l) => l.trim()) ?? '', 200), body, by: member.name });
+      member.inquiry = null;
+    }
+    // Executors sharing one folder: uncommitted work piles up and gets mixed.
+    if (member.role === 'executor' && !thread.worktree) {
+      const others = team.members.filter((m) => m !== member && m.role === 'executor' && !h.threads.get(m.threadId)?.worktree);
+      const files = others.length && gitops.isRepo(thread.projectPath) ? gitops.status(thread.projectPath).files.length : 0;
+      if (files >= 1) report.push(`Carpeta compartida con ${others.map((m) => m.name).join(', ')}: ${files} fichero${files === 1 ? '' : 's'} sin commit. Pide que cada uno haga commit de lo suyo al cerrar cada tarea, para no mezclar trabajo.`);
+    }
     // What it said last, for the orchestrator's next fresh session.
     member.lastReport = { text: clip(headTail(elideCode(body, 4), 900).replace(/\n{2,}/g, '\n'), 900), at: Date.now() / 1000 };
     // A researcher's report also goes straight to whoever it was for, if it's free to read it now.
@@ -620,6 +670,7 @@ export class Teams {
       } else report.push(`(${target.name} está trabajando: no se le ha enviado. Pásale lo que le sirva junto con su siguiente tarea.)`);
     }
     this._toLead(team, member, kind, report.join('\n\n'));
+    this._maybeRefreshMember(team, member, thread);
   }
 
   /** The orders of the orchestrator's turn not sent yet (some may have gone when it started waiting on a timer). */
@@ -719,6 +770,218 @@ export class Teams {
     return {};
   }
 
+  addMilestone(team, text) {
+    const clean = clip(String(text ?? '').replace(/\s+/g, ' ').trim(), 240);
+    if (!clean) return null;
+    team.milestones ??= [];
+    if (team.milestones.some((m) => norm(m.text) === norm(clean))) return null;
+    team.nextMilestone = (team.nextMilestone ?? 0) + 1;
+    const m = { id: team.nextMilestone, text: clean, done: false, at: Date.now() / 1000 };
+    team.milestones.push(m);
+    this._memoryChanged();
+    return m;
+  }
+
+  /** Marks milestones done (or not) by number. Returns the ones that changed. */
+  setMilestones(team, which, done) {
+    const ids = new Set(String(which ?? '').match(/\d+/g)?.map(Number) ?? []);
+    const changed = (team.milestones ?? []).filter((m) => ids.has(m.id) && m.done !== done);
+    for (const m of changed) { m.done = done; m.doneAt = done ? Date.now() / 1000 : undefined; }
+    if (changed.length) this._memoryChanged();
+    return changed;
+  }
+
+  /** A research report into the team's library (its conclusion line first, links kept apart). */
+  addFinding(team, { topic, body, by }) {
+    const text = String(body ?? '');
+    const conclusion = /^\s*\**conclusi[oó]n:?\**\s*(.+)$/im.exec(text)?.[1];
+    const summary = clip((conclusion ? `${conclusion}\n` : '') + headTail(elideCode(text, 4), 700).replace(/\n{2,}/g, '\n'), 800);
+    const links = [...new Set(text.match(/https?:\/\/[^\s)>\]"'`]+/g) ?? [])].slice(0, 8);
+    team.findings ??= [];
+    team.nextFinding = (team.nextFinding ?? 0) + 1;
+    const f = { id: team.nextFinding, topic: clip(String(topic ?? '').replace(/\s+/g, ' ').trim() || 'Investigación', 200), summary, links, by, at: Date.now() / 1000 };
+    team.findings.push(f);
+    if (team.findings.length > FINDINGS_MAX) team.findings.splice(0, team.findings.length - FINDINGS_MAX);
+    this._memoryChanged();
+    return f;
+  }
+
+  /** Today's spend of the whole team (tokens and cost of every member's turns since midnight). */
+  spendToday(team) {
+    let tokens = 0, cost = 0;
+    for (const m of team.members) {
+      const t = this.host.threads.get(m.threadId);
+      const sp = t && this.host._spendToday(t);
+      tokens += sp?.tokens ?? 0;
+      cost += sp?.cost ?? 0;
+    }
+    return { tokens, cost };
+  }
+
+  /** Over its daily budget: the team pauses, or its orchestrator and researcher move to light models. Once a day. */
+  _checkBudget(team) {
+    if (!team.budget?.usd) return;
+    const day = new Date().toDateString();
+    if (team.budgetDay === day) return;
+    const { cost } = this.spendToday(team);
+    if (cost < team.budget.usd) return;
+    team.budgetDay = day;
+    const h = this.host;
+    const lead = this._lead(team);
+    const spent = `${cost.toFixed(2)} USD de ${team.budget.usd.toFixed(2)}`;
+    if (team.budget.action === 'light') {
+      const moved = [];
+      for (const m of team.members.filter((x) => x.role !== 'executor')) {
+        const t = h.threads.get(m.threadId);
+        if (!t) continue;
+        const target = h._smartTarget(t, 'light', true);
+        if (!target || (target.accountId === t.accountId && target.model === t.model)) continue;
+        h.select(t, target.accountId, target.model, false, true);
+        const a = h.accountsById.get(target.accountId);
+        moved.push(`${m.name} → ${a?.name} · ${h._modelName(a, target.model)}`);
+      }
+      if (lead) {
+        h._append(lead, { id: h._uuid(), kind: 'notice', text: `Presupuesto de hoy superado (${spent}): ${moved.length ? `pasan a modelos ligeros ${moved.join(', ')}` : 'ya usaban modelos ligeros'}` });
+        this._attention(lead, 'presupuesto', `Presupuesto de hoy superado (${spent})`);
+      }
+    } else {
+      team.status = 'paused';
+      if (lead) {
+        h._append(lead, { id: h._uuid(), kind: 'notice', text: `Equipo en pausa: presupuesto de hoy superado (${spent}). Reanúdalo cuando quieras.` });
+        this._attention(lead, 'presupuesto', `Equipo en pausa: presupuesto de hoy superado (${spent})`);
+      }
+    }
+    h._saveState();
+    h._broadcastSnapshot();
+  }
+
+  /**
+   * The day's summary in the orchestrator's thread, without an AI: milestones reached, decisions, research and
+   * spend. Once a day, from SUMMARY_HOUR, for teams that worked that day.
+   */
+  dailySummary(team, at = new Date()) {
+    const h = this.host;
+    const midnight = new Date(at); midnight.setHours(0, 0, 0, 0);
+    const since = midnight.getTime() / 1000;
+    const today = (x) => (x ?? 0) >= since;
+    const lines = [];
+    const ms = team.milestones ?? [];
+    const reached = ms.filter((m) => m.done && today(m.doneAt));
+    if (ms.length) lines.push(`Hitos: ${ms.filter((m) => m.done).length}/${ms.length}${reached.length ? ` · hoy: ${reached.map((m) => `#${m.id} ${m.text}`).join('; ')}` : ' · ninguno nuevo hoy'}${ms.find((m) => !m.done) ? ` · ahora: ${ms.find((m) => !m.done).text}` : ''}`);
+    const ds = (team.decisions ?? []).filter((d) => today(d.at));
+    if (ds.length) lines.push(`Decisiones nuevas: ${ds.map((d) => `#${d.id} ${clip(d.text, 120)}`).join('; ')}`);
+    const fs = (team.findings ?? []).filter((f) => today(f.at));
+    if (fs.length) lines.push(`Investigado: ${fs.map((f) => clip(f.topic, 80)).join('; ')}`);
+    const spend = team.members.map((m) => { const t = h.threads.get(m.threadId); const sp = t && h._spendToday(t); return sp?.tokens ? `${m.name} ${Math.round(sp.tokens / 1000)}k tokens${sp.cost ? ` (${sp.estimated ? '≈ ' : ''}${sp.cost.toFixed(2)} USD)` : ''}` : null; }).filter(Boolean);
+    if (spend.length) lines.push(`Gasto: ${spend.join(' · ')}`);
+    const tasks = team.members.filter((m) => m.role !== 'orchestrator' && m.task?.text).map((m) => `${m.name}: ${clip(m.task.text, 90)} (${m.task.state})`);
+    if (tasks.length) lines.push(`En curso: ${tasks.join(' · ')}`);
+    return lines.length ? `Resumen de hoy\n${lines.map((l) => `- ${l}`).join('\n')}` : '';
+  }
+
+  _maybeSummary(now = new Date()) {
+    if (now.getHours() < SUMMARY_HOUR) return;
+    const day = now.toDateString();
+    for (const team of this.list) {
+      if (team.summaryDay === day || team.status === 'done') continue;
+      if (!this.spendToday(team).tokens) continue;
+      team.summaryDay = day;
+      const text = this.dailySummary(team, now);
+      const lead = this._lead(team);
+      if (!text || !lead) continue;
+      this.host._append(lead, { id: this.host._uuid(), kind: 'notice', text });
+      this._attention(lead, 'resumen', text.split('\n').slice(1, 3).join(' '));
+      this.host._saveState();
+    }
+  }
+
+  _memoryChanged() {
+    this.host._saveState();
+    this.host._broadcastSnapshot();
+  }
+
+  /**
+   * You change the team's memory from the apps: decisions, milestones (add, toggle, remove) and research
+   * (remove). The orchestrator hears what matters with its next message.
+   */
+  editMemory(teamId, { kind, add, remove, toggle } = {}) {
+    const team = this.byId(teamId);
+    if (!team) throw new Error('Equipo desconocido');
+    if (kind === 'decision') return this.editDecisions(teamId, { add, remove });
+    const ids = (x) => new Set(String(x ?? '').match(/\d+/g)?.map(Number) ?? []);
+    const tell = (n) => { team.notes = [...(team.notes ?? []), n]; };
+    if (kind === 'milestone') {
+      if (add) {
+        const m = this.addMilestone(team, add);
+        if (!m) throw new Error(String(add).trim() ? 'Ese hito ya está' : 'Escribe el hito');
+        tell(`El usuario ha añadido el hito #${m.id}: ${m.text}`);
+      }
+      if (toggle) {
+        for (const m of (team.milestones ?? []).filter((x) => ids(toggle).has(x.id))) {
+          this.setMilestones(team, String(m.id), !m.done);
+          tell(`El usuario ha marcado el hito #${m.id} como ${m.done ? 'conseguido' : 'pendiente'}`);
+        }
+      }
+      if (remove) {
+        const gone = (team.milestones ?? []).filter((x) => ids(remove).has(x.id));
+        team.milestones = (team.milestones ?? []).filter((x) => !ids(remove).has(x.id));
+        if (gone.length) { tell(`El usuario ha quitado ${gone.map((m) => `el hito #${m.id}`).join(' y ')}`); this._memoryChanged(); }
+      }
+      return {};
+    }
+    if (kind === 'finding') {
+      if (remove) { team.findings = (team.findings ?? []).filter((x) => !ids(remove).has(x.id)); this._memoryChanged(); }
+      return {};
+    }
+    throw new Error('Tipo desconocido');
+  }
+
+  /**
+   * An executor or the researcher whose session grew too big starts a fresh one (with a brief, the decisions
+   * and its task), like the orchestrator. Never while it has something running in the background.
+   */
+  _maybeRefreshMember(team, member, t) {
+    const h = this.host;
+    const r = h._rt(t);
+    if (r.backgroundTasks?.length || r.isRunning) return;
+    const limit = Math.min(MEMBER_REFRESH.context, (r.context?.window ?? Infinity) * MEMBER_REFRESH.share);
+    if ((r.context?.used ?? 0) <= limit && (r.sessionTokens ?? 0) <= MEMBER_REFRESH.conversation) return;
+    h.agents.get(t.id)?.close();
+    h.agents.delete(t.id);
+    t.sessionId = null;
+    t.sessions = {}; // older sessions are bigger still: none is resumed after this
+    t.handoffPending = true;
+    t.freshSession = true;
+    t.teamPrimed = false;
+    r.sessionTokens = 0;
+    r.context = null;
+    h._append(t, { id: h._uuid(), kind: 'notice', text: 'Sesión renovada para no arrastrar todo el contexto: el siguiente mensaje lleva un resumen, su tarea y las decisiones del equipo' });
+    h._changed(t);
+  }
+
+  /**
+   * A job left running in the background for a long time may have hung (a stuck emulator, a dead process with
+   * its waiter still alive): its agent is asked to look, once per BG_CHECK.
+   */
+  watchBackground(now = Date.now() / 1000) {
+    const h = this.host;
+    for (const team of this.list) {
+      if (team.status !== 'active') continue;
+      for (const member of team.members) {
+        const t = h.threads.get(member.threadId);
+        if (!t) continue;
+        const r = h._rt(t);
+        if (r.isRunning || r.approvals.size || !r.backgroundTasks?.length) continue;
+        r.bgChecked ??= {};
+        const old = r.backgroundTasks.filter((b) => now - (r.bgChecked[b.id] ?? b.startedAt ?? now) >= BG_CHECK);
+        if (!old.length) continue;
+        for (const b of old) r.bgChecked[b.id] = now;
+        const list = old.map((b) => `«${b.description}» (lleva ${Math.round((now - (b.startedAt ?? now)) / 60)} min)`).join(', ');
+        this._deliver(team, member, `Tienes en segundo plano ${list}. Comprueba que sigue avanzando (su log, su proceso, si su salida crece). Si está colgado o el proceso ha muerto, páralo y cuéntalo en tu informe; si va bien, di en una línea cómo va y sigue esperando.`, { name: 'Relevo', role: 'relevo', label: 'comprobación' });
+      }
+    }
+  }
+
   _maybeRefreshLead(team, t) {
     const h = this.host;
     const r = h._rt(t);
@@ -730,6 +993,7 @@ export class Teams {
     h.agents.get(t.id)?.close();
     h.agents.delete(t.id);
     t.sessionId = null;
+    t.sessions = {}; // older sessions are bigger still: none is resumed after this
     t.handoffPending = true;
     t.freshSession = true;
     t.teamPrimed = false;
@@ -794,7 +1058,8 @@ export class Teams {
       case 'investigar': {
         if (!researcher) { complain('Este equipo no tiene investigador: busca tú o pide al usuario que lo añada.'); return; }
         researcher.reportFor = o.to && findMember(team, o.to)?.name || null;
-        this._deliver(team, researcher, o.body, { ...from, label: researcher.reportFor ? `investigación para ${researcher.reportFor}` : 'investigación' });
+        researcher.inquiry = clip(o.body.replace(/\s+/g, ' '), 300);
+        this._deliver(team, researcher, `${o.body}${findingsBlock(team) ? `\n${findingsBlock(team)}` : ''}`, { ...from, label: researcher.reportFor ? `investigación para ${researcher.reportFor}` : 'investigación' });
         return;
       }
       case 'respuesta': {
@@ -835,6 +1100,17 @@ export class Teams {
           () => this._deliver(team, lead, `Integrado: la rama ${t.worktree?.branch ?? ''} de ${to.name} está fusionada en ${t.worktree?.base ?? 'la rama principal'}.`, { name: 'Relevo', role: 'relevo', label: 'integración' }),
           (e) => this._deliver(team, lead, `No se ha podido integrar el trabajo de ${to.name}: ${clip(e.message, 600)}. Pídele que lo resuelva (rebase o conflictos) y vuelve a intentarlo.`, { name: 'Relevo', role: 'relevo', label: 'integración' }),
         );
+        return;
+      }
+      case 'hito': {
+        const m = this.addMilestone(team, o.body);
+        if (m) { h._append(leadThread, { id: h._uuid(), kind: 'notice', text: `Hito #${m.id}: ${clip(m.text, 200)}` }); h._changed(leadThread); }
+        return;
+      }
+      case 'hecho': {
+        const done = this.setMilestones(team, o.body || o.to, true);
+        for (const m of done) h._append(leadThread, { id: h._uuid(), kind: 'notice', text: `Hito conseguido: #${m.id} ${clip(m.text, 200)} (${team.milestones.filter((x) => x.done).length}/${team.milestones.length})` });
+        if (done.length) h._changed(leadThread);
         return;
       }
       case 'decision': {

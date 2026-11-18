@@ -387,3 +387,45 @@ test('a fresh orchestrator session gets the decisions, the board and the last re
   assert.doesNotMatch(preamble(host, team, team.members[0], false), /Último informe/);
   assert.match(preamble(host, team, team.members[1]), /#1 Usamos shadPS4/);
 });
+
+test('milestones and the research library: kept from the orders, editable, and the spend of each agent today', async () => {
+  const claude = snapshot.accounts.find((a) => a.kind === 'claude');
+  const r = await request('createTeam', { team: { projectId: demo(), goal: 'Hitos', orchestrator: { accountId: claude.id }, executors: [{ accountId: claude.id }], researcher: { accountId: claude.id } } });
+  assert.ok(r.ok, r.error);
+  const boss = r.threadId;
+  peer.send(Client.subscribe(boss));
+  await next(firstDone(boss));
+  peer.send(Client.send(boss, '<relevo:hito>Arranca el binario</relevo:hito> <relevo:hito>Menú visible</relevo:hito> <relevo:hecho>1</relevo:hecho> <relevo:investigar>shadPS4 y GNM</relevo:investigar>'));
+  const teamOf = (m) => m.snapshot?._0.hostTeams?.find((x) => x.goal === 'Hitos');
+  const t1 = teamOf(await next((m) => teamOf(m)?.milestones?.length === 2 && teamOf(m).milestones[0].done && teamOf(m).findings?.length === 1, 25_000));
+  assert.equal(t1.milestones[1].done, false);
+  assert.equal(t1.findings[0].topic, 'shadPS4 y GNM');
+  assert.ok(t1.members[0].today?.tokens > 0, 'the orchestrator spent tokens today');
+  const tg = await request('teamMemory', { teamId: t1.id, kind: 'milestone', toggle: '2' });
+  assert.ok(tg.ok, tg.error);
+  await next((m) => teamOf(m)?.milestones?.[1]?.done === true);
+  const rm = await request('teamMemory', { teamId: t1.id, kind: 'finding', remove: '1' });
+  assert.ok(rm.ok, rm.error);
+  await next((m) => teamOf(m)?.findings?.length === 0);
+});
+
+test('a long background job gets its agent asked to check it, once per period', async () => {
+  const { Teams, BG_CHECK } = await import('../lib/team.mjs');
+  const sent = [];
+  const rt = { isRunning: false, approvals: new Map(), backgroundTasks: [{ id: 'b1', description: 'QEMU run', startedAt: 0 }] };
+  const ctx = {
+    host: { threads: new Map([['E', {}]]), _rt: () => rt },
+    list: [{ status: 'active', members: [{ threadId: 'E', role: 'executor', name: 'Ejecutor' }] }],
+    _deliver: (team, member, text, from) => sent.push({ member: member.name, text, from }),
+  };
+  Teams.prototype.watchBackground.call(ctx, BG_CHECK - 10);
+  assert.equal(sent.length, 0, 'too early');
+  Teams.prototype.watchBackground.call(ctx, BG_CHECK + 1);
+  assert.equal(sent.length, 1);
+  assert.match(sent[0].text, /QEMU run/);
+  assert.equal(sent[0].from.label, 'comprobación');
+  Teams.prototype.watchBackground.call(ctx, BG_CHECK + 60);
+  assert.equal(sent.length, 1, 'not again right away');
+  Teams.prototype.watchBackground.call(ctx, 2 * BG_CHECK + 2);
+  assert.equal(sent.length, 2, 'again after another period');
+});

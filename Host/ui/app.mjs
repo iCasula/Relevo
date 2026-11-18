@@ -420,6 +420,16 @@ const ROLE = {
 const teamOf = (hostId, teamId) => snap(hostId)?.hostTeams?.find((x) => x.id === teamId) ?? null;
 
 /** The team a thread belongs to: its members (each a click away, with what it's doing), pause and dissolve. */
+/** The team's memory: milestone progress (or the decisions count on hosts without milestones). */
+function memoryButton(team) {
+  const ms = team.milestones ?? [];
+  const done = ms.filter((m) => m.done).length;
+  const current = ms.find((m) => !m.done);
+  const tip = `Memoria del equipo: ${ms.length ? `hitos ${done}/${ms.length}${current ? ` · ahora: ${current.text}` : ' · todos conseguidos'}` : 'sin hitos'}${team.decisions?.length ? ` · ${team.decisions.length} decisiones` : ''}${team.findings?.length ? ` · ${team.findings.length} informes` : ''}`;
+  const bar = ms.length ? `<span class="m-mini"><i style="width:${Math.round((done / ms.length) * 100)}%"></i></span><span>${done}/${ms.length}</span>` : team.decisions?.length ? `<span>${team.decisions.length}</span>` : '';
+  return `<button class="tb-btn team-dec" data-team-memory title="${esc(tip)}">${icon('checklist', { size: 13 })}${bar}</button>`;
+}
+
 function renderTeamBar() {
   const { hostId, summary } = current();
   const team = summary?.team && teamOf(hostId, summary.team.id);
@@ -436,16 +446,20 @@ function renderTeamBar() {
         m.task?.text ? `Tarea: ${m.task.text} (${m.task.state})` : '',
         [ctx, t?.sessionTokens ? `sesión ${shortTokens(t.sessionTokens)} tokens` : ''].filter(Boolean).join(' · '),
         m.stash ? `${m.stash} nota${m.stash === 1 ? '' : 's'} del orquestador para su próxima tarea` : '',
+        m.today?.tokens ? `Hoy: ${sheets.spendText(m.today)}` : '',
       ].filter(Boolean).join('\n');
       const prov = accountOf(hostId, m.accountId);
       return `<button class="team-chip r-${m.role}${m.threadId === summary.id ? ' on' : ''}" data-team-go="${esc(m.threadId)}" title="${esc(tip)}">${icon(ROLE[m.role]?.icon ?? 'person.2', { size: 11 })}<span>${esc(m.name)}</span>${prov ? badge(prov, 12) : ''}${state}</button>`;
     }).join('');
+    const total = team.members.reduce((acc, m) => ({ tokens: acc.tokens + (m.today?.tokens ?? 0), cost: acc.cost + (m.today?.cost ?? 0), estimated: acc.estimated || !!m.today?.estimated }), { tokens: 0, cost: 0, estimated: false });
+    const spent = total.cost ? `${total.estimated ? '≈ ' : ''}${usd(total.cost)} hoy` : total.tokens ? `${shortTokens(total.tokens)} hoy` : '';
     const status = team.status === 'paused' ? `<span class="team-status orange">En pausa${team.held ? ` · ${team.held} mensaje${team.held === 1 ? '' : 's'} esperando` : ''}</span>`
       : team.status === 'done' ? `<span class="team-status green">${icon('checkmark.circle.fill', { size: 11 })} Objetivo cumplido</span>` : '';
     html = `<span class="team-label" title="${esc(team.goal)}">${icon('person.3.sequence', { size: 13 })}Equipo</span>${chips}<span class="grow"></span>${status}`
       + (team.status === 'paused' ? `<button class="btn small" data-team-act="resume">${icon('play.rectangle', { size: 11 })} Reanudar</button>`
         : team.status === 'active' ? `<button class="btn small" data-team-act="pause" title="Los mensajes entre agentes esperan; tú puedes seguir escribiendo">${icon('pause.circle', { size: 11 })} Pausar</button>` : '')
-      + (has(hostId, 'teamDecisions') ? `<button class="tb-btn team-dec" data-team-decisions title="Decisiones del equipo${team.decisions?.length ? ` (${team.decisions.length})` : ''}: Relevo se las recuerda a todos los agentes, también tras renovar o relevar una sesión">${icon('checklist', { size: 13 })}${team.decisions?.length ? `<span>${team.decisions.length}</span>` : ''}</button>` : '')
+      + (spent ? `<span class="team-spend" title="Gasto de hoy del equipo (por agente, en cada ficha)">${esc(spent)}</span>` : '')
+      + (has(hostId, 'teamDecisions') ? memoryButton(team) : '')
       + `<button class="tb-btn" data-team-edit title="Editar el equipo: modelos, indicaciones, miembros">${icon('pencil', { size: 12 })}</button>`
       + `<button class="tb-btn" data-team-menu title="Más">${icon('chevron.down', { size: 10 })}</button>`;
   }
@@ -1114,7 +1128,7 @@ document.addEventListener('click', (e) => {
     return;
   }
   if (d.teamMenu !== undefined) { teamMenu(el); return; }
-  if (d.teamDecisions !== undefined) { const id = summaryOf(hostId, threadId)?.team?.id; if (id) sheets.openTeamDecisions(hostId, id); return; }
+  if (d.teamMemory !== undefined) { const id = summaryOf(hostId, threadId)?.team?.id; if (id) sheets.openTeamMemory(hostId, id, d.teamMemory || undefined); return; }
   if (d.teamEdit !== undefined) { const id = summaryOf(hostId, threadId)?.team?.id; if (id) sheets.openTeamEditor(hostId, id); return; }
   if (d.approve) { sendTo(hostId, Client.approve(threadId, d.approve, d.option)); return; }
   if (d.qOpt) {
@@ -1240,7 +1254,7 @@ document.addEventListener('keydown', (e) => {
 // Inside the native Mac app (window.webkit.messageHandlers.relevo) the notifications are the system's.
 
 const native = () => window.webkit?.messageHandlers?.relevo;
-const ATTENTION = { orquestador: 'El orquestador te escribe', fin: 'Objetivo cumplido', pausa: 'Equipo en pausa' };
+const ATTENTION = { orquestador: 'El orquestador te escribe', fin: 'Objetivo cumplido', pausa: 'Equipo en pausa', presupuesto: 'Presupuesto del equipo superado', resumen: 'Resumen del día del equipo' };
 
 function notifyChanges(hostId) {
   for (const t of snap(hostId)?.threads ?? []) {
@@ -1255,6 +1269,19 @@ function notifyChanges(hostId) {
     if (!prev.approval && t.needsApproval) notify(hostId, t, `${who}Necesita tu respuesta`, t.title);
     else if (t.attention && t.attention.at !== prev.attention) notify(hostId, t, ATTENTION[t.attention.kind] ?? 'El equipo te necesita', t.attention.text);
     else if (!role && prev.running && !t.isRunning && !t.needsApproval) notify(hostId, t, t.title, (t.preview ?? '').slice(0, 140));
+  }
+  // A milestone reached: good news worth a notification.
+  for (const team of snap(hostId)?.hostTeams ?? []) {
+    const key = `${hostId}/team/${team.id}`;
+    const done = (team.milestones ?? []).filter((m) => m.done).map((m) => m.id);
+    const prev = app.notified.get(key);
+    app.notified.set(key, done);
+    if (!prev) continue;
+    const lead = team.members.find((m) => m.role === 'orchestrator');
+    const t = lead && (snap(hostId)?.threads ?? []).find((x) => x.id === lead.threadId);
+    for (const m of (team.milestones ?? []).filter((x) => x.done && !prev.includes(x.id))) {
+      if (t) notify(hostId, t, `Hito conseguido (${done.length}/${team.milestones.length})`, m.text);
+    }
   }
   reportStatus();
 }

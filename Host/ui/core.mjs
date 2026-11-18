@@ -228,7 +228,7 @@ export const MODES = [
   ['full', 'Acceso total', 'bolt.shield', 'Sin confirmaciones. Úsalo solo en proyectos de confianza.'],
   ['plan', 'Solo planificar', 'list.bullet.clipboard', 'Solo lectura: analiza y propone un plan sin tocar nada.'],
 ];
-export const PLAN_SUMMARY = { ask: 'avisarme', mostQuota: 'la de más cuota', wait: 'esperar al reinicio' };
+export const PLAN_SUMMARY = { ask: 'avisarme', mostQuota: 'la de más cuota', wait: 'esperar al reinicio', smart: 'automático' };
 export const CHART_COLORS = {
   gemini: ['#2a78d6', '#3987e5'], claude: ['#eb6834', '#d95926'], codex: ['#1baf7a', '#199e70'], deepseek: ['#eda100', '#c98500'],
   anthropic: ['#c96442', '#d4734f'], other: ['#e34948', '#e66767'],

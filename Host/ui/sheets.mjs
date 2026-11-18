@@ -838,7 +838,7 @@ export function openCompare(hostId, threadId, draft = '') {
 function fallbackSelect(hostId, attrs, value) {
   const accounts = (snap(hostId)?.accounts ?? []).filter((a) => a.status?.loggedIn !== false);
   const opt = (v, label) => `<option value="${esc(v)}"${String(value ?? '') === v ? ' selected' : ''}>${esc(label)}</option>`;
-  return `<select class="field team-fb" ${attrs} title="Qué hace este agente cuando se le acaba la cuota">${opt('', 'Sin cuota: como en Ajustes')}${opt('wait', 'Sin cuota: esperar al reinicio')}`
+  return `<select class="field team-fb" ${attrs} title="Qué hace este agente cuando se le acaba la cuota. Automático: el mejor modelo con cuota para su papel (el más potente para un ejecutor, uno ligero para el orquestador y el investigador), y vuelve al suyo cuando recupere la cuota">${has(hostId, 'smartFallback') ? opt('auto', 'Sin cuota: automático') : ''}${opt('', 'Sin cuota: como en Ajustes')}${opt('wait', 'Sin cuota: esperar al reinicio')}`
     + accounts.map((a) => `<optgroup label="Sin cuota → ${esc(a.name)}">${visibleModels(a).map((m) => opt(`${a.id}|${m.id}`, `→ ${a.name} · ${m.name}`)).join('')}</optgroup>`).join('') + '</select>';
 }
 
@@ -861,7 +861,9 @@ export function openNewTeam(hostId, projectId, goal = '', { threadId = null } = 
   const accounts = (snap(hostId)?.accounts ?? []).filter((a) => a.status?.loggedIn !== false);
   if (!project || !accounts.length) { toast(project ? 'No hay ninguna suscripción con sesión iniciada' : 'Elige un proyecto'); return; }
   if (joining && !goal) goal = threadOf(hostId, threadId)?.items.find((i) => i.kind === 'user')?.text ?? joining.title ?? '';
-  const pick = (a, prefer) => ({ accountId: a.id, model: (visibleModels(a).find((m) => prefer.test(m.id)) ?? visibleModels(a)[0])?.id ?? 'default', notes: '' });
+  // Out of quota, each agent goes by default to the best model with quota for its role (if the host can).
+  const auto = has(hostId, 'smartFallback') ? 'auto' : '';
+  const pick = (a, prefer) => ({ accountId: a.id, model: (visibleModels(a).find((m) => prefer.test(m.id)) ?? visibleModels(a)[0])?.id ?? 'default', notes: '', fallback: auto });
   const kindOf = (a) => a.kind.split(':')[0];
   const claude = accounts.find((a) => a.kind === 'claude') ?? accounts[0];
   const gemini = accounts.find((a) => kindOf(a) === 'gemini');
@@ -872,6 +874,7 @@ export function openNewTeam(hostId, projectId, goal = '', { threadId = null } = 
     executors: joining ? [] : [pick(claude, /sonnet/i)],
     researcher: other ? pick(other, /.^/) : pick(claude, /sonnet|haiku/i),
     threadNotes: '',
+    threadFallback: auto,
     withResearcher: true,
     worktrees: true,
     mode: 'autoEdit',
@@ -981,6 +984,7 @@ export function openTeamEditor(hostId, teamId) {
     members: team.members.map((m) => ({ ...m, accountId: m.accountId ?? usable[0]?.id, model: m.model ?? 'default', notes: m.notes ?? '', fallback: m.fallback ?? '', remove: false })),
     allFallback: null, // the "for everyone" picker, until a member's own differs
     adds: [], // { role, accountId, model, notes }
+    budget: { usd: team.budget?.usd ?? '', action: team.budget?.action ?? 'pause' },
     worktrees: true,
   };
   const original = JSON.stringify(st.members.map(({ threadId, accountId, model, notes, fallback, name }) => ({ threadId, accountId, model, notes, fallback, name })));
@@ -1012,11 +1016,12 @@ export function openTeamEditor(hostId, teamId) {
         <div class="team-line"><span class="team-role"></span><button class="btn small" data-add-exec${executors >= 4 ? ' disabled' : ''}>${icon('plus', { size: 10 })} Añadir ejecutor</button>${hasResearcher() ? '' : `<button class="btn small" data-add-res>${icon('plus', { size: 10 })} Añadir investigador</button>`}</div>
         ${allFallbackRow(hostId, sharedFallback())}
       </div>
+      ${has(hostId, 'teamBudget') ? `<div class="form-group" style="margin-top:12px"><div class="form-row"><span class="grow">Presupuesto diario <span class="caption">(${team.members.some((m) => m.today?.cost) ? `hoy van ${usd(team.members.reduce((n, m) => n + (m.today?.cost ?? 0), 0))}` : 'coste equivalente a la API'})</span></span><input class="field-input" data-budget type="number" min="0" step="1" placeholder="sin límite" style="width:110px" value="${st.budget.usd || ''}"> USD <select class="field" data-budget-action>${[['pause', 'y entonces pausar'], ['light', 'y entonces abaratar']].map(([v, l]) => `<option value="${v}"${st.budget.action === v ? ' selected' : ''}>${l}</option>`).join('')}</select></div><div class="caption" style="padding:0 10px 8px">Abaratar: el orquestador y el investigador pasan a modelos ligeros; los ejecutores siguen igual.</div></div>` : ''}
       ${st.adds.some((a) => a.role === 'executor') && has(hostId, 'worktrees') ? `<div class="form-group" style="margin-top:12px"><div class="form-row"><label style="display:flex;gap:8px;align-items:center"><input type="checkbox" class="check" data-wt${st.worktrees ? ' checked' : ''}> Los ejecutores nuevos, cada uno en su worktree (si el proyecto es un repositorio git)</label></div></div>` : ''}
       <div class="sheet-buttons"><button class="btn" data-no>Cancelar</button><span class="grow"></span><button class="btn primary" data-go>Guardar cambios</button></div>`;
     const $ = (q) => s.el.querySelector(q);
     const target = (key) => (key[0] === 'm' ? st.members[Number(key.slice(1))] : st.adds[Number(key.slice(1))]);
-    const keep = () => { st.goal = $('[data-goal]').value; };
+    const keep = () => { st.goal = $('[data-goal]').value; const b = $('[data-budget]'); if (b) { st.budget.usd = b.value; st.budget.action = $('[data-budget-action]').value; } };
     s.el.querySelectorAll('[data-acc]').forEach((el) => { el.onchange = () => { const r = target(el.dataset.acc); r.accountId = el.value; r.model = visibleModels(accountOf(hostId, el.value))[0]?.id ?? 'default'; keep(); draw(); }; });
     s.el.querySelectorAll('[data-model]').forEach((el) => { el.onchange = () => { target(el.dataset.model).model = el.value; }; });
     s.el.querySelectorAll('[data-notes]').forEach((el) => { el.oninput = () => { target(el.dataset.notes).notes = el.value; }; });
@@ -1026,7 +1031,7 @@ export function openTeamEditor(hostId, teamId) {
     s.el.querySelectorAll('[data-rm]').forEach((b) => { b.onclick = () => { st.members[Number(b.dataset.rm)].remove = true; keep(); draw(); }; });
     s.el.querySelectorAll('[data-undo]').forEach((b) => { b.onclick = () => { st.members[Number(b.dataset.undo)].remove = false; keep(); draw(); }; });
     s.el.querySelectorAll('[data-rm-add]').forEach((b) => { b.onclick = () => { st.adds.splice(Number(b.dataset.rmAdd), 1); keep(); draw(); }; });
-    const fresh = (role) => { const a = usable[0]; return { role, accountId: a?.id, model: visibleModels(a)[0]?.id ?? 'default', notes: '', fallback: '' }; };
+    const fresh = (role) => { const a = usable[0]; return { role, accountId: a?.id, model: visibleModels(a)[0]?.id ?? 'default', notes: '', fallback: has(hostId, 'smartFallback') ? 'auto' : '' }; };
     $('[data-add-exec]').onclick = () => { st.adds.push(fresh('executor')); keep(); draw(); };
     $('[data-add-res]')?.addEventListener('click', () => { st.adds.push(fresh('researcher')); keep(); draw(); });
     $('[data-wt]')?.addEventListener('change', (e) => { st.worktrees = e.target.checked; });
@@ -1044,6 +1049,7 @@ export function openTeamEditor(hostId, teamId) {
         remove: st.members.filter((m) => m.remove).map((m) => m.threadId),
         add: { executors: st.adds.filter((a) => a.role === 'executor'), researcher: st.adds.find((a) => a.role === 'researcher') ?? null },
         worktrees: st.worktrees,
+        budget: has(hostId, 'teamBudget') && (String(st.budget.usd ?? '') !== String(team.budget?.usd ?? '') || st.budget.action !== (team.budget?.action ?? 'pause')) ? { usd: Number(st.budget.usd) || 0, action: st.budget.action } : undefined,
       };
       $('[data-go]').disabled = true;
       $('[data-go]').innerHTML = '<span class="spinner"></span> Guardando…';
@@ -1056,35 +1062,66 @@ export function openTeamEditor(hostId, teamId) {
   draw();
 }
 
-// MARK: - Team decisions
+// MARK: - Team memory (milestones, decisions, research)
 
-/** What the team has decided: Relevo reminds every agent, also after a fresh session or a relay. */
-export function openTeamDecisions(hostId, teamId) {
-  const s = openSheet({ width: 620 });
+/** Tokens and cost, short: "120k tokens · $0,40". */
+export function spendText(sp) {
+  if (!sp?.tokens) return '';
+  return `${shortTokens(sp.tokens)} tokens${sp.cost ? ` · ${sp.estimated ? '≈ ' : ''}${usd(sp.cost)}` : ''}`;
+}
+
+/**
+ * What the team keeps across sessions and relays: the goal's milestones, the decisions taken and what the
+ * researcher found. Relevo reminds the agents of it; here you see it and change it.
+ */
+export function openTeamMemory(hostId, teamId, tab = 'milestones') {
+  const s = openSheet({ width: 660 });
   let busy = false;
+  const full = has(hostId, 'teamMemory');
   const draw = () => {
     const team = snap(hostId)?.hostTeams?.find((x) => x.id === teamId);
     if (!team) { s.close(); return; }
-    const list = team.decisions ?? [];
-    const when = (at) => new Date(at * 1000).toLocaleString('es-ES', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
-    s.el.innerHTML = `<div class="sheet-title">${icon('checklist', { size: 16 })} Decisiones del equipo</div>
-      <div class="sheet-sub">Lo que ya está decidido y no debe reabrirse. El orquestador las guarda con <code>&lt;relevo:decision&gt;</code>; Relevo se las da a cada agente nuevo, en cada sesión renovada y en cada relevo de proveedor, y avisa a los demás de las nuevas.</div>
-      <div class="decisions">${list.length ? list.map((d) => `<div class="decision"><span class="d-id">#${d.id}</span><div class="grow"><div class="d-text selectable">${esc(d.text)}</div><div class="caption">${d.by === 'usuario' ? 'Tú' : esc(d.by ?? '')} · ${esc(when(d.at))}</div></div><button class="tb-btn" data-drop="${d.id}" title="Retirar esta decisión (se avisa al orquestador)">${icon('trash', { size: 12 })}</button></div>`).join('')
-        : '<div class="caption" style="padding:10px 2px">Aún no hay ninguna. Añade las que ya estén claras (por ejemplo, qué proyecto usáis de base) y el orquestador irá guardando las suyas.</div>'}</div>
-      <div class="team-line" style="margin-top:10px"><input class="field-input grow" data-new placeholder="Una decisión, en una línea: qué y por qué" maxlength="400"><button class="btn primary" data-add>Añadir</button></div>
+    const when = (at) => (at ? new Date(at * 1000).toLocaleString('es-ES', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '');
+    const ms = team.milestones ?? [], ds = team.decisions ?? [], fs = team.findings ?? [];
+    const tabs = [['milestones', 'Hitos', ms.length ? `${ms.filter((m) => m.done).length}/${ms.length}` : ''], ['decisions', 'Decisiones', ds.length || ''], ['findings', 'Investigado', fs.length || '']].filter(([k]) => full || k === 'decisions');
+    if (!tabs.some(([k]) => k === tab)) tab = tabs[0][0];
+    let body = '';
+    if (tab === 'milestones') {
+      const current = ms.find((m) => !m.done);
+      body = `<div class="caption" style="margin-bottom:6px">Los pasos hacia el objetivo. El orquestador los escribe con <code>&lt;relevo:hito&gt;</code> y marca los conseguidos con <code>&lt;relevo:hecho&gt;</code>; los tiene presentes en cada sesión.</div>`
+        + (ms.length ? `<div class="m-progress"><i style="width:${Math.round((ms.filter((m) => m.done).length / ms.length) * 100)}%"></i></div>` : '')
+        + `<div class="decisions">${ms.length ? ms.map((m) => `<div class="decision${m.done ? ' done' : ''}${m === current ? ' current' : ''}"><button class="tb-btn" data-toggle="${m.id}" title="${m.done ? 'Marcar como pendiente' : 'Marcar como conseguido'}">${icon(m.done ? 'checkmark.circle.fill' : m === current ? 'largecircle.fill.circle' : 'circle', { size: 15 })}</button><div class="grow"><div class="d-text selectable">${esc(m.text)}</div><div class="caption">#${m.id}${m.done ? ` · conseguido ${esc(when(m.doneAt))}` : m === current ? ' · en curso' : ''}</div></div><button class="tb-btn" data-drop="${m.id}" title="Quitar este hito">${icon('trash', { size: 12 })}</button></div>`).join('')
+          : '<div class="caption" style="padding:10px 2px">Aún no hay hitos. El orquestador los escribirá al planificar, o añádelos tú.</div>'}</div>
+        <div class="team-line" style="margin-top:10px"><input class="field-input grow" data-new placeholder="Un hito comprobable (p. ej. «el menú principal se ve»)" maxlength="240"><button class="btn primary" data-add>Añadir</button></div>`;
+    } else if (tab === 'decisions') {
+      body = `<div class="caption" style="margin-bottom:6px">Lo ya decidido, que no debe reabrirse. El orquestador las guarda con <code>&lt;relevo:decision&gt;</code>; Relevo se las da a cada agente nuevo, en cada sesión renovada y en cada relevo de proveedor.</div>
+        <div class="decisions">${ds.length ? ds.map((d) => `<div class="decision"><span class="d-id">#${d.id}</span><div class="grow"><div class="d-text selectable">${esc(d.text)}</div><div class="caption">${d.by === 'usuario' ? 'Tú' : esc(d.by ?? '')} · ${esc(when(d.at))}</div></div><button class="tb-btn" data-drop="${d.id}" title="Retirar esta decisión (se avisa al orquestador)">${icon('trash', { size: 12 })}</button></div>`).join('')
+          : '<div class="caption" style="padding:10px 2px">Aún no hay ninguna. Añade las que ya estén claras (por ejemplo, qué proyecto usáis de base).</div>'}</div>
+        <div class="team-line" style="margin-top:10px"><input class="field-input grow" data-new placeholder="Una decisión, en una línea: qué y por qué" maxlength="400"><button class="btn primary" data-add>Añadir</button></div>`;
+    } else {
+      body = `<div class="caption" style="margin-bottom:6px">Cada informe del investigador, guardado. Antes de investigar algo nuevo, Relevo le recuerda al equipo lo que ya se sabe para no repetir búsquedas.</div>
+        <div class="decisions">${fs.length ? [...fs].reverse().map((f) => `<div class="decision"><span class="d-id">#${f.id}</span><div class="grow"><div class="d-text selectable"><b>${esc(f.topic)}</b></div><div class="f-sum selectable">${esc(f.summary)}</div>${f.links?.length ? `<div class="f-links">${f.links.map((l) => `<a href="${esc(l)}" target="_blank" rel="noopener">${esc(l.replace(/^https?:\/\/(www\.)?/, '').slice(0, 60))}</a>`).join('')}</div>` : ''}<div class="caption">${esc(f.by ?? '')} · ${esc(when(f.at))}</div></div><button class="tb-btn" data-drop="${f.id}" title="Quitar de la biblioteca">${icon('trash', { size: 12 })}</button></div>`).join('')
+          : '<div class="caption" style="padding:10px 2px">Aún no hay informes. Cuando el investigador termine uno, aparecerá aquí.</div>'}</div>`;
+    }
+    s.el.innerHTML = `<div class="sheet-title">${icon('checklist', { size: 16 })} Memoria del equipo</div>
+      <div class="seg mem-tabs">${tabs.map(([k, l, n]) => `<button class="${k === tab ? 'on' : ''}" data-tab="${k}">${l}${n !== '' ? ` <span class="n">${n}</span>` : ''}</button>`).join('')}</div>
+      ${body}
       <div class="sheet-buttons"><span class="grow"></span><button class="btn" data-close>Listo</button></div>`;
     const $ = (q) => s.el.querySelector(q);
-    const send = async (body) => {
+    const kind = { milestones: 'milestone', decisions: 'decision', findings: 'finding' }[tab];
+    const send = async (op) => {
       if (busy) return;
       busy = true;
-      const r = await request(hostId, { teamDecisions: { teamId, ...body } });
+      const r = full ? await request(hostId, { teamMemory: { teamId, kind, ...op } }) : await request(hostId, { teamDecisions: { teamId, ...op } });
       busy = false;
       if (!r.ok) { toast(r.error); return; }
       setTimeout(draw, 200); setTimeout(draw, 800); // the snapshot with the change is on its way
     };
-    $('[data-add]').onclick = () => { const v = $('[data-new]').value.trim(); if (v) send({ add: v }); else $('[data-new]').focus(); };
-    $('[data-new]').onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); $('[data-add]').click(); } };
+    s.el.querySelectorAll('[data-tab]').forEach((b) => { b.onclick = () => { tab = b.dataset.tab; draw(); }; });
+    $('[data-add]')?.addEventListener('click', () => { const v = $('[data-new]').value.trim(); if (v) send({ add: v }); else $('[data-new]').focus(); });
+    $('[data-new]')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('[data-add]').click(); } });
     s.el.querySelectorAll('[data-drop]').forEach((b) => { b.onclick = () => send({ remove: b.dataset.drop }); });
+    s.el.querySelectorAll('[data-toggle]').forEach((b) => { b.onclick = () => send({ toggle: b.dataset.toggle }); });
     $('[data-close]').onclick = s.close;
     setTimeout(() => $('[data-new]')?.focus(), 0);
   };
@@ -1110,25 +1147,28 @@ export async function openTraza(hostId, threadId) {
 export function openLimitPlanEditor(hostId, threadId) {
   const thread = threadId ? threadOf(hostId, threadId) : null;
   const base = threadId ? (thread?.runtime?.limitPlan ?? thread?.runtime?.defaultLimitPlan) : snap(hostId)?.hostSettings?.limitPlan;
-  const plan = { mode: base?.mode === 'chain' ? 'chain' : 'chain', targets: [...(base?.targets ?? [])] };
+  const plan = { mode: base?.mode ?? 'ask', targets: [...(base?.targets ?? [])], tier: base?.tier ?? 'heavy' };
   const s = openSheet({ width: 520 });
   const draw = () => {
-    const modes = [['ask', 'Avisarme y decidir yo'], ['mostQuota', 'Pasar a la suscripción con más cuota'], ['chain', 'Pasar a las que elija, en orden'], ['wait', 'Esperar a que se reinicie y seguir']];
+    const modes = [['ask', 'Avisarme y decidir yo'], ...(has(hostId, 'smartFallback') ? [['smart', 'Automático: el mejor modelo con cuota (y volver cuando haya)']] : []), ['mostQuota', 'Pasar a la suscripción con más cuota'], ['chain', 'Pasar a las que elija, en orden'], ['wait', 'Esperar a que se reinicie y seguir']];
     s.el.innerHTML = `<div class="sheet-title">${threadId ? 'Si se acaba la cuota en este hilo' : 'Si se acaba la cuota (por defecto)'}</div>
       <div style="display:flex;flex-direction:column;gap:6px">${modes.map(([m, l]) => `<label><input type="radio" name="pm" value="${m}"${plan.mode === m ? ' checked' : ''}> ${l}</label>`).join('')}</div>
       ${plan.mode === 'chain' ? `<div class="caption">Se prueban en este orden; las que también estén sin cuota se saltan. Si no queda ninguna, el hilo espera a que se reinicie la cuota y sigue.</div>
         <div style="display:flex;flex-direction:column;gap:6px">${plan.targets.map((t, i) => { const a = accountOf(hostId, t.accountId); return `<div class="form-group"><div class="form-row" style="padding:6px 10px"><span class="mono muted" style="width:22px;text-align:right">${i + 1}.</span>${badge(a, 16)}<span class="grow">${a ? `${esc(a.name)} · ${esc(modelName(a, t.model))}` : 'Suscripción eliminada'}</span><button class="tb-btn" data-up="${i}"${i ? '' : ' disabled'}>${icon('chevron.up', { size: 11 })}</button><button class="tb-btn" data-down="${i}"${i < plan.targets.length - 1 ? '' : ' disabled'}>${icon('chevron.down', { size: 11 })}</button><button class="tb-btn" data-rm="${i}">${icon('minus.circle', { size: 13 })}</button></div></div>`; }).join('')}</div>
         <div><button class="btn" data-add>Añadir ${icon('chevron.down', { size: 9 })}</button></div>`
+      : plan.mode === 'smart' ? `<div class="caption">Cuando se acaba, Relevo elige entre todas las suscripciones el mejor modelo que tenga cuota (saltando las que estén casi agotadas). Si la cuota del modelo de antes vuelve, regresa a él antes del siguiente turno; si no queda ninguno, espera al reinicio.</div>
+        <div style="display:flex;gap:14px"><label><input type="radio" name="tier" value="heavy"${plan.tier !== 'light' ? ' checked' : ''}> El más potente</label><label><input type="radio" name="tier" value="light"${plan.tier === 'light' ? ' checked' : ''}> Uno ligero y barato</label></div>`
       : plan.mode === 'wait' ? '<div class="caption">A la hora del reinicio (o en cuanto vuelva a haber cuota, si el proveedor no la dice), Relevo le pide al mismo agente que siga donde lo dejó. Su sesión conserva todo el contexto. Hace falta que el host esté encendido.</div>' : ''}
       <div class="sheet-buttons"><span class="grow"></span><button class="btn" data-no>Cancelar</button><button class="btn primary" data-yes${plan.mode === 'chain' && !plan.targets.length ? ' disabled' : ''}>Guardar</button></div>`;
     s.el.querySelectorAll('input[name=pm]').forEach((r) => { r.onchange = () => { plan.mode = r.value; draw(); }; });
+    s.el.querySelectorAll('input[name=tier]').forEach((r) => { r.onchange = () => { plan.tier = r.value; }; });
     s.el.querySelectorAll('[data-up]').forEach((b) => { b.onclick = () => { const i = Number(b.dataset.up); [plan.targets[i - 1], plan.targets[i]] = [plan.targets[i], plan.targets[i - 1]]; draw(); }; });
     s.el.querySelectorAll('[data-down]').forEach((b) => { b.onclick = () => { const i = Number(b.dataset.down); [plan.targets[i + 1], plan.targets[i]] = [plan.targets[i], plan.targets[i + 1]]; draw(); }; });
     s.el.querySelectorAll('[data-rm]').forEach((b) => { b.onclick = () => { plan.targets.splice(Number(b.dataset.rm), 1); draw(); }; });
     s.el.querySelector('[data-add]')?.addEventListener('click', (e) => showMenu(e.currentTarget, (snap(hostId)?.accounts ?? []).flatMap((a) => [{ section: a.name }, ...visibleModels(a).map((m) => ({ label: m.name, action: () => { plan.targets.push({ accountId: a.id, model: m.id }); draw(); } }))])));
     s.el.querySelector('[data-no]').onclick = s.close;
     s.el.querySelector('[data-yes]').onclick = async () => {
-      const p = { mode: plan.mode, targets: plan.mode === 'chain' ? plan.targets : [] };
+      const p = { mode: plan.mode, targets: plan.mode === 'chain' ? plan.targets : [], ...(plan.mode === 'smart' ? { tier: plan.tier } : {}) };
       if (threadId) sendTo(hostId, Client.setLimitPlan(threadId, p));
       else { const r = await request(hostId, { setSettings: { settings: { limitPlan: p } } }); if (!r.ok) toast(r.error); }
       s.close();

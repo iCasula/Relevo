@@ -224,6 +224,8 @@ public struct RemoteTeamMember: Codable, Hashable, Identifiable, Sendable {
     public var task: Task?
     /// Messages kept for it until its next task.
     public var stash: Int?
+    /// What it spent today.
+    public var today: RemoteSpend?
     public var id: UUID { threadId }
 }
 
@@ -233,6 +235,29 @@ public struct RemoteTeamDecision: Codable, Hashable, Identifiable, Sendable {
     /// The orchestrator's name, or "usuario".
     public var by: String?
     public var at: Date?
+}
+
+public struct RemoteTeamMilestone: Codable, Hashable, Identifiable, Sendable {
+    public var id: Int
+    public var text: String
+    public var done: Bool
+    public var doneAt: Date?
+}
+
+public struct RemoteTeamFinding: Codable, Hashable, Identifiable, Sendable {
+    public var id: Int
+    public var topic: String
+    public var summary: String
+    public var links: [String]?
+    public var by: String?
+    public var at: Date?
+}
+
+/// Tokens and cost of an agent's turns today.
+public struct RemoteSpend: Codable, Hashable, Sendable {
+    public var tokens: Int
+    public var cost: Double?
+    public var estimated: Bool?
 }
 
 public struct RemoteTeam: Codable, Hashable, Identifiable, Sendable {
@@ -246,6 +271,13 @@ public struct RemoteTeam: Codable, Hashable, Identifiable, Sendable {
     public var members: [RemoteTeamMember]
     /// What the team decided (Relevo reminds every agent of it).
     public var decisions: [RemoteTeamDecision]?
+    /// The goal's steps, in order.
+    public var milestones: [RemoteTeamMilestone]?
+    /// The researcher's reports, kept.
+    public var findings: [RemoteTeamFinding]?
+
+    public var milestonesDone: Int { milestones?.filter(\.done).count ?? 0 }
+    public var currentMilestone: RemoteTeamMilestone? { milestones?.first { !$0.done } }
 
     public var isPaused: Bool { status == "paused" }
     public var lead: RemoteTeamMember? { members.first { $0.role == .orchestrator } }

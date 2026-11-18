@@ -528,6 +528,11 @@ input[type=checkbox].check { accent-color: var(--accent); width: 14px; height: 1
 .team-chip:hover { background: var(--fill-quaternary); }
 .team-chip.on { background: var(--fill-tertiary); border-color: transparent; font-weight: 600; }
 .team-chip .spinner { width: 10px; height: 10px; }
+/* Narrow windows: the chips give way (their names shorten) so the team's controls stay in view. */
+.teambar > * { flex: none; }
+.teambar > .team-chip { flex: 0 1 auto; min-width: 46px; }
+.team-chip > span:not(.spinner):not(.orange):not(.muted):not(.badge-p) { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.teambar > .grow { flex: 1 1 0; min-width: 0; }
 .team-status { font-size: 12px; white-space: nowrap; display: inline-flex; align-items: center; gap: 4px; }
 .r-orchestrator svg { color: var(--yellow); }
 .r-executor svg { color: var(--accent); }
@@ -562,6 +567,17 @@ input[type=checkbox].check { accent-color: var(--accent); width: 14px; height: 1
 .team-name:hover { border-color: var(--separator, rgba(128,128,128,.3)); }
 .team-name:focus { outline: none; border-color: var(--accent); background: var(--field-bg, transparent); }
 .tb-btn.team-dec { width: auto; padding: 0 5px; gap: 3px; display: inline-flex; align-items: center; font-size: 11px; font-variant-numeric: tabular-nums; }
+.team-spend { font-size: 11px; color: var(--secondary); font-variant-numeric: tabular-nums; margin-right: 4px; white-space: nowrap; }
+.m-mini { display: inline-block; width: 34px; height: 4px; border-radius: 2px; background: var(--hairline); overflow: hidden; margin-left: 3px; }
+.m-mini i { display: block; height: 100%; background: var(--green, #34c759); }
+.m-progress { height: 6px; border-radius: 3px; background: var(--hairline); overflow: hidden; margin: 2px 0 8px; }
+.m-progress i { display: block; height: 100%; background: var(--green, #34c759); }
+.mem-tabs { margin: 2px 0 10px; align-self: flex-start; }
+.mem-tabs .n { color: var(--secondary); font-variant-numeric: tabular-nums; }
+.decision.done .d-text { color: var(--secondary); text-decoration: line-through; text-decoration-color: var(--tertiary); }
+.decision.current .d-text { font-weight: 600; }
+.decision .f-sum { font-size: 12px; color: var(--secondary); white-space: pre-wrap; margin-top: 3px; max-height: 120px; overflow: auto; user-select: text; }
+.decision .f-links { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 4px; font-size: 11px; }
 .decisions { display: flex; flex-direction: column; gap: 2px; max-height: 50vh; overflow: auto; }
 .decision { display: flex; align-items: flex-start; gap: 10px; padding: 8px 4px; border-bottom: 1px solid var(--separator); }
 .decision .d-id { font-variant-numeric: tabular-nums; color: var(--secondary); font-size: 12px; min-width: 26px; padding-top: 1px; }

@@ -39,6 +39,8 @@ public enum ClientMessage: Codable, Sendable {
     case teamAction(teamId: String, action: String)
     /// Add a decision to a team, or withdraw one by number (Relevo hosts only).
     case teamDecisions(teamId: String, add: String?, remove: String?)
+    /// The team's memory: kind "milestone", "decision" or "finding"; add, remove or toggle (by number).
+    case teamMemory(teamId: String, kind: String, add: String?, remove: String?, toggle: String?)
 }
 
 public enum LimitAction: String, Codable, Sendable {
