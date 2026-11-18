@@ -192,3 +192,26 @@ test('editing a team keeps its threads and tells the orchestrator what changed',
   const text = news.threadPatch._0.upserts.find((i) => i.from?.label === 'cambios en el equipo').text;
   assert.match(text, /Nuevo objetivo:[\s\S]*Solo traducciones[\s\S]*pasa a Codex[\s\S]*ha salido del equipo[\s\S]*Se une el Investigador/);
 });
+
+test("messages for a busy executor wait as one, and the orchestrator sees who's busy", async () => {
+  const claude = snapshot.accounts.find((a) => a.kind === 'claude');
+  const r = await request('createTeam', { team: { projectId: snapshot.projects[0].id, goal: 'Cola', orchestrator: { accountId: claude.id }, executors: [{ accountId: claude.id }], researcher: null } });
+  assert.ok(r.ok, r.error);
+  const boss = r.threadId;
+  peer.send(Client.subscribe(boss));
+  await next((m) => m.threadPatch?._0.id === boss && !m.threadPatch._0.runtime.isRunning && m.threadPatch._0.upserts.some((i) => i.kind === 'assistant' && i.usage));
+  // The executor gets busy (a question waiting for its answer)…
+  peer.send(Client.send(boss, '<relevo:tarea para="Ejecutor">pregunta algo</relevo:tarea>'));
+  const asked = await next((m) => m.threadPatch?._0.id === boss && m.threadPatch._0.upserts.some((i) => i.from?.label === 'pregunta'));
+  await next((m) => m.threadPatch?._0.id === boss && !m.threadPatch._0.runtime.isRunning && !m.threadPatch._0.runtime.queued?.length);
+  // …and two more orders for it wait as a single message.
+  peer.send(Client.send(boss, '<relevo:tarea para="Ejecutor">haz A</relevo:tarea> <relevo:tarea para="Ejecutor">y luego B</relevo:tarea>'));
+  await next((m) => m.threadPatch?._0.id === boss && m.threadPatch._0.upserts.some((i) => i.kind === 'assistant' && i.usage));
+  const snap = (await next((m) => m.snapshot?._0.hostTeams?.some((x) => x.goal === 'Cola'))).snapshot._0;
+  const exId = snap.hostTeams.find((x) => x.goal === 'Cola').members.find((m) => m.role === 'executor').threadId;
+  peer.send(Client.subscribe(exId));
+  const ex = (await next((m) => m.thread?._0.id === exId)).thread._0;
+  assert.equal(ex.runtime.queued.length, 1, 'one message waiting, not two');
+  assert.match(ex.runtime.queued[0].text, /haz A[\s\S]*y luego B/);
+  void asked;
+});

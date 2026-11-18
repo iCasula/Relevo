@@ -983,12 +983,13 @@ export class Host {
     this._startTurn(t, text);
   }
 
-  sendNow(t, text) {
+  sendNow(t, text, meta = null) {
     if (!text?.trim()) return;
     const r = this._rt(t);
-    if (!r.isRunning) { this._startTurn(t, text); return; }
+    if (!r.isRunning) { this._startTurn(t, text, false, meta ?? {}); return; }
     r.sendNow = text;
-    r.statusLine = 'Interrumpiendo para enviar tu mensaje…';
+    r.sendNowMeta = meta;
+    r.statusLine = meta?.from ? `Interrumpido por ${meta.from.name}…` : 'Interrumpiendo para enviar tu mensaje…';
     this.agents.get(t.id)?.interrupt();
     this._changed(t);
   }
@@ -1285,7 +1286,7 @@ export class Host {
         this.select(t, accountId, model, carryOn);
         return;
       }
-      if (r.sendNow) { const text = r.sendNow; r.sendNow = null; this._startTurn(t, text); return; }
+      if (r.sendNow) { const text = r.sendNow, meta = r.sendNowMeta ?? {}; r.sendNow = null; r.sendNowMeta = null; this._startTurn(t, text, false, meta); return; }
       this._checkRestart();
       if (r.limitHit) { r.limitHit = false; this._onLimit(t); return; }
       if (!t.aiTitled && t.items.some((i) => i.kind === 'assistant' && i.text)) this._aiTitle(t).catch(() => {});

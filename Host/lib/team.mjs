@@ -23,13 +23,16 @@ export const ROLES = {
   researcher: { label: 'Investigador', short: 'Inv.' },
 };
 
+/** Bumped when the agents' instructions change: teams made before get them again. */
+const RULES_VERSION = 2;
+
 /** Automatic messages in a row (with no message from you) before the team pauses itself. */
 export const AUTO_LIMIT = 60;
 const REPORT_MAX = 2_500;
 
 // MARK: - Orders in the agents' replies
 
-const TAG = /<relevo:(tarea|investigar|respuesta|pregunta|fin)\b([^>]*?)(?:\/>|>([\s\S]*?)<\/relevo:\1\s*>)/gi;
+const TAG = /<relevo:(tarea|urgente|investigar|respuesta|pregunta|fin)\b([^>]*?)(?:\/>|>([\s\S]*?)<\/relevo:\1\s*>)/gi;
 const FENCED = /```[\s\S]*?(?:```|$)/g;
 
 /** The orders in a reply, outside code blocks: [{ type, to, body }]. */
@@ -95,7 +98,12 @@ Para dar órdenes, escríbelas tal cual en tu respuesta (fuera de bloques de có
 ${researcher ? `<relevo:investigar para="${executors[0]?.name ?? 'Ejecutor 1'}">qué averiguar y para qué</relevo:investigar>  (para= es opcional: a quién más le llega el informe)\n` : ''}<relevo:respuesta para="${executors[0]?.name ?? 'Ejecutor 1'}">respuesta a su duda o cómo desbloquearse</relevo:respuesta>
 <relevo:fin>resumen para el usuario</relevo:fin>  cuando el objetivo esté cumplido y revisado.
 
-Relevo te enviará los informes, dudas y bloqueos de cada agente con su nombre delante («[${executors[0]?.name ?? 'Ejecutor 1'} · informe]», «… · pregunta»). Reglas:
+<relevo:urgente para="${executors[0]?.name ?? 'Ejecutor 1'}">…</relevo:urgente>  solo si lo que está haciendo ahora es claramente erróneo o ya no sirve: interrumpe su turno.
+
+Cómo funciona la entrega: un agente que está trabajando no lee nada hasta que acaba su turno; lo que le mandes mientras tanto le llega todo junto, en un solo mensaje, al terminar. Relevo te enviará los informes, dudas y bloqueos de cada agente con su nombre delante («[${executors[0]?.name ?? 'Ejecutor 1'} · informe]», «… · pregunta») y al final el estado del equipo (quién trabaja y cuántos mensajes tuyos le esperan). Reglas:
+- No acuses recibo ni contestes a informes de progreso («compilando…», «sigo con…»): si no hay nada nuevo que pedir, responde sin órdenes y espera.
+- No repitas una tarea a quien ya la está haciendo o la tiene pendiente: mira el estado del equipo.
+- Toda respuesta y tarea lleva para="…". No existen otras órdenes ni opciones («force», «redirect»…) aparte de las de arriba.
 - Tareas pequeñas y comprobables. No des a dos ejecutores los mismos ficheros a la vez.
 ${researcher ? `- Antes de que un ejecutor construya algo que ya puede existir (una librería, un proyecto open source, un ejemplo), o en cuanto lleve dos intentos fallidos con el mismo problema, pide al ${researcher.name} que lo busque, y pasa al ejecutor la recomendación concreta.\n` : '- Si un ejecutor lleva dos intentos fallidos con el mismo problema, para y busca otro enfoque (librerías o proyectos open source que ya lo resuelvan) antes de insistir.\n'}- Responde tú las dudas que puedas. Si solo el usuario puede decidir, pregúntaselo en tu respuesta sin dar órdenes y espera.
 - Sé breve y gasta poco: todos ven el código en disco, no lo copies en los mensajes; no leas el proyecto entero, apóyate en los informes y lee solo lo que necesites para decidir.
@@ -142,6 +150,31 @@ export class Teams {
     this.host = host;
     host.state.teams ??= [];
     this._dropOrphans();
+    this._upgrade();
+  }
+
+  /**
+   * Teams made by an older version: their agents get the current instructions with their next message, and
+   * the messages piled up waiting for each of them become one.
+   */
+  _upgrade() {
+    const h = this.host;
+    for (const team of this.list) {
+      if (team.rules === RULES_VERSION) continue;
+      team.rules = RULES_VERSION;
+      for (const m of team.members) {
+        const t = h.threads.get(m.threadId);
+        if (!t) continue;
+        t.teamPrimed = false;
+        const waiting = t.queued.filter((q) => q.team);
+        if (waiting.length > 1) {
+          const [first, ...rest] = waiting;
+          for (const q of rest) this._merge(first, q.header ?? `[${q.from?.name ?? 'Equipo'}]`, q.text, q.prompt ?? q.text, m.role);
+          t.queued = t.queued.filter((q) => !rest.includes(q));
+        }
+      }
+    }
+    h._saveState();
   }
 
   /**
@@ -181,7 +214,7 @@ export class Teams {
     const executors = (spec.executors ?? []).slice(0, existing ? 3 : 4);
     if (!executors.length && !existing) throw new Error('El equipo necesita al menos un ejecutor');
     if (!h.projects().some((p) => p.id === spec.projectId)) throw new Error('Proyecto desconocido');
-    const team = { id: h._uuid(), projectId: spec.projectId, goal, createdAt: Date.now() / 1000, status: 'active', auto: 0, held: [], members: [] };
+    const team = { id: h._uuid(), projectId: spec.projectId, goal, createdAt: Date.now() / 1000, status: 'active', auto: 0, held: [], members: [], rules: RULES_VERSION };
     const make = (role, name, pick, mode, worktree) => this._newMember(team, role, name, pick, mode, worktree);
     const lead = make('orchestrator', 'Orquestador', spec.orchestrator, 'ask', false);
     const mode = ['ask', 'autoEdit', 'full'].includes(spec.mode) ? spec.mode : 'autoEdit';
@@ -470,11 +503,12 @@ export class Teams {
     const complain = (text) => this._deliver(team, lead, text, { name: 'Relevo', role: 'relevo', label: 'aviso' });
     const from = { threadId: lead.threadId, name: lead.name, role: 'orchestrator' };
     switch (o.type) {
-      case 'tarea': {
+      case 'tarea':
+      case 'urgente': {
         const to = o.to ? findMember(team, o.to) : executors.length === 1 ? executors[0] : null;
-        if (!to || to.role === 'orchestrator') { complain(`No sé a quién va la tarea${o.to ? ` «${o.to}»` : ''}. El equipo: ${team.members.map((m) => m.name).join(', ')}.`); return; }
+        if (!to || to.role === 'orchestrator') { complain(`No sé a quién va la tarea${o.to ? ` «${o.to}»` : ''}: pon para="…". El equipo: ${team.members.map((m) => m.name).join(', ')}.`); return; }
         if (!o.body) return;
-        this._deliver(team, to, o.body, { ...from, label: 'tarea' });
+        this._deliver(team, to, o.body, { ...from, label: o.type === 'urgente' ? 'urgente' : 'tarea' }, false, o.type === 'urgente');
         return;
       }
       case 'investigar': {
@@ -484,7 +518,9 @@ export class Teams {
         return;
       }
       case 'respuesta': {
-        const to = o.to ? findMember(team, o.to) : null;
+        // Without para=: whoever is waiting for an answer, if only one is; else the only executor.
+        const asking = team.members.filter((m) => m.pendingQuestion && m.role !== 'orchestrator');
+        const to = o.to ? findMember(team, o.to) : asking.length === 1 ? asking[0] : executors.length === 1 ? executors[0] : null;
         if (!to || to.role === 'orchestrator') { complain(`No sé a quién va la respuesta${o.to ? ` «${o.to}»` : ''}.`); return; }
         const t = h.threads.get(to.threadId);
         const pending = to.pendingQuestion && h._item(t, to.pendingQuestion);
@@ -511,7 +547,7 @@ export class Teams {
   }
 
   /** A message to a member: now if it's idle, after its turn otherwise (merged with others waiting for it). */
-  _deliver(team, member, text, from, resumed = false) {
+  _deliver(team, member, text, from, resumed = false, urgent = false) {
     const h = this.host;
     if (team.status === 'paused' && !resumed) { team.held.push({ to: member, text, from }); return; }
     team.auto += 1;
@@ -529,22 +565,50 @@ export class Teams {
     const t = h.threads.get(member.threadId);
     if (!t) return;
     const header = `[${from.name}${from.label ? ` · ${from.label}` : ''}]`;
-    const prompt = `${header}\n${text}`;
+    // The orchestrator always sees where the team stands, so it doesn't pile orders on someone busy.
+    const status = member.role === 'orchestrator' ? `\n\n(${this._status(team, member)})` : '';
+    const prompt = `${header}\n${text}${status}`;
     const meta = { from: { threadId: from.threadId ?? null, name: from.name, role: from.role, label: from.label ?? null } };
-    if (h._rt(t).isRunning || h._rt(t).approvals.size) {
-      // Several reports for a busy orchestrator go as one message when it's free.
+    const r = h._rt(t);
+    if (urgent && r.isRunning && member.role !== 'orchestrator') {
+      h.sendNow(t, text, { ...meta, prompt: `${prompt}\n\n(Esto interrumpe lo que estabas haciendo: atiéndelo primero.)` });
+      return;
+    }
+    if (r.isRunning || r.approvals.size) {
+      // Whatever arrives for someone busy goes as one message when its turn ends, not one turn per message.
       const waiting = t.queued.find((q) => q.team);
-      if (waiting && member.role === 'orchestrator') {
-        if (!waiting.merged) waiting.text = `${waiting.header}\n${waiting.text}`;
-        waiting.merged = true;
-        waiting.text += `\n\n${header}\n${text}`;
-        waiting.prompt += `\n\n${prompt}`;
-        waiting.from = { name: 'Equipo', role: 'team', label: 'varios mensajes' };
-      } else t.queued.push({ id: h._uuid(), text, prompt, header, from: meta.from, team: true });
+      if (waiting) this._merge(waiting, header, text, prompt, member.role);
+      else t.queued.push({ id: h._uuid(), text, prompt, header, from: meta.from, team: true });
       h._changed(t);
       return;
     }
     h._startTurn(t, text, false, { ...meta, prompt });
+  }
+
+  /** Adds a message to the one already waiting for a member. */
+  _merge(waiting, header, text, prompt, role) {
+    if (!waiting.merged) {
+      waiting.text = `${waiting.header ?? ''}\n${waiting.text}`.trim();
+      if (role !== 'orchestrator') waiting.prompt = `(Varios mensajes que te llegaron mientras trabajabas, en orden; si se contradicen, vale el último.)\n\n${waiting.prompt}`;
+    }
+    waiting.merged = true;
+    waiting.text += `\n\n${header}\n${text}`;
+    waiting.prompt += `\n\n${prompt}`;
+    waiting.from = { name: 'Equipo', role: 'team', label: 'varios mensajes' };
+  }
+
+  /** «Ejecutor 1 trabajando, con 2 mensajes tuyos sin entregar · Ejecutor 2 libre · …» */
+  _status(team, lead) {
+    const h = this.host;
+    const parts = team.members.filter((m) => m !== lead).map((m) => {
+      const t = h.threads.get(m.threadId);
+      if (!t) return null;
+      const r = h._rt(t);
+      const waiting = t.queued.filter((q) => q.team).reduce((n, q) => n + (q.merged ? (q.text.match(/^\[/gm) ?? []).length : 1), 0);
+      const state = r.approvals.size ? 'esperando una respuesta o una aprobación' : r.isRunning ? 'trabajando' : 'libre';
+      return `${m.name} ${state}${waiting ? `, con ${waiting} mensaje${waiting === 1 ? '' : 's'} sin entregar` : ''}`;
+    }).filter(Boolean);
+    return `Estado del equipo: ${parts.join(' · ')}`;
   }
 }
 
