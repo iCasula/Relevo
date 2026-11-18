@@ -159,12 +159,17 @@ export class AntigravitySession extends EventEmitter {
     if (this.failed) return;
     this.failed = true;
     let resetsAt = kind === 'limit' ? resetFromText(message) : null;
-    if (kind === 'limit') this.limitUntil = resetsAt ?? Date.now() / 1000 + 3600;
-    // Out of quota, agy just exits with code 1 and no reason on the next turns: still the same limit.
-    if (kind === 'other' && this.limitUntil > Date.now() / 1000 && /terminó con código 1|exit(?:ed)? (?:with )?code 1/i.test(message)) {
+    // Each model family has its own quota in Antigravity (Gemini's and Claude's run out separately): the
+    // limit is remembered for the model that hit it.
+    const model = this.model || 'default';
+    this.limits ??= {};
+    if (kind === 'limit') this.limits[model] = resetsAt ?? Date.now() / 1000 + 3600;
+    // Out of quota, agy just exits with code 1 and no reason on the next turns: still that model's limit.
+    const until = this.limits[model];
+    if (kind === 'other' && until > Date.now() / 1000 && /terminó con código 1|exit(?:ed)? (?:with )?code 1/i.test(message)) {
       kind = 'limit';
-      resetsAt = this.limitUntil;
-      message = `Sin cuota de Antigravity hasta ${new Date(this.limitUntil * 1000).toLocaleString('es-ES', { weekday: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })} (todos sus modelos comparten la cuota de la cuenta de Google).`;
+      resetsAt = until;
+      message = `Este modelo de Antigravity sigue sin cuota hasta ${new Date(until * 1000).toLocaleString('es-ES', { weekday: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}: elige otro (los de Claude y los de Gemini tienen cuotas distintas) u otra suscripción.`;
     }
     this.emit('failure', { kind, message, resetsAt });
   }

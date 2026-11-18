@@ -20,10 +20,16 @@ test("after Antigravity's quota error, its silent exits are still the limit", ()
   const failures = [];
   s.emit = (name, f) => { if (name === 'failure') failures.push(f); };
   s.failed = false;
+  s.model = 'gemini-3.8-flash-low';
   s._fail('limit', 'Individual quota reached. Resets in 2h.');
   s.failed = false; // the next turn
   s._fail('other', 'Antigravity terminó con código 1.');
   assert.equal(failures[1].kind, 'limit');
   assert.ok(failures[1].resetsAt > Date.now() / 1000 + 3600);
-  assert.match(failures[1].message, /comparten la cuota/);
+  assert.match(failures[1].message, /sigue sin cuota/);
+  // Another model (Claude inside Antigravity has its own quota): a plain error stays a plain error.
+  s.model = 'claude-sonnet-4-6';
+  s.failed = false;
+  s._fail('other', 'Antigravity terminó con código 1.');
+  assert.equal(failures[2].kind, 'other');
 });
