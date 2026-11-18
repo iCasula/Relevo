@@ -317,15 +317,19 @@ function drawGeneral(body, state, redraw) {
   body.querySelector('[data-save-root]').onclick = () => save({ projectsRoot: body.querySelector('[data-root]').value.trim() });
 }
 
+/** Where each kind of host gives its pairing link. */
+export const PAIR_HELP = 'En Windows o Linux con la app: Relevo › Ajustes › iPhone › Copiar enlace. En la app nativa del Mac: Ajustes › iPhone › Copiar enlace. En un host sin pantalla: <code>relevo-host pair</code>.';
+
 function drawIPhone(body) {
-  body.innerHTML = `<div class="form-section">Emparejar un iPhone</div>
-    <div class="form-group"><div class="form-row"><div class="l">1. Copia el enlace de este equipo.<br>2. En Relevo Companion: Ajustes › Hosts › Añadir otro host › Pegar.<span class="cap">El enlace lleva la clave del equipo: no lo compartas.</span></div><button class="btn" data-copy-pair${app.pairingLink ? '' : ' disabled'}>Copiar enlace</button></div></div>
+  // Only a machine that is itself a host has a link to give (the desktop app alone doesn't).
+  body.innerHTML = `${app.pairingLink ? `<div class="form-section">Emparejar un iPhone u otro equipo</div>
+    <div class="form-group"><div class="form-row"><div class="l">1. Copia el enlace de este equipo.<br>2. En Relevo Companion: Ajustes › Hosts › Añadir otro host › Pegar. En la app de escritorio de otro equipo: Ajustes › iPhone › Añadir un host.<span class="cap">El enlace lleva la clave del equipo: no lo compartas.</span></div><button class="btn" data-copy-pair>Copiar enlace</button></div></div>` : ''}
     <div class="form-section">Hosts</div>
     <div class="form-group">${[...app.hosts.entries()].map(([id, h]) => `<div class="form-row"><span class="dot" style="background:${h.info.state === 'connected' ? 'var(--green)' : h.info.state === 'connecting' ? 'var(--orange)' : 'var(--red)'}"></span><div class="l">${esc(nameOf(h))}${h.info.local ? ' · este equipo' : ''}<span class="cap">${esc(h.info.state === 'connected' ? `Conectado${h.info.via ? ` · ${h.info.via}` : ''}` : h.info.state === 'connecting' ? 'Conectando…' : h.info.reason ?? 'Sin conectar')}</span></div><button class="btn small" data-reconnect="${esc(id)}">Reconectar</button>${h.info.local ? '' : `<button class="btn small destructive" data-remove-host="${esc(id)}">Quitar</button>`}</div>`).join('')}</div>
     <div class="form-section">Añadir un host</div>
     <div class="form-group"><div class="form-row"><input class="field-input grow mono" data-link placeholder="relevocompanion://pair?…"><button class="btn" data-add-host>Añadir</button></div>
-      <div class="form-row"><div class="caption">En el Mac: Ajustes › iPhone › Copiar enlace. En un host sin pantalla: <code>relevo-host pair</code>.</div></div></div>`;
-  body.querySelector('[data-copy-pair]').onclick = () => copyText(app.pairingLink, 'Enlace de emparejamiento copiado');
+      <div class="form-row"><div class="caption">${PAIR_HELP}</div></div></div>`;
+  body.querySelector('[data-copy-pair]')?.addEventListener('click', () => copyText(app.pairingLink, 'Enlace de emparejamiento copiado'));
   body.querySelectorAll('[data-reconnect]').forEach((b) => { b.onclick = () => post({ type: 'reconnect', host: b.dataset.reconnect }); });
   body.querySelectorAll('[data-remove-host]').forEach((b) => {
     b.onclick = async () => {
@@ -370,14 +374,25 @@ export function openLogin(hostId, accountId) {
   let finished = false;
   const s = openSheet({ width: 620, onClose: () => { app.logins.delete(requestId); app.requests.delete(requestId); if (!finished) sendTo(hostId, { loginCancel: { requestId } }); }, body: `
     <div class="sheet-title">Iniciar sesión en ${esc(account?.name ?? 'la suscripción')}</div>
-    <div class="sheet-sub">Abre el enlace, entra con tu cuenta y, si te muestra un código, pégalo abajo. La sesión queda guardada en ${esc(nameOf(host(hostId)))}.</div>
-    <div class="sheet-buttons"><button class="btn primary" data-open disabled>Abrir el enlace</button><button class="btn" data-copy disabled>Copiar enlace</button><span class="caption grow" data-state>Arrancando…</span></div>
-    <pre class="out-log" data-out style="min-height:120px;max-height:240px"></pre>
-    <div class="sheet-buttons"><input class="field-input grow mono" data-code placeholder="Código (si te lo pide)" autocomplete="off"><button class="btn" data-send>Enviar</button></div>
+    <div class="sheet-sub" data-intro>Abre el enlace, entra con tu cuenta y, si te muestra un código, pégalo abajo. La sesión queda guardada en ${esc(nameOf(host(hostId)))}.</div>
+    <div class="sheet-buttons" data-link-row><button class="btn primary" data-open disabled>Abrir el enlace</button><button class="btn" data-copy disabled>Copiar enlace</button></div>
+    <div class="sheet-buttons" data-state-row><span class="caption grow" data-state>Arrancando…</span></div>
+    <pre class="out-log" data-out style="min-height:120px;max-height:240px;white-space:pre-wrap"></pre>
+    <div class="sheet-buttons" data-code-row><input class="field-input grow mono" data-code placeholder="Código (si te lo pide)" autocomplete="off"><button class="btn" data-send>Enviar</button></div>
     <div class="sheet-buttons"><span class="grow"></span><button class="btn" data-close>Cerrar</button></div>` });
   const $ = (q) => s.el.querySelector(q);
   let output = '', link = null;
   app.logins.set(requestId, (m) => {
+    if (m.terminal) {
+      // agy only signs in from a real terminal: the command to run on that machine, and this sheet waits.
+      $('[data-intro]').innerHTML = `${esc(account?.agentName ?? 'Este agente')} solo inicia sesión desde una terminal. En <b>${esc(nameOf(host(hostId)))}</b>, abre ${host(hostId)?.data.snapshot?.hostPlatform === 'win32' ? 'PowerShell' : 'una terminal'} y ejecuta:`;
+      $('[data-link-row]').innerHTML = `<code class="term-cmd grow">${esc(m.terminal)}</code><button class="btn primary" data-copy-cmd>Copiar</button>`;
+      $('[data-copy-cmd]').onclick = () => copyText(m.terminal, 'Comando copiado');
+      $('[data-out]').textContent = 'Abre el enlace que te muestre, entra con tu cuenta de Google y, si te da un código, pégalo en esa terminal. Cuando la sesión quede guardada se cierra sola y esta ventana también.';
+      $('[data-code-row]').remove();
+      $('[data-state-row]').innerHTML = '<span class="spinner" data-spin></span><span class="caption grow" data-state>Esperando a que inicies sesión en la terminal…</span>';
+      return;
+    }
     if (m.text) {
       output += m.text;
       $('[data-out]').innerHTML = linkify(output);
@@ -391,6 +406,7 @@ export function openLogin(hostId, accountId) {
     }
     if (m.done) {
       finished = true;
+      $('[data-spin]')?.remove();
       $('[data-state]').textContent = m.ok ? 'Sesión iniciada ✓' : `No se ha completado: ${m.error ?? ''}`;
       $('[data-state]').className = `caption grow ${m.ok ? 'green' : 'red'}`;
       if (m.ok) setTimeout(s.close, 1500);

@@ -55,6 +55,11 @@ What it does today:
 - Updates don't cut the agents: the new version is installed at once, but the service restarts only when no
   agent is working or waiting for an answer; messages sent meanwhile wait in their queue and go out on their own
   after the restart (or «Reiniciar ahora», or `relevo-host update --now`).
+- The desktop app on its own (`relevo-host desktop`, or `Host/deploy/install-mac-desktop.sh` for «Relevo Hosts.app»
+  on a Mac): the same window managing hosts on other machines, e.g. the Windows PC from the Mac, with no agents of
+  its own. The native Mac app can be paired in it too.
+- Signing in to Antigravity (agy), which only works in a real terminal: the app shows `relevo-host login
+  antigravity` to run on the host and finishes on its own once agy saves the session.
 - The desktop app is a clone of the Mac one: the same menus, sidebar, toolbar, composer, sheets (settings,
   usage, diffs, commit, compare, traza, quick actions) and the subscriptions' limits always visible at the
   bottom of the sidebar, in light and dark.

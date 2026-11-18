@@ -58,7 +58,8 @@ export function buildAccount(def, { bins, agentEnv, dataDir }) {
         probe: (o) => antigravityProbe({ ...o, home: agyHome }), bin: bins.antigravity, env: antigravityEnv(agentEnv, home, !!def.isolated), home: agyHome,
         models: [{ id: 'default', name: 'Predeterminado' }, ...GEMINI_MODELS], loginArgs: [],
         // agy's sign-in is interactive and never exits on its own: it's done when the login file is written.
-        loginDone: (since) => started() > since };
+        // It needs a real terminal (with pipes it prints nothing), so the apps show the command to run in one.
+        loginDone: (since) => started() > since, loginInTerminal: true };
     }
     case 'api': {
       if (def.preset && !API_PRESETS[def.preset]) return null; // a provider Relevo no longer offers

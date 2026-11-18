@@ -10,6 +10,7 @@
 //                             once no agent is working (--now: right away); --check only says whether there's one
 //   relevo-host.mjs rollback  put back the version installed before the last update
 //   relevo-host.mjs app [--url]   open the desktop app (with RELEVO_UI_PORT set), or print its link
+//   relevo-host.mjs desktop [--url]   the desktop app alone, to manage hosts on other machines (no agents here)
 //   relevo-host.mjs logs [n]  last lines of <data>/logs/host.log (where the supervisor writes; on Linux, journalctl)
 //
 // Settings come from the environment and from `host.env` next to the program's folder (<base>/host.env for
@@ -201,10 +202,27 @@ switch (command) {
       process.exit(2);
     }
     fs.mkdirSync(account.home, { recursive: true });
+    if (!account.bin) { console.error(`${account.name}: program not found (set its path in Ajustes › Suscripciones › Programa).`); process.exit(1); }
     console.log(`${account.name} login for this host (${account.home}).`);
+    if (account.loginInTerminal) console.log('Open the link it shows, sign in, and paste the code here if it asks for one. This window closes the program on its own once the session is saved.');
     const child = spawnCLI(account.bin, account.loginArgs, { env: account.env, stdio: 'inherit' });
     child.on('error', (e) => { console.error(e.message); process.exit(1); });
+    // agy never exits after signing in: done when its login file is written.
+    const since = Date.now();
+    let signedIn = false;
+    if (account.loginDone) {
+      setInterval(() => {
+        if (signedIn || !account.loginDone(since)) return;
+        signedIn = true;
+        setTimeout(() => killTree(child), 1500);
+      }, 1500).unref();
+    }
     child.on('exit', (code) => {
+      if (signedIn) {
+        requestControl(cfg.dataDir, 'refresh');
+        console.log(`\nSigned in to ${account.name}. The running service picks up the session now; you can close this window.`);
+        process.exit(0);
+      }
       if (code === 0) {
         requestControl(cfg.dataDir, 'refresh');
         console.log('The running service will pick up the new session.');
@@ -261,6 +279,26 @@ switch (command) {
     if (!openAppWindow(url)) console.log(`Open ${url}`);
     break;
   }
+  case 'desktop': {
+    // The desktop app alone, for a machine that only manages hosts elsewhere (a Mac looking after a Windows
+    // PC, a laptop and a server…): the same window, connected to the hosts paired in Ajustes, no agents here.
+    // `desktop` opens the window (starting the background part if it isn't running); `--url` prints the link.
+    const dataDir = path.resolve(process.env.RELEVO_DESKTOP_DATA ?? path.join(os.homedir(), '.relevo-desktop'));
+    const port = Number(process.env.RELEVO_DESKTOP_PORT ?? 47822);
+    fs.mkdirSync(dataDir, { recursive: true });
+    const url = appURL(port, uiToken(dataDir));
+    const up = () => fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(1500) }).then(() => true, () => false);
+    if (process.argv[3] === '--serve') { serveDesktop({ dataDir, port }); break; }
+    if (process.argv[3] === '--url') { console.log(url); break; }
+    if (!(await up())) {
+      fs.mkdirSync(path.join(dataDir, 'logs'), { recursive: true });
+      const out = fs.openSync(path.join(dataDir, 'logs', 'desktop.log'), 'a');
+      spawn(process.execPath, [SCRIPT, 'desktop', '--serve'], { detached: true, stdio: ['ignore', out, out], windowsHide: true, env: process.env }).unref();
+      for (let i = 0; i < 40 && !(await up()); i++) await new Promise((r) => setTimeout(r, 150));
+    }
+    if (!openAppWindow(url)) console.log(`Open ${url}`);
+    break;
+  }
   case 'logs': {
     const file = path.join(cfg.dataDir, 'logs', 'host.log');
     let text = '';
@@ -269,8 +307,50 @@ switch (command) {
     break;
   }
   default:
-    console.error('usage: relevo-host.mjs [serve|pair|login|status|update|rollback|app|logs]');
+    console.error('usage: relevo-host.mjs [serve|pair|login|status|update|rollback|app|desktop|logs]');
     process.exit(2);
+}
+
+/** The background part of `desktop`: the window's page and its connections to the paired hosts, and updates. */
+function serveDesktop({ dataDir, port }) {
+  const log = (m) => console.log(`[relevo-desktop] ${m}`);
+  const gateway = new Gateway({ dataDir, localLink: null, device: `Escritorio (${os.hostname()})`, version: installedVersion(APP_DIR), log });
+  gateway.start();
+  const server = startUIServer({ port, dataDir, uiDir: path.join(APP_DIR, 'ui'), gateway, log });
+  server.on('error', (e) => { log(`can't serve on :${port}: ${e.message}`); process.exit(1); });
+  // No agents here, so an update restarts right away: this process makes way for a new one.
+  const restart = () => {
+    gateway.stop();
+    server.close(() => {
+      spawn(process.execPath, [SCRIPT, 'desktop', '--serve'], { detached: true, stdio: 'inherit', windowsHide: true, env: process.env }).unref();
+      process.exit(0);
+    });
+    setTimeout(() => process.exit(0), 3000).unref();
+  };
+  const repo = process.env.RELEVO_REPO ?? DEFAULT_REPO;
+  const check = async () => {
+    try { gateway.setUpdate(await checkForUpdate({ appDir: APP_DIR, repo })); } catch (e) {
+      gateway.setUpdate({ ...gateway.update, checkedAt: Date.now() / 1000, error: `No he podido buscar actualizaciones: ${e.message}` });
+    }
+  };
+  gateway.onCheckUpdate = check;
+  gateway.onRestartNow = restart;
+  gateway.onApplyUpdate = async () => {
+    const target = gateway.update.latest;
+    if (!target || gateway.update.applying) return;
+    gateway.setUpdate({ ...gateway.update, applying: true, error: null });
+    try {
+      const r = await installVersion({ appDir: APP_DIR, ref: target, repo });
+      log(`updated to ${r.version}; restarting`);
+      gateway.setUpdate({ ...gateway.update, applying: false, available: false, pendingRestart: { version: r.version, busy: 0 } });
+      setTimeout(restart, 500);
+    } catch (e) {
+      gateway.setUpdate({ ...gateway.update, applying: false, error: `La actualización ha fallado: ${e.message}` });
+    }
+  };
+  setTimeout(check, 5000).unref();
+  setInterval(check, 6 * 3600_000).unref();
+  process.on('SIGTERM', () => { gateway.stop(); process.exit(0); });
 }
 
 /**

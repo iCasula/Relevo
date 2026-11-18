@@ -854,6 +854,7 @@ export class Host {
 
   _startLogin(peer, requestId, account) {
     this.logins ??= new Map();
+    if (account.loginInTerminal && account.loginDone && !this.config.fakeAgent) return this._terminalLogin(peer, requestId, account);
     for (const dir of [this.config.claudeConfigDir, this.config.codexHome]) fs.mkdirSync(dir, { recursive: true });
     fs.mkdirSync(account.home, { recursive: true });
     const session = new LoginSession({ bin: account.bin, args: account.loginArgs, env: account.env, cwd: this.config.dataDir, doneWhen: account.loginDone });
@@ -867,6 +868,33 @@ export class Host {
     });
     peer.once('close', () => session.cancel());
     send({ text: '' });
+  }
+
+  /**
+   * A sign-in that only works in a real terminal (agy): the apps show the command to run on this machine, and
+   * the sign-in is done when the CLI writes its login file.
+   */
+  _terminalLogin(peer, requestId, account) {
+    const same = this.accounts.filter((a) => a.provider === account.provider);
+    const arg = same.length > 1 || /\s/.test(account.provider) ? `"${account.name}"` : account.provider;
+    const command = `relevo-host login ${arg}`;
+    const send = (o) => peer.send({ loginOutput: { requestId, accountId: account.id, ...o } });
+    const since = Date.now();
+    let done = false;
+    const finish = (ok, error) => {
+      if (done) return;
+      done = true;
+      clearInterval(poll);
+      clearTimeout(timer);
+      this.logins.delete(requestId);
+      send({ done: true, ok, error });
+      if (ok) this._refreshAccount(account);
+    };
+    const poll = setInterval(() => { if (account.loginDone(since)) finish(true, null); }, 1500);
+    const timer = setTimeout(() => finish(false, 'Se ha agotado el tiempo'), 30 * 60_000);
+    this.logins.set(requestId, { input() {}, cancel: () => finish(false, 'Cancelado') });
+    peer.once('close', () => finish(false, 'Cancelado'));
+    send({ terminal: command, text: '' });
   }
 
   // MARK: - Projects and threads

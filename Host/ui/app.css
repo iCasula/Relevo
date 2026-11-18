@@ -545,3 +545,4 @@ input[type=checkbox].check { accent-color: var(--accent); width: 14px; height: 1
 .update-strip .u-text { flex: 1; display: flex; gap: 6px; align-items: flex-start; min-width: 0; }
 .update-strip .u-text svg, .update-strip .u-text .spinner { flex: none; margin-top: 2px; }
 .update-strip .btn { flex: none; }
+.term-cmd { font-family: var(--mono); font-size: 13px; padding: 7px 10px; border-radius: 6px; background: var(--fill-tertiary); user-select: all; overflow-x: auto; white-space: nowrap; }

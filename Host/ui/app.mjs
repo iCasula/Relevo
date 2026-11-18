@@ -102,7 +102,7 @@ function renderSidebar() {
   for (const [hostId, h] of app.hosts) {
     const s = h.data.snapshot;
     const state = h.info.state === 'connected' ? '' : h.info.state === 'connecting' ? ' · conectando…' : ` · ${h.info.reason ?? 'sin conectar'}`;
-    out.push(`<div class="side-section" title="${esc(h.info.reason ?? '')}">${several ? esc(nameOf(h)) : 'Proyectos'}<span class="host-state">${esc(state)}</span></div>`);
+    out.push(`<div class="side-section" title="${esc(h.info.reason ?? '')}">${several || !h.info.local ? esc(nameOf(h)) : 'Proyectos'}<span class="host-state">${esc(state)}</span></div>`);
     if (!s) continue;
     if (!s.projects.length) { out.push('<div class="side-empty">Aún no hay proyectos</div>'); continue; }
     for (const p of s.projects) {
@@ -233,17 +233,28 @@ function renderDetail() {
     threadKey = null;
     T = null;
     const anyProjects = [...app.hosts.values()].some((x) => x.data.snapshot?.projects.length);
-    detail.innerHTML = `<div class="toolbar"><div class="titles"><div class="wtitle">Relevo</div></div></div>`
+    const html = `<div class="toolbar"><div class="titles"><div class="wtitle">Relevo</div></div></div>`
       + (!app.live ? '<div class="center"><span class="spinner big"></span><div>Conectando con el servicio de Relevo…</div></div>'
         : !anyProjects ? welcomeHTML() : `<div class="center">${icon('bubble.left.and.text.bubble.right', { size: 36, cls: 'big-ic' })}<div>Elige un hilo o empieza uno nuevo</div><button class="btn" data-cmd="newThread">Nuevo hilo</button></div>`);
+    // Only when it changes: a redraw would wipe what's being typed (the pairing link).
+    if (detail.dataset.sig !== html) { detail.innerHTML = html; detail.dataset.sig = html; }
     return;
   }
+  detail.dataset.sig = '';
   const key = `${hostId}/${threadId}`;
   if (threadKey !== key) { threadKey = key; buildThread(detail); }
   renderThread();
 }
 
 function welcomeHTML() {
+  if (!app.hosts.size) {
+    // The desktop app alone (relevo-host desktop): nothing to show until it's paired with a host.
+    return `<div class="center welcome"><div style="display:flex;flex-direction:column;align-items:center;gap:10px">
+        ${icon('dot.radiowaves.left.and.right', { size: 40, cls: 'big-ic' })}<h1>Conecta con tus hosts</h1>
+        <p>Esta ventana gestiona los agentes de otros equipos: tu PC con Windows, un servidor, el Mac…\nPega el enlace de emparejamiento de cada uno.</p></div>
+      <div style="display:flex;gap:8px;width:min(560px,90%)"><input class="field-input grow mono" id="welcome-link" placeholder="relevocompanion://pair?…"><button class="btn primary" data-cmd="pairWelcome">Conectar</button></div>
+      <div class="caption" style="max-width:560px;text-align:center">${sheets.PAIR_HELP}</div></div>`;
+  }
   const accounts = [...app.hosts.entries()].flatMap(([id, h]) => (h.data.snapshot?.accounts ?? []).map((a) => [id, a]));
   const kinds = [...new Map(accounts.map(([, a]) => [a.kind.split(':')[0], a])).values()];
   return `<div class="center welcome"><div style="display:flex;flex-direction:column;align-items:center;gap:10px">
@@ -963,6 +974,12 @@ const commands = {
   },
   newThread: () => newThread(),
   addProject: () => sheets.openNewProject(),
+  pairWelcome: () => {
+    const link = $('#welcome-link')?.value.trim();
+    if (!/^relevocompanion:\/\/pair\?/.test(link ?? '')) { toast('Pega un enlace relevocompanion://pair?…'); return; }
+    post({ type: 'pair', link });
+    toast('Conectando…');
+  },
   usage: () => sheets.openUsage(),
   refreshAll,
   settings: () => sheets.openSettings(),
