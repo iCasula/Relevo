@@ -24,7 +24,7 @@ export const ROLES = {
 };
 
 /** Bumped when the agents' instructions change: teams made before get them again. */
-const RULES_VERSION = 2;
+const RULES_VERSION = 3;
 
 /** Automatic messages in a row (with no message from you) before the team pauses itself. */
 export const AUTO_LIMIT = 60;
@@ -100,9 +100,9 @@ ${researcher ? `<relevo:investigar para="${executors[0]?.name ?? 'Ejecutor 1'}">
 
 <relevo:urgente para="${executors[0]?.name ?? 'Ejecutor 1'}">…</relevo:urgente>  solo si lo que está haciendo ahora es claramente erróneo o ya no sirve: interrumpe su turno.
 
-Cómo funciona la entrega: un agente que está trabajando no lee nada hasta que acaba su turno; lo que le mandes mientras tanto le llega todo junto, en un solo mensaje, al terminar. Relevo te enviará los informes, dudas y bloqueos de cada agente con su nombre delante («[${executors[0]?.name ?? 'Ejecutor 1'} · informe]», «… · pregunta») y al final el estado del equipo (quién trabaja y cuántos mensajes tuyos le esperan). Reglas:
+Cómo funciona la entrega: a un agente que está trabajando solo le llega lo urgente; lo demás Relevo no se lo entrega (te lo dirá). No hace falta: cuando termine recibirás su informe y entonces decides su siguiente tarea, con información fresca. Relevo te enviará los informes, dudas y bloqueos de cada agente con su nombre delante («[${executors[0]?.name ?? 'Ejecutor 1'} · informe]», «… · pregunta») y al final el estado del equipo (quién trabaja y cuántos mensajes tuyos le esperan). Reglas:
 - No acuses recibo ni contestes a informes de progreso («compilando…», «sigo con…»): si no hay nada nuevo que pedir, responde sin órdenes y espera.
-- No repitas una tarea a quien ya la está haciendo o la tiene pendiente: mira el estado del equipo.
+- No mandes nada a quien está trabajando salvo que sea urgente: espera a su informe (mira el estado del equipo).
 - Toda respuesta y tarea lleva para="…". No existen otras órdenes ni opciones («force», «redirect»…) aparte de las de arriba.
 - Tareas pequeñas y comprobables. No des a dos ejecutores los mismos ficheros a la vez.
 ${researcher ? `- Antes de que un ejecutor construya algo que ya puede existir (una librería, un proyecto open source, un ejemplo), o en cuanto lleve dos intentos fallidos con el mismo problema, pide al ${researcher.name} que lo busque, y pasa al ejecutor la recomendación concreta.\n` : '- Si un ejecutor lleva dos intentos fallidos con el mismo problema, para y busca otro enfoque (librerías o proyectos open source que ya lo resuelvan) antes de insistir.\n'}- Responde tú las dudas que puedas. Si solo el usuario puede decidir, pregúntaselo en tu respuesta sin dar órdenes y espera.
@@ -167,7 +167,13 @@ export class Teams {
         if (!t) continue;
         t.teamPrimed = false;
         const waiting = t.queued.filter((q) => q.team);
-        if (waiting.length > 1) {
+        if (m.role !== 'orchestrator' && waiting.length) {
+          // Messages from other agents waiting for a busy member are stale by now: they go, and the
+          // orchestrator is told what was dropped. What you wrote yourself stays.
+          t.queued = t.queued.filter((q) => !q.team);
+          const lines = waiting.map((q) => clip(q.text.replace(/\s+/g, ' '), 120));
+          team.notes = [...(team.notes ?? []), `Al actualizar Relevo se han descartado ${waiting.length} mensaje${waiting.length === 1 ? '' : 's'} que esperaban a ${m.name} mientras trabajaba: ${lines.map((x) => `«${x}»`).join(' · ')}. Si algo sigue haciendo falta, dáselo con su siguiente tarea.`].slice(-6);
+        } else if (waiting.length > 1) {
           const [first, ...rest] = waiting;
           for (const q of rest) this._merge(first, q.header ?? `[${q.from?.name ?? 'Equipo'}]`, q.text, q.prompt ?? q.text, m.role);
           t.queued = t.queued.filter((q) => !rest.includes(q));
@@ -477,8 +483,11 @@ export class Teams {
     member.reportFor = null;
     const target = forName && findMember(team, forName);
     if (target && target.role !== 'orchestrator') {
-      this._deliver(team, target, report.join('\n\n'), { threadId: thread.id, name: member.name, role: member.role, label: 'informe para ti' });
-      report.push(`(También enviado a ${target.name}.)`);
+      const tt = h.threads.get(target.threadId);
+      if (tt && !h._rt(tt).isRunning && !h._rt(tt).approvals.size) {
+        this._deliver(team, target, report.join('\n\n'), { threadId: thread.id, name: member.name, role: member.role, label: 'informe para ti' });
+        report.push(`(También enviado a ${target.name}.)`);
+      } else report.push(`(${target.name} está trabajando: no se le ha enviado. Pásale lo que le sirva junto con su siguiente tarea.)`);
     }
     this._toLead(team, member, kind, report.join('\n\n'));
   }
@@ -549,6 +558,14 @@ export class Teams {
   /** A message to a member: now if it's idle, after its turn otherwise (merged with others waiting for it). */
   _deliver(team, member, text, from, resumed = false, urgent = false) {
     const h = this.host;
+    // Someone working only gets urgent orders: anything else would wait until its turn ends, maybe an hour,
+    // and be stale by then. The orchestrator gets its report when it finishes and decides with that.
+    const target = h.threads.get(member.threadId);
+    const busy = target && (h._rt(target).isRunning || h._rt(target).approvals.size > 0);
+    if (busy && !urgent && member.role !== 'orchestrator' && (from.role === 'orchestrator' || from.role === 'researcher')) {
+      this._bounce(team, member, text, from);
+      return;
+    }
     if (team.status === 'paused' && !resumed) { team.held.push({ to: member, text, from }); return; }
     team.auto += 1;
     if (team.auto > AUTO_LIMIT && team.status === 'active') {
@@ -564,6 +581,10 @@ export class Teams {
     }
     const t = h.threads.get(member.threadId);
     if (!t) return;
+    if (member.role === 'orchestrator' && team.notes?.length) {
+      text = `${team.notes.map((n) => `(${n})`).join('\n')}\n\n${text}`;
+      team.notes = [];
+    }
     const header = `[${from.name}${from.label ? ` · ${from.label}` : ''}]`;
     // The orchestrator always sees where the team stands, so it doesn't pile orders on someone busy.
     const status = member.role === 'orchestrator' ? `\n\n(${this._status(team, member)})` : '';
@@ -583,6 +604,22 @@ export class Teams {
       return;
     }
     h._startTurn(t, text, false, { ...meta, prompt });
+  }
+
+  /**
+   * An order for someone busy goes back: a line in the orchestrator's thread now (no extra turn), and a note
+   * with its next message, so it gives that member what's next after reading its report.
+   */
+  _bounce(team, member, text, from) {
+    const h = this.host;
+    const lead = this._lead(team);
+    const what = clip(text.replace(/\s+/g, ' '), 140);
+    team.notes = [...(team.notes ?? []), `No entregado a ${member.name}, que estaba trabajando: «${what}». Decide qué darle cuando llegue su informe; si no podía esperar, usa urgente.`].slice(-6);
+    if (lead) {
+      h._append(lead, { id: h._uuid(), kind: 'notice', text: `No entregado a ${member.name} (está trabajando): ${from.role === 'researcher' ? 'el informe del Investigador' : 'tu mensaje'} queda para cuando termine` });
+      h._changed(lead);
+    }
+    h._saveState();
   }
 
   /** Adds a message to the one already waiting for a member. */
