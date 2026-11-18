@@ -137,9 +137,9 @@ code, pre, .mono { font-family: var(--mono); }
 .ubar { display: flex; align-items: center; gap: 6px; font-size: 10px; }
 .ubar .lbl { width: 62px; color: var(--secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: none; }
 .ubar.regular .lbl { width: 120px; font-size: 11px; }
-.ubar .track { flex: 1; height: 4px; border-radius: 3px; background: rgba(var(--primary-base), .08); overflow: hidden; }
+.ubar .track { display: block; flex: 1; min-width: 20px; height: 4px; border-radius: 3px; background: rgba(var(--primary-base), .08); overflow: hidden; }
 .ubar.regular .track { height: 6px; }
-.ubar .fill { height: 100%; border-radius: 3px; min-width: 3px; }
+.ubar .fill { display: block; height: 100%; border-radius: 3px; min-width: 3px; }
 .ubar .pct { width: 32px; text-align: right; color: var(--secondary); font-variant-numeric: tabular-nums; flex: none; }
 .ubar .pct.high { color: var(--red); }
 
@@ -546,3 +546,5 @@ input[type=checkbox].check { accent-color: var(--accent); width: 14px; height: 1
 .update-strip .u-text svg, .update-strip .u-text .spinner { flex: none; margin-top: 2px; }
 .update-strip .btn { flex: none; }
 .term-cmd { font-family: var(--mono); font-size: 13px; padding: 7px 10px; border-radius: 6px; background: var(--fill-tertiary); user-select: all; overflow-x: auto; white-space: nowrap; }
+.team-fixed { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; min-height: 26px; }
+.team-notes { font-size: 12px; }

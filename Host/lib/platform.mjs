@@ -207,21 +207,24 @@ function appBrowsers() {
     ]);
   }
   if (process.platform === 'darwin') {
+    // The .app bundles: they're opened through LaunchServices (see openAppWindow).
     return ['Google Chrome', 'Microsoft Edge', 'Chromium', 'Brave Browser']
-      .map((n) => `/Applications/${n}.app/Contents/MacOS/${n}`);
+      .flatMap((n) => [`/Applications/${n}.app`, path.join(os.homedir(), 'Applications', `${n}.app`)]);
   }
   return ['microsoft-edge', 'google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser'].map((n) => which(n)).filter(Boolean);
 }
 
 /** The first app-capable browser installed (Edge always is on Windows), or null. */
 export function appBrowser() {
-  return appBrowsers().find((p) => isExecutable(p)) ?? null;
+  return appBrowsers().find((p) => (process.platform === 'darwin' ? fs.existsSync(p) : isExecutable(p))) ?? null;
 }
 
 /** Opens the desktop app as its own window; false if only a normal browser tab was possible. */
 export function openAppWindow(url) {
   const browser = appBrowser();
   const detached = { detached: true, stdio: 'ignore', windowsHide: false };
+  // On macOS through `open`: running the binary while the browser is already open doesn't reliably reach it.
+  if (browser && process.platform === 'darwin') { spawn('open', ['-na', browser, '--args', `--app=${url}`], detached).unref(); return true; }
   if (browser) { spawn(browser, [`--app=${url}`], detached).unref(); return true; }
   const opener = isWindows ? ['cmd.exe', ['/d', '/c', 'start', '""', url]] : process.platform === 'darwin' ? ['open', [url]] : ['xdg-open', [url]];
   try { spawn(opener[0], opener[1], detached).unref(); } catch {}

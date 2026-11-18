@@ -164,14 +164,30 @@ function latestPlan(items) {
  * `traceFile`: where the whole conversation was saved (see `saveTrace`), so the agent can look details up.
  */
 export function handoffText({ items, accounts, projectPath, target, pendingRequest, workState = null, traceFile = null, budget = BRIEF_BUDGET }) {
-  const turns = turnsOf(items);
   const agents = [...new Set(items.filter((i) => i.kind === 'assistant').map((i) => accounts.get(i.accountId)?.agentName).filter(Boolean))].join(', ');
   const head = `<relevo_handoff>
 Retomas una tarea que llevaba otro agente de IA (${agents || 'otro agente'}): el usuario ha cambiado de proveedor desde Relevo (normalmente porque el anterior se quedó sin cuota) y ahora sigues tú, como ${target.agentName}. Esto es un resumen, no la conversación entera.
 - Proyecto: ${projectPath}
 - El código y los cambios ya están en disco: léelos de los ficheros (git status, git diff), no esperes encontrarlos aquí.
 - Comprueba lo que quedó a medias antes de repetirlo y no rehagas lo que ya está hecho.${traceFile ? `\n- Si te falta algún detalle, la conversación completa está en ${traceFile} (léela solo si hace falta).` : ''}`;
+  const body = threadBrief({ items, accounts, pendingRequest, workState, traceFile, budget: budget - head.length });
+  return `${head}
 
+${body}
+</relevo_handoff>
+
+${pendingRequest ? 'La última petición del usuario quedó sin terminar. Continúa con ella desde donde se quedó:' : 'Nuevo mensaje del usuario:'}
+
+`;
+}
+
+/**
+ * A thread in a few thousand characters: goal, plan, git state, the earlier turns in a line or three each
+ * (newest first while they fit) and the latest exchange in more detail. For handoffs and for an orchestrator
+ * joining a thread that already did work.
+ */
+export function threadBrief({ items, accounts, pendingRequest = false, workState = null, traceFile = null, budget = BRIEF_BUDGET }) {
+  const turns = turnsOf(items);
   const sections = [];
   const goal = turns[0]?.user.text;
   if (goal) sections.push(`<objetivo>\n${clip(elideCode(goal, 15), GOAL_MAX)}\n</objetivo>`);
@@ -181,8 +197,7 @@ Retomas una tarea que llevaba otro agente de IA (${agents || 'otro agente'}): el
   const last = turns.length ? `<ultimo_intercambio>\n${lastExchange(turns[turns.length - 1], accounts, pendingRequest)}\n</ultimo_intercambio>` : '';
 
   // The earlier turns, newest first, as long as they fit; the oldest left out are only counted.
-  const fixed = head.length + sections.join('\n\n').length + last.length + 400;
-  let room = budget - fixed;
+  let room = budget - sections.join('\n\n').length - last.length - 400;
   const history = [];
   for (let i = turns.length - 2; i >= 0; i--) {
     const line = turnLine(turns[i], i + 1, accounts, { isFirst: i === 0 });
@@ -195,15 +210,7 @@ Retomas una tarea que llevaba otro agente de IA (${agents || 'otro agente'}): el
   }
   if (history.length) sections.push(`<historial>\n${history.join('\n')}\n</historial>`);
   if (last) sections.push(last);
-
-  return `${head}
-
-${sections.join('\n\n')}
-</relevo_handoff>
-
-${pendingRequest ? 'La última petición del usuario quedó sin terminar. Continúa con ella desde donde se quedó:' : 'Nuevo mensaje del usuario:'}
-
-`;
+  return sections.join('\n\n');
 }
 
 // MARK: - The full trace

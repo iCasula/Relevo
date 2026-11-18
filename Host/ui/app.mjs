@@ -900,6 +900,7 @@ function threadContextMenu(x, y, hostId, threadId) {
   if (!t) return;
   const hasUser = !!t.preview;
   showMenu({ x, y }, [
+    ...(has(hostId, 'teams') && !t.team ? [{ label: 'Añadir coordinador a este hilo…', action: () => sheets.openNewTeam(hostId, t.projectId, '', { threadId }) }, '-'] : []),
     { label: 'Renombrar…', disabled: !has(hostId, 'threads'), action: async () => {
       const title = await promptSheet({ title: 'Renombrar hilo', placeholder: 'Título', value: t.title });
       if (title) { const r = await request(hostId, { renameThread: { threadId, title } }); if (!r.ok) toast(r.error); }
@@ -933,6 +934,7 @@ function menubarMenu(name, anchor) {
       { label: 'Nuevo hilo', shortcut: 'Ctrl+N', action: () => newThread() },
       { label: 'Nuevo hilo en un worktree', shortcut: 'Ctrl+Alt+N', action: () => { const t = targetProject(); if (t) newThread(t.hostId, t.projectId, true); } },
       { label: 'Nuevo equipo de agentes…', shortcut: 'Ctrl+Alt+E', action: () => { const t = targetProject(); if (t) sheets.openNewTeam(t.hostId, t.projectId); else sheets.openNewProject(); } },
+      { label: 'Añadir coordinador a este hilo…', disabled: !summary || !!summary.team || !has(hostId, 'teams'), action: () => sheets.openNewTeam(hostId, summary.projectId, '', { threadId }) },
       { label: 'Añadir proyecto…', shortcut: 'Ctrl+O', action: () => sheets.openNewProject() },
     ],
     agents: [

@@ -12,7 +12,10 @@
 // It works with any agent (Claude, Codex, Antigravity, ACP): it only needs text in and text out. You can
 // talk to any of them at any time; automatic messages stop after a while without you (a loop guard).
 
-import { elideCode, clip } from './handoff.mjs';
+import * as gitops from './gitops.mjs';
+import { elideCode, clip, threadBrief } from './handoff.mjs';
+
+const clean = (o) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined && v !== null));
 
 export const ROLES = {
   orchestrator: { label: 'Orquestador', short: 'Orq.' },
@@ -68,6 +71,9 @@ function rosterLine(host, team, m) {
   return `- ${m.name} (${a ? `${a.name} · ${host._modelName(a, t.model)}` : 'agente'})${what}${where}`;
 }
 
+/** What you wrote for this agent when creating the team, if anything. */
+const notesOf = (member) => (member.notes ? `\nIndicaciones del usuario para ti:\n${member.notes}\n` : '');
+
 export function preamble(host, team, member) {
   const t = host.threads.get(member.threadId);
   const roster = team.members.map((m) => rosterLine(host, team, m)).join('\n');
@@ -89,8 +95,8 @@ ${researcher ? `<relevo:investigar para="${executors[0]?.name ?? 'Ejecutor 1'}">
 Relevo te enviará los informes, dudas y bloqueos de cada agente con su nombre delante («[${executors[0]?.name ?? 'Ejecutor 1'} · informe]», «… · pregunta»). Reglas:
 - Tareas pequeñas y comprobables. No des a dos ejecutores los mismos ficheros a la vez.
 ${researcher ? `- Antes de que un ejecutor construya algo que ya puede existir (una librería, un proyecto open source, un ejemplo), o en cuanto lleve dos intentos fallidos con el mismo problema, pide al ${researcher.name} que lo busque, y pasa al ejecutor la recomendación concreta.\n` : '- Si un ejecutor lleva dos intentos fallidos con el mismo problema, para y busca otro enfoque (librerías o proyectos open source que ya lo resuelvan) antes de insistir.\n'}- Responde tú las dudas que puedas. Si solo el usuario puede decidir, pregúntaselo en tu respuesta sin dar órdenes y espera.
-- Sé breve: todos ven el código en disco; no lo copies en los mensajes.
-
+- Sé breve y gasta poco: todos ven el código en disco, no lo copies en los mensajes; no leas el proyecto entero, apóyate en los informes y lee solo lo que necesites para decidir.
+${notesOf(member)}
 Objetivo del usuario:
 ${team.goal}
 </relevo_equipo>
@@ -108,7 +114,7 @@ Tu trabajo es averiguar, no implementar: no modifiques ficheros del proyecto.
 - Busca en internet (buscador, documentación, GitHub, issues, foros) y en el código del proyecto lo que acorte el camino: librerías, proyectos open source, ejemplos y soluciones a errores conocidos.
 - Responde con un informe accionable y corto (unas 40 líneas como mucho): las opciones que recomiendas con enlace, licencia y lo madura que parece cada una, por qué encaja aquí, cómo aplicarla en pasos concretos, y los riesgos. Nada de volcados de código largos.
 - Si la petición no está clara, termina con <relevo:pregunta>tu duda</relevo:pregunta>.
-</relevo_equipo>
+${notesOf(member)}</relevo_equipo>
 
 `;
   }
@@ -121,7 +127,7 @@ ${roster}
 - Haz la tarea que te llega. Al terminar, responde con un informe breve: qué has hecho, qué ficheros has tocado, cómo lo has comprobado y qué queda. No pegues código: está en disco.
 - Si te bloqueas o necesitas una decisión, termina tu respuesta con <relevo:pregunta>tu duda concreta</relevo:pregunta> y espera la respuesta.${researcher ? ` Si llevas dos intentos fallidos con el mismo problema, pregunta: el ${researcher.name} puede buscar soluciones que ya existan.` : ''}
 - Otros agentes pueden estar trabajando en el mismo proyecto: toca solo lo que te pidan.
-</relevo_equipo>
+${notesOf(member)}</relevo_equipo>
 
 `;
 }
@@ -148,8 +154,13 @@ export class Teams {
     const h = this.host;
     const goal = String(spec.goal ?? '').trim();
     if (!goal) throw new Error('Falta el objetivo del equipo');
-    const executors = (spec.executors ?? []).slice(0, 4);
-    if (!executors.length) throw new Error('El equipo necesita al menos un ejecutor');
+    // A thread that already did work can join as the first executor, keeping its agent and its session.
+    const existing = spec.threadId ? h.threads.get(String(spec.threadId).toUpperCase()) : null;
+    if (spec.threadId && !existing) throw new Error('Hilo desconocido');
+    if (existing?.team) throw new Error('Este hilo ya está en un equipo');
+    if (existing) spec.projectId = existing.projectId;
+    const executors = (spec.executors ?? []).slice(0, existing ? 3 : 4);
+    if (!executors.length && !existing) throw new Error('El equipo necesita al menos un ejecutor');
     if (!h.projects().some((p) => p.id === spec.projectId)) throw new Error('Proyecto desconocido');
     const team = { id: h._uuid(), projectId: spec.projectId, goal, createdAt: Date.now() / 1000, status: 'active', auto: 0, held: [], members: [] };
     const title = clip(goal.split('\n')[0], 48);
@@ -162,12 +173,23 @@ export class Teams {
       t.title = `${name} · ${title}`;
       t.team = { id: team.id, role, name };
       t.aiTitled = true; // the role and the goal are a better title than one guessed from the first message
-      team.members.push({ threadId: t.id, role, name });
+      team.members.push(clean({ threadId: t.id, role, name, notes: note(pick?.notes) }));
       return t;
     };
+    const note = (x) => String(x ?? '').trim().slice(0, 2000) || undefined;
     const lead = make('orchestrator', 'Orquestador', spec.orchestrator, 'ask', false);
     const mode = ['ask', 'autoEdit', 'full'].includes(spec.mode) ? spec.mode : 'autoEdit';
-    executors.forEach((e, i) => make('executor', executors.length > 1 ? `Ejecutor ${i + 1}` : 'Ejecutor', e, mode, !!spec.worktrees && executors.length > 1));
+    const count = executors.length + (existing ? 1 : 0);
+    const execName = (i) => (count > 1 ? `Ejecutor ${i + 1}` : 'Ejecutor');
+    if (existing) {
+      const name = execName(0);
+      existing.team = { id: team.id, role: 'executor', name };
+      existing.teamPrimed = false;
+      team.members.push(clean({ threadId: existing.id, role: 'executor', name, notes: note(spec.threadNotes) }));
+      h._append(existing, { id: h._uuid(), kind: 'notice', text: `Este hilo es ahora ${name} de un equipo: el Orquestador le irá dando tareas. Puedes seguir escribiéndole tú.` });
+      h._changed(existing);
+    }
+    executors.forEach((e, i) => make('executor', execName(i + (existing ? 1 : 0)), e, mode, !!spec.worktrees && count > 1));
     if (spec.researcher) make('researcher', 'Investigador', spec.researcher, 'ask', false);
     this.list.push(team);
     // Each agent needs its own process to work at the same time.
@@ -178,7 +200,16 @@ export class Teams {
     for (const m of team.members) h._saveThread(h.threads.get(m.threadId));
     h._saveState();
     h._broadcastSnapshot();
-    h._startTurn(lead, goal, false, { prompt: 'Empieza: mira el proyecto lo justo, planifica y reparte las primeras tareas.' });
+    let start = 'Empieza: mira el proyecto lo justo, planifica y reparte las primeras tareas.';
+    if (existing) {
+      // The orchestrator joins work already under way: a brief of that thread instead of reading it all.
+      const member = team.members.find((m) => m.threadId === existing.id);
+      const accounts = new Map(h.accounts.map((a) => [a.id, a]));
+      const brief = threadBrief({ items: existing.items, accounts, workState: gitops.workState(existing.projectPath), budget: 9_000 });
+      const busy = h._rt(existing).isRunning ? ` Ahora mismo está en mitad de un turno: su informe te llegará al terminar.` : '';
+      start = `${member.name} ya lleva trabajo hecho en este proyecto, en su propio hilo, y conserva su sesión (sabe lo que ha hecho).${busy} Resumen de su hilo:\n\n<hilo_de_${member.name.toLowerCase().replace(/\s+/g, '_')}>\n${brief}\n</hilo_de_${member.name.toLowerCase().replace(/\s+/g, '_')}>\n\nEmpieza: decide el siguiente paso hacia el objetivo y dale una tarea concreta (o pide una investigación si ves que se está atascando). No le pidas que repita lo que ya está hecho.`;
+    }
+    h._startTurn(lead, goal, false, { prompt: start });
     return { teamId: team.id, threadId: lead.id };
   }
 

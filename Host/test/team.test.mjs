@@ -130,3 +130,28 @@ test('pausing holds the messages between agents until the team is resumed', asyn
   assert.ok((await request('teamAction', { teamId: team.id, action: 'resume' })).ok);
   await next(fromMember('Ejecutor', 'informe'));
 });
+
+test('a coordinator joins a thread that already did work: the thread becomes the executor', async () => {
+  peer.send(Client.newThread(snapshot.projects[0].id, 'J1'));
+  const old = (await next((m) => m.created?.requestId === 'J1')).created.threadId;
+  peer.send(Client.subscribe(old));
+  peer.send(Client.send(old, 'traduce los textos del menú principal'));
+  await next((m) => m.threadPatch?._0.id === old && !m.threadPatch._0.runtime.isRunning && m.threadPatch._0.upserts.some((i) => i.kind === 'assistant' && i.usage));
+  const claude = snapshot.accounts.find((a) => a.kind === 'claude');
+  const r = await request('createTeam', { team: { threadId: old, goal: 'Traducir el juego entero', orchestrator: { accountId: claude.id, notes: 'Gasta poco' }, executors: [], researcher: null } });
+  assert.ok(r.ok, r.error);
+  const snap = (await next((m) => m.snapshot?._0.threads.find((t) => t.id === old)?.team)).snapshot._0;
+  assert.deepEqual(snap.threads.find((t) => t.id === old).team.role, 'executor');
+  const joined = snap.hostTeams.find((x) => x.members.some((m) => m.threadId === old));
+  assert.deepEqual(joined.members.map((m) => m.role), ['orchestrator', 'executor']);
+  // The orchestrator starts from a brief of the thread (the echo agent repeats it).
+  lead = r.threadId;
+  peer.send(Client.subscribe(lead));
+  const first = await next((m) => m.threadPatch?._0.id === lead && m.threadPatch._0.upserts.some((i) => i.kind === 'assistant' && i.usage));
+  const echo = first.threadPatch._0.upserts.find((i) => i.kind === 'assistant').text;
+  assert.match(echo, /ya lleva trabajo hecho[\s\S]*<objetivo>\ntraduce los textos del menú principal/);
+  // And its orders reach the old thread.
+  if (!idle(first)) await next(idle);
+  peer.send(Client.send(lead, '<relevo:tarea para="Ejecutor">sigue con los diálogos</relevo:tarea>'));
+  await next(fromMember('Ejecutor', 'informe'));
+});

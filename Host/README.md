@@ -48,7 +48,10 @@ What it does today:
   unblocks them; one to four executors (each in its own worktree if you want); and a researcher that looks for
   libraries, open source projects and docs before anyone reinvents them. They talk through tags in their replies
   (`<relevo:tarea para="Ejecutor 1">…`), so it works with any agent; you can write to any of them, pause the team,
-  and it pauses itself after 60 automatic messages without you.
+  and it pauses itself after 60 automatic messages without you. A team can also join a thread that already did
+  work («Añadir coordinador a este hilo»): the thread becomes the executor, with its agent and session, and the
+  orchestrator starts from a brief of it. Each agent can get its own instructions.
+- DeepSeek Harness (`dsh --profile acp`) as an ACP agent, with whatever sign-in dsh was set up with.
 - The agents' programs are looked for in PATH, the user's and machine's PATH in the Windows registry and the
   usual install folders, again on every check (no restart after installing one), or set by hand in Ajustes ›
   Suscripciones › Programa.

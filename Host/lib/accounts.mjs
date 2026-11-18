@@ -9,6 +9,15 @@ import { ACPSession, acpProbe } from './acp.mjs';
 import { AntigravitySession, antigravityProbe, antigravityEnv, tokenFile } from './antigravity.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
+import { findCLI } from './platform.mjs';
+
+/** ACP agents' programs by name, looked up once (on Windows a bare name doesn't run without its extension). */
+const found = new Map();
+function acpBin(name) {
+  if (!name) return null;
+  if (!found.get(name)) found.set(name, findCLI(name) ?? null);
+  return found.get(name) ?? name;
+}
 
 const CLAUDE_MODELS = [{ id: 'default', name: 'Predeterminado' }, { id: 'opus', name: 'Opus' }, { id: 'sonnet', name: 'Sonnet' }, { id: 'haiku', name: 'Haiku' }];
 
@@ -29,6 +38,9 @@ export const API_PRESETS = {
 /** ACP agents (ACPAgent.swift on the Mac). */
 export const ACP_PRESETS = {
   gemini: { name: 'Gemini CLI', symbol: 'sparkles', tint: '#4285F4', bin: 'gemini', args: ['--experimental-acp'], homeVar: null, login: null },
+  // DeepSeek Harness speaks ACP with `--profile acp` and keeps whatever sign-in it was set up with (an API key,
+  // or OAuth through OpenRouter/ZenMux plugins): Relevo just drives it.
+  dsh: { name: 'DeepSeek Harness', symbol: 'water.waves', tint: '#4D6BFE', bin: 'dsh', args: ['--profile', 'acp'], homeVar: null, login: null },
   custom: { name: 'Agente ACP', symbol: 'cpu', tint: '#6B7280', bin: null, args: [], homeVar: null, login: null },
 };
 
@@ -85,7 +97,7 @@ export function buildAccount(def, { bins, agentEnv, dataDir }) {
       const env = { ...agentEnv };
       if (p.homeVar) env[p.homeVar] = home;
       return { ...base, kind: `acp:${def.preset ?? 'custom'}`, agentName: def.name, symbol: p.symbol, tint: p.tint, Session: ACPSession, probe: acpProbe,
-        bin: def.command || bins[p.bin] || p.bin, args: def.args?.length ? def.args : p.args, env, home,
+        bin: def.command || bins[p.bin] || acpBin(p.bin), args: def.args?.length ? def.args : p.args, env, home,
         models: [{ id: 'default', name: 'Predeterminado' }], loginArgs: p.login,
         loginHint: p.login ? `${def.name} necesita iniciar sesión: Ajustes › Suscripciones › Iniciar sesión.` : `${def.name} necesita iniciar sesión: ábrelo una vez en una terminal del host.` };
     }
