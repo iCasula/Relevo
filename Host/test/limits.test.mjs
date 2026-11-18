@@ -33,3 +33,11 @@ test("after Antigravity's quota error, its silent exits are still the limit", ()
   s._fail('other', 'Antigravity terminó con código 1.');
   assert.equal(failures[2].kind, 'other');
 });
+
+test('read-only commands are told apart from ones that write, build or delete', async () => {
+  const { isReadOnlyCommand: reads } = await import('../lib/codex.mjs');
+  for (const c of ['rg -n -i "image descriptor|t#" C:\\src\\video_core', "$f='C:\\x.h'; $a=Get-Content $f; $a[1..240]",
+    'Get-Content tiling.comp | Select-Object -First 260', 'git log --oneline -n 5 && git status --short']) assert.ok(reads(c), c);
+  for (const c of ['git commit -m x', 'Remove-Item -Recurse out', 'Get-Content a.txt > b.txt', 'ninja -C build',
+    'npm install', 'rg foo; rm -rf build', 'python tools/framecap.py x']) assert.ok(!reads(c), c);
+});

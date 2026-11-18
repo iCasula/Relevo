@@ -14,6 +14,7 @@
 
 import * as gitops from './gitops.mjs';
 import { elideCode, clip, threadBrief } from './handoff.mjs';
+import { isReadOnlyCommand } from './codex.mjs';
 
 const clean = (o) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined && v !== null));
 
@@ -455,7 +456,8 @@ export class Teams {
     const team = this.of(thread);
     const member = this.memberOf(thread);
     if (!team || !member) return false;
-    if (member.role !== 'executor' && !item.questions?.length && READ_ONLY.has(req.toolName)) {
+    const reads = READ_ONLY.has(req.toolName) || (req.toolName === 'commandExecution' && isReadOnlyCommand(req.command));
+    if (member.role !== 'executor' && !item.questions?.length && reads) {
       const allow = (item.options ?? []).find((o) => o.isAllow);
       if (allow) { this.host._resolve(thread, item.id, allow.id, null); return true; }
     }

@@ -378,7 +378,19 @@ export class Host {
       case 'select': if (t) this.select(t, accountId, a.model, false); break;
       case 'relay': if (t) this.select(t, accountId, a.model, true); break;
       case 'setEffort': if (t) { t.effort = a.effort ?? null; this.agents.get(t.id)?.setEffort(t.effort); this._changed(t); } break;
-      case 'setMode': if (t) { t.mode = a.mode; this.agents.get(t.id)?.setMode(a.mode); this._changed(t); } break;
+      case 'setMode': if (t) {
+        t.mode = a.mode;
+        this.agents.get(t.id)?.setMode(a.mode);
+        // Full access also lets through what's already waiting for your permission (not questions).
+        if (a.mode === 'full') {
+          for (const id of [...this._rt(t).approvals.keys()]) {
+            const it = this._item(t, id);
+            const allow = it && !it.questions?.length && (it.options ?? []).find((o) => o.isAllow);
+            if (allow) this._resolve(t, id, allow.id, null);
+          }
+        }
+        this._changed(t);
+      } break;
       case 'newThread': {
         const thread = this.createThread(String(a.projectId).toUpperCase());
         peer.send({ created: { requestId: a.requestId, threadId: thread?.id ?? uuid() } });
