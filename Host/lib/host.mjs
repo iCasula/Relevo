@@ -182,8 +182,17 @@ export class Host {
   _wasCut(t) {
     let u = null;
     for (let i = t.items.length - 1; i >= 0 && !u; i--) if (t.items[i].kind === 'user') u = t.items[i];
-    if (!u || u.done || u.from?.label === 'reinicio') return false;
+    if (!u || u.done) return false;
     if (now() - (u.date ?? 0) > 12 * 3600) return false;
+    if (u.from?.label === 'reinicio') {
+      // A resumption cut again: carry on if it had been working a while; one that died right away (a turn
+      // that brings the host down) or the third in a row is left alone, so it can't loop.
+      const ranFor = (t.items[t.items.length - 1]?.date ?? u.date) - u.date;
+      const users = t.items.filter((i) => i.kind === 'user');
+      let streak = 0;
+      for (let i = users.length - 1; i >= 0 && users[i].from?.label === 'reinicio'; i--) streak++;
+      if (ranFor < 120 || streak >= 3) return false;
+    }
     const started = u.started || u.turnBefore;
     return !!started && !u.turnAfter;
   }
