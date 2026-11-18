@@ -65,6 +65,7 @@ function render() {
   frame = requestAnimationFrame(() => {
     frame = 0;
     renderSidebar();
+    renderUpdate();
     renderLimits();
     renderDetail();
     updateTitle();
@@ -161,6 +162,24 @@ function accountUsageHTML(hostId, a) {
   else if (s?.note) body = `<div class="acct-note">${esc(s.note)}</div>`;
   else body = '';
   return `<button class="acct-usage" data-account-pop="${esc(a.id)}" data-host="${esc(hostId)}"><div class="acct-head">${badge(a, 14)}<span class="name">${esc(a.name)}</span><span class="email">${esc(s?.email ?? '')}</span>${s?.plan ? `<span class="plan-pill">${esc(s.plan)}</span>` : ''}${statusIc}</div>${body}</button>`;
+}
+
+/** A new version: offered here, and once installed, how many agents the restart is waiting for. */
+function renderUpdate() {
+  const u = app.update;
+  const el = $('#update-strip');
+  let html = '';
+  if (u?.pendingRestart) {
+    const { version, busy } = u.pendingRestart;
+    html = busy
+      ? `<div class="u-text">${icon('arrow.triangle.2.circlepath', { size: 12 })}<span><b>Relevo ${esc(version)}</b> instalado · se reinicia cuando ${busy === 1 ? 'termine el agente que trabaja' : `terminen los ${busy} agentes que trabajan`}</span></div><button class="btn small" data-cmd="restartNow">Reiniciar ahora</button>`
+      : `<div class="u-text"><span class="spinner"></span><span>Reiniciando con Relevo ${esc(version)}…</span></div>`;
+  } else if (u?.applying) {
+    html = `<div class="u-text"><span class="spinner"></span><span>Instalando Relevo ${esc(u.latest ?? '')}…</span></div>`;
+  } else if (u?.available && u.latest) {
+    html = `<div class="u-text">${icon('sparkles', { size: 12 })}<span>Hay una versión nueva: <b>${esc(u.latest)}</b></span></div><button class="btn small primary" data-cmd="applyUpdate">Actualizar</button>`;
+  }
+  if (el.dataset.sig !== html) { el.innerHTML = html; el.dataset.sig = html; el.classList.toggle('hidden', !html); }
 }
 
 function renderLimits() {
@@ -936,6 +955,12 @@ function toggleSidebar() { app.sidebarHidden = !app.sidebarHidden; save('sidebar
 // MARK: - Events
 
 const commands = {
+  applyUpdate: () => sheets.confirmUpdate(),
+  restartNow: async () => {
+    const busy = app.update?.pendingRestart?.busy ?? 0;
+    const ok = await alertSheet({ title: '¿Reiniciar ahora?', message: busy ? `${busy === 1 ? 'El agente que está trabajando se interrumpe' : `Los ${busy} agentes que están trabajando se interrumpen`} (el hilo y su sesión se conservan: luego basta con decirle que siga).` : 'El servicio se reinicia con la versión nueva.', buttons: [{ label: 'Reiniciar ahora', role: 'destructive' }, { label: 'Esperar', role: 'cancel' }] });
+    if (ok) post({ type: 'restartNow' });
+  },
   newThread: () => newThread(),
   addProject: () => sheets.openNewProject(),
   usage: () => sheets.openUsage(),

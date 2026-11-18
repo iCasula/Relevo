@@ -6,8 +6,8 @@
 //   relevo-host.mjs login [claude|codex|<subscription name>]   sign in for this host (interactive; Codex uses a device code)
 //   relevo-host.mjs status    login, limits and models of each agent, without calling a model
 //   relevo-host.mjs update [--check | <tag> | main]   install the newest signed release (vX.Y.Z) from GitHub, or the
-//                             one given (main: the development branch, unsigned), and restart the service;
-//                             --check only says whether there's a newer one
+//                             one given (main: the development branch, unsigned); the service restarts with it
+//                             once no agent is working (--now: right away); --check only says whether there's one
 //   relevo-host.mjs rollback  put back the version installed before the last update
 //   relevo-host.mjs app [--url]   open the desktop app (with RELEVO_UI_PORT set), or print its link
 //   relevo-host.mjs logs [n]  last lines of <data>/logs/host.log (where the supervisor writes; on Linux, journalctl)
@@ -35,7 +35,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { Host, PROVIDERS } from './lib/host.mjs';
 import { isWindows, findCLI, spawnCLI, killTree, requestControl, watchControl, loadEnvFile, openAppWindow } from './lib/platform.mjs';
 import { Gateway } from './lib/remote.mjs';
@@ -135,9 +135,12 @@ switch (command) {
     if (!isWindows) process.on('SIGHUP', () => refresh('SIGHUP'));
     // `relevo-host login` asks for a probe so the iPhone sees the new session at once; `update` for a restart
     // (the supervisor or systemd starts the new version).
+    // An update restarts the service only when no agent is working or waiting (see Host.restartWhenIdle).
+    const restartForUpdate = (version) => host.restartWhenIdle(version, () => { host.log('agents idle: restarting for the update'); stop(RESTART_EXIT_CODE); });
     watchControl(cfg.dataDir, {
       refresh: () => refresh('login'),
-      restart: () => { host.log('restarting for the update'); stop(RESTART_EXIT_CODE); },
+      restart: () => restartForUpdate(installedVersion(APP_DIR)),
+      restartNow: () => { host.log('restarting now, as asked'); stop(RESTART_EXIT_CODE); },
     });
     if (gateway) {
       // The desktop app looks for new release tags (at start and every 6 h) and installs one on request;
@@ -149,14 +152,25 @@ switch (command) {
         }
       };
       gateway.onCheckUpdate = check;
+      gateway.onRestartNow = () => { host.log('restarting now, as asked'); stop(RESTART_EXIT_CODE); };
+      // The page shows how many agents the restart is waiting for.
+      setInterval(() => {
+        const p = host.pendingRestart;
+        if (!p) return;
+        const busy = host.busyAgents();
+        if (gateway.update.pendingRestart?.busy !== busy || gateway.update.pendingRestart?.version !== p.version) {
+          gateway.setUpdate({ ...gateway.update, applying: false, available: false, pendingRestart: { version: p.version, busy } });
+        }
+      }, 1500).unref();
       gateway.onApplyUpdate = async () => {
         const target = gateway.update.latest;
         if (!target || gateway.update.applying) return;
         gateway.setUpdate({ ...gateway.update, applying: true, error: null });
         try {
           const r = await installVersion({ appDir: APP_DIR, ref: target, repo });
-          host.log(`updated to ${r.version}; restarting`);
-          setTimeout(() => stop(RESTART_EXIT_CODE), 300);
+          host.log(`updated to ${r.version}`);
+          gateway.setUpdate({ ...gateway.update, applying: false, available: false, pendingRestart: { version: r.version, busy: host.busyAgents() } });
+          restartForUpdate(r.version);
         } catch (e) {
           gateway.setUpdate({ ...gateway.update, applying: false, error: `La actualización ha fallado: ${e.message}` });
         }
@@ -210,7 +224,7 @@ switch (command) {
   case 'update': {
     // Release tags (vX.Y.Z) by default; `main` or a given tag on request; `--check` only says what's there.
     const repo = process.env.RELEVO_REPO ?? DEFAULT_REPO;
-    const arg = process.argv[3];
+    const arg = process.argv.slice(3).find((a) => a !== '--now');
     try {
       if (arg === '--check') {
         const u = await checkForUpdate({ appDir: APP_DIR, repo });
@@ -227,21 +241,17 @@ switch (command) {
       process.exitCode = 1;
     }
     if (!process.exitCode) {
-      const systemd = !isWindows && spawnSync('systemctl', ['--user', 'cat', 'relevo-host'], { stdio: 'ignore' }).status === 0;
-      if (systemd) {
-        const r = spawn('systemctl', ['--user', 'restart', 'relevo-host'], { stdio: 'inherit' });
-        r.on('exit', (code) => console.log(code === 0 ? 'Service restarted.' : 'Restart it with: systemctl --user restart relevo-host'));
-      } else {
-        requestControl(cfg.dataDir, 'restart');
-        console.log('The running service restarts with the new version in a few seconds.');
-      }
+      // The running service restarts itself once no agent is working (systemd and the supervisor start it again).
+      requestControl(cfg.dataDir, process.argv.includes('--now') ? 'restartNow' : 'restart');
+      console.log(process.argv.includes('--now') ? 'The running service restarts with the new version in a few seconds.'
+        : 'The running service restarts with the new version as soon as no agent is working (or now with --now).');
     }
     break;
   }
   case 'rollback': {
     if (!restoreProgram(APP_DIR)) { console.error('There is no previous version to go back to.'); process.exit(1); }
     console.log(`Back to ${installedVersion(APP_DIR)}.`);
-    requestControl(cfg.dataDir, 'restart');
+    requestControl(cfg.dataDir, 'restartNow');
     break;
   }
   case 'app': {

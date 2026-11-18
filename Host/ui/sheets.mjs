@@ -339,21 +339,26 @@ function drawIPhone(body) {
   };
 }
 
+/** Installs the new version now; the service restarts once no agent is working. */
+export async function confirmUpdate() {
+  const u = app.update;
+  if (!u?.latest) return;
+  const ok = await alertSheet({ title: `¿Actualizar Relevo a ${u.latest}?`, message: 'Se instala ahora, y el servicio se reinicia en cuanto ningún agente esté trabajando, así que no se corta ningún turno. Los mensajes que envíes mientras tanto esperan en cola y salen solos después.', buttons: [{ label: 'Actualizar', role: 'default' }, { label: 'Cancelar', role: 'cancel' }] });
+  if (ok) post({ type: 'applyUpdate' });
+}
+
 function drawIntegrations(body) {
   const u = app.update;
   const notif = 'Notification' in window ? Notification.permission : 'denied';
   body.innerHTML = `<div class="form-section">Actualizaciones</div>
-    <div class="form-group"><div class="form-row"><div class="l">Versión instalada: <b>${esc(u?.current ?? '—')}</b><span class="cap">${u?.applying ? 'Instalando y reiniciando…' : u?.available ? `Hay una versión nueva: ${esc(u.latest)}` : u?.latest ? `Al día (última publicada: ${esc(u.latest)})` : 'Sin comprobar todavía'}${u?.checkedAt ? ` · comprobado ${esc(relative(u.checkedAt))}` : ''}</span>${u?.error ? `<span class="cap orange">${esc(u.error)}</span>` : ''}</div>
+    <div class="form-group"><div class="form-row"><div class="l">Versión instalada: <b>${esc(u?.current ?? '—')}</b><span class="cap">${u?.pendingRestart ? `${esc(u.pendingRestart.version)} instalada: se reinicia cuando ${u.pendingRestart.busy ? `terminen ${u.pendingRestart.busy === 1 ? 'el agente' : `los ${u.pendingRestart.busy} agentes`} que están trabajando` : 'pueda'}` : u?.applying ? 'Instalando…' : u?.available ? `Hay una versión nueva: ${esc(u.latest)}` : u?.latest ? `Al día (última publicada: ${esc(u.latest)})` : 'Sin comprobar todavía'}${u?.checkedAt ? ` · comprobado ${esc(relative(u.checkedAt))}` : ''}</span>${u?.error ? `<span class="cap orange">${esc(u.error)}</span>` : ''}</div>
       <button class="btn" data-check-update${u?.applying ? ' disabled' : ''}>Buscar actualizaciones</button>${u?.available ? `<button class="btn primary" data-apply-update${u.applying ? ' disabled' : ''}>Actualizar a ${esc(u.latest)}</button>` : ''}</div>
-      <div class="form-row"><div class="caption">Solo se instalan versiones firmadas. Al actualizar, el servicio se reinicia y la ventana se recarga sola; los turnos en marcha en este equipo se interrumpen.</div></div></div>
+      <div class="form-row"><div class="caption">Solo se instalan versiones firmadas. La versión nueva se instala enseguida, pero el servicio no se reinicia hasta que ningún agente esté trabajando: no se corta ningún turno. Mientras tanto, los mensajes nuevos esperan en cola y salen solos tras el reinicio.</div></div></div>
     <div class="form-section">Avisos</div>
     <div class="form-group"><div class="form-row"><div class="l">Avisos del sistema<span class="cap">Cuando un hilo termina o pide permiso y la ventana no está delante.</span></div>
       <button class="btn" data-notif${notif === 'default' ? '' : ' disabled'}>${notif === 'granted' ? 'Activados' : notif === 'denied' ? 'Bloqueados en el navegador' : 'Activar avisos'}</button></div></div>`;
   body.querySelector('[data-check-update]').onclick = () => { post({ type: 'checkUpdate' }); toast('Buscando actualizaciones…'); setTimeout(() => settingsOpen?.redraw(), 2500); };
-  body.querySelector('[data-apply-update]')?.addEventListener('click', async () => {
-    const ok = await alertSheet({ title: `¿Actualizar Relevo a ${u.latest}?`, message: 'El servicio se reiniciará.', buttons: [{ label: 'Actualizar', role: 'default' }, { label: 'Cancelar', role: 'cancel' }] });
-    if (ok) post({ type: 'applyUpdate' });
-  });
+  body.querySelector('[data-apply-update]')?.addEventListener('click', () => confirmUpdate());
   body.querySelector('[data-notif]').onclick = async () => { await Notification.requestPermission(); settingsOpen?.redraw(); };
 }
 

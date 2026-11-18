@@ -540,3 +540,8 @@ input[type=checkbox].check { accent-color: var(--accent); width: 14px; height: 1
 .team-role { width: 120px; flex: none; display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 500; }
 .tb-spacer { width: 26px; flex: none; }
 .thread-row.nested { padding-left: 46px; }
+.update-strip { flex: none; display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--separator); background: color-mix(in srgb, var(--accent) 9%, var(--bar)); font-size: 11.5px; line-height: 1.35; }
+.update-strip.hidden { display: none; }
+.update-strip .u-text { flex: 1; display: flex; gap: 6px; align-items: flex-start; min-width: 0; }
+.update-strip .u-text svg, .update-strip .u-text .spinner { flex: none; margin-top: 2px; }
+.update-strip .btn { flex: none; }

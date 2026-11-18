@@ -52,6 +52,9 @@ What it does today:
 - The agents' programs are looked for in PATH, the user's and machine's PATH in the Windows registry and the
   usual install folders, again on every check (no restart after installing one), or set by hand in Ajustes ›
   Suscripciones › Programa.
+- Updates don't cut the agents: the new version is installed at once, but the service restarts only when no
+  agent is working or waiting for an answer; messages sent meanwhile wait in their queue and go out on their own
+  after the restart (or «Reiniciar ahora», or `relevo-host update --now`).
 - The desktop app is a clone of the Mac one: the same menus, sidebar, toolbar, composer, sheets (settings,
   usage, diffs, commit, compare, traza, quick actions) and the subscriptions' limits always visible at the
   bottom of the sidebar, in light and dark.

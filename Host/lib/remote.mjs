@@ -183,6 +183,7 @@ export class Gateway {
     this.update = { current: version, latest: null, available: false, applying: false, checkedAt: null, error: null };
     this.onCheckUpdate = null;
     this.onApplyUpdate = null;
+    this.onRestartNow = null;
     this.device = device;
     this.log = log;
     this.localLink = localLink;
@@ -281,6 +282,7 @@ export class Gateway {
       case 'reconnect': h?.reconnect(); return;
       case 'checkUpdate': this.onCheckUpdate?.(); return;
       case 'applyUpdate': this.onApplyUpdate?.(); return;
+      case 'restartNow': this.onRestartNow?.(); return;
       default: return;
     }
   }

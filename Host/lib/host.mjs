@@ -247,6 +247,44 @@ export class Host {
     this.probeTimer = setTimeout(probe, (this.settings.probeMinutes || 10) * 60_000);
     this.probeTimer.unref?.();
     setInterval(() => this._housekeeping(), 60_000).unref();
+    // Messages held back while an update waited for the agents carry on now, with the new version.
+    setTimeout(() => {
+      for (const t of this.threads.values()) {
+        if (!t.resumeAfterRestart) continue;
+        delete t.resumeAfterRestart;
+        if (t.queued.length && !t.queuePaused) this._next(t);
+      }
+    }, 3000).unref();
+  }
+
+  // MARK: - Updates without cutting the agents
+
+  /** Agents working or waiting for an answer right now. */
+  busyAgents() {
+    return [...this.threads.values()].filter((t) => { const r = this._rt(t); return r.isRunning || r.approvals.size > 0; }).length;
+  }
+
+  /**
+   * An update is installed and the service has to restart: it waits until no agent is working or waiting for
+   * an answer (turns end on their own; between turns nothing is lost, each agent resumes its session), and
+   * meanwhile new turns wait in their thread's queue so that moment comes. Then `onIdle` restarts.
+   */
+  restartWhenIdle(version, onIdle) {
+    if (this.pendingRestart) { this.pendingRestart.version = version; return; }
+    this.pendingRestart = { version, onIdle, fired: false };
+    this.log(`update to ${version} installed: restarting when the agents are idle (${this.busyAgents()} busy)`);
+    this._restartTimer = setInterval(() => this._checkRestart(), 2000);
+    this._restartTimer.unref?.();
+    this._checkRestart();
+  }
+
+  _checkRestart() {
+    const p = this.pendingRestart;
+    if (!p || p.fired || this.busyAgents()) return;
+    p.fired = true;
+    clearInterval(this._restartTimer);
+    this.flush();
+    setTimeout(() => p.onIdle(), 500);
   }
 
   log(s) { console.log(`[relevo-host] ${s}`); }
@@ -1022,6 +1060,14 @@ export class Host {
       this._changed(t);
       return;
     }
+    if (this.pendingRestart) {
+      t.queued.unshift({ id: uuid(), text, prompt: meta.prompt, from: meta.from, team: !!meta.from });
+      if (!t.resumeAfterRestart) this._append(t, { id: uuid(), kind: 'notice', text: `Relevo se está actualizando a ${this.pendingRestart.version}: lo que está en cola sale en cuanto se reinicie` });
+      t.resumeAfterRestart = true;
+      this._changed(t);
+      this._saveState();
+      return;
+    }
     if (!this._agentSlot(t)) {
       t.queued.unshift({ id: uuid(), text, prompt: meta.prompt, from: meta.from, team: !!meta.from });
       r.statusLine = `Esperando: ya hay ${this.settings.maxAgents} agentes trabajando en ${this.config.name}`;
@@ -1211,6 +1257,7 @@ export class Host {
         return;
       }
       if (r.sendNow) { const text = r.sendNow; r.sendNow = null; this._startTurn(t, text); return; }
+      this._checkRestart();
       if (r.limitHit) { r.limitHit = false; this._onLimit(t); return; }
       if (!t.aiTitled && t.items.some((i) => i.kind === 'assistant' && i.text)) this._aiTitle(t).catch(() => {});
       this._next(t);
