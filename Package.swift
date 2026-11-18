@@ -15,6 +15,11 @@ let package = Package(
                 .product(name: "RelevoMarkdown", package: "RelevoProtocol"),
             ],
             path: "Sources/Relevo"
-        )
+        ),
+        // Relevo Hosts: the cross-platform desktop app in a native menu-bar shell (scripts/build-hosts-app.sh).
+        .executableTarget(
+            name: "RelevoHosts",
+            path: "Sources/RelevoHosts"
+        ),
     ]
 )

@@ -6,7 +6,8 @@
 #   Host/deploy/install-mac-desktop.sh
 #
 # Puts the program in ~/Library/Application Support/Relevo Desktop/app (updated from the window: Ajustes ›
-# Integraciones) and «Relevo Hosts.app» in ~/Applications. Needs Node 22+ and, for a window of its own, Chrome,
+# Integraciones) and «Relevo Hosts.app» in ~/Applications: a native menu-bar app (built with Swift) when
+# Xcode's tools are there, a launcher for Chrome/Edge otherwise. Needs Node 22+ and, for a window of its own, Chrome,
 # Edge, Brave or Chromium (otherwise it opens in your browser).
 set -eu
 HERE=$(cd "$(dirname "$0")/.." && pwd)
@@ -18,6 +19,16 @@ NODE=$(command -v node) || { echo "Node not found: install Node 22 or newer firs
 mkdir -p "$BASE/app"
 rsync -a --delete --exclude '._*' --exclude '.DS_Store' "$HERE/relevo-host.mjs" "$HERE/lib" "$HERE/ui" "$HERE/VERSION" "$BASE/app/"
 
+# Where the menu-bar app finds Node and the program.
+printf '{"node":"%s","script":"%s"}\n' "$NODE" "$BASE/app/relevo-host.mjs" > "$BASE/launcher.json"
+
+# The native menu-bar app when Swift is there (Xcode or its command line tools); otherwise a small launcher that
+# opens the window in Chrome/Edge.
+if command -v swift >/dev/null 2>&1 && [ -f "$HERE/../scripts/build-hosts-app.sh" ]; then
+  # The old launcher's background part gives way to the app's own.
+  pkill -f "relevo-host.mjs desktop --serve" 2>/dev/null || true
+  "$HERE/../scripts/build-hosts-app.sh"
+else
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cat > "$APP/Contents/MacOS/relevo-hosts" <<SCRIPT
 #!/bin/sh
@@ -41,6 +52,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   $ICON
 </dict></plist>
 PLIST
+fi
 echo "Installed: $APP"
 echo "Open it, and paste the pairing link of your Windows PC (there: Relevo › Ajustes › iPhone › Copiar enlace)."
 open "$APP"

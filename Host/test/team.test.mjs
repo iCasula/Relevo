@@ -274,3 +274,27 @@ test('integrar merges an executor worktree without the orchestrator touching git
   const done = await next((m) => m.threadPatch?._0.id === boss && m.threadPatch._0.upserts.some((i) => i.from?.label === 'integración'), 20_000);
   assert.match(done.threadPatch._0.upserts.find((i) => i.from?.label === 'integración').text, /Integrado: la rama relevo\/\w+ de Ejecutor 2/);
 });
+
+test("each role's fallback is its thread's out-of-quota plan, and the orchestrator talking to you is flagged", async () => {
+  const claude = snapshot.accounts.find((a) => a.kind === 'claude'), codex = snapshot.accounts.find((a) => a.kind === 'codex');
+  const r = await request('createTeam', { team: {
+    projectId: demo(), goal: 'Fallbacks', researcher: null,
+    orchestrator: { accountId: claude.id, fallback: `${codex.id}|default` }, executors: [{ accountId: claude.id, fallback: 'wait' }],
+  } });
+  assert.ok(r.ok, r.error);
+  const snap = (await next((m) => m.snapshot?._0.hostTeams?.some((x) => x.goal === 'Fallbacks'))).snapshot._0;
+  const members = snap.hostTeams.find((x) => x.goal === 'Fallbacks').members;
+  assert.equal(members[0].fallback, `${codex.id}|default`);
+  assert.equal(members[1].fallback, 'wait');
+  // The echo orchestrator's first turn gives no orders: that's it talking to you.
+  const flagged = (await next((m) => m.snapshot?._0.threads.find((t) => t.id === r.threadId)?.attention, 20_000)).snapshot._0;
+  const first = flagged.threads.find((t) => t.id === r.threadId).attention;
+  assert.equal(first.kind, 'orquestador');
+  // You answer: the flag goes (or, with the quick echo agent, is replaced by its next message).
+  peer.send(Client.send(r.threadId, 'vale'));
+  await next((m) => { const t = m.snapshot?._0.threads.find((x) => x.id === r.threadId); return t && (!t.attention || t.attention.at !== first.at); });
+  // Edited afterwards.
+  const r2 = await request('updateTeam', { teamId: snap.hostTeams.find((x) => x.goal === 'Fallbacks').id, changes: { members: [{ threadId: members[1].threadId, fallback: '' }] } });
+  assert.ok(r2.ok, r2.error);
+  await next((m) => m.snapshot?._0.hostTeams?.find((x) => x.goal === 'Fallbacks')?.members[1].fallback === '');
+});

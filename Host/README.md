@@ -66,9 +66,13 @@ What it does today:
   agent is working or waiting for an answer; messages sent meanwhile wait in their queue and go out on their own
   after the restart (or «Reiniciar ahora», or `relevo-host update --now`). If a restart does cut a turn (forced,
   or a crash), the agent carries on where it was when the host is back, and waiting queues go out.
-- The desktop app on its own (`relevo-host desktop`, or `Host/deploy/install-mac-desktop.sh` for «Relevo Hosts.app»
-  on a Mac): the same window managing hosts on other machines, e.g. the Windows PC from the Mac, with no agents of
-  its own. The native Mac app can be paired in it too.
+- The desktop app on its own (`relevo-host desktop`): the same window managing hosts on other machines, e.g. the
+  Windows PC from the Mac, with no agents of its own. On a Mac, `Host/deploy/install-mac-desktop.sh` installs it as
+  «Relevo Hosts.app», a native menu-bar app (Sources/RelevoHosts): the menu bar shows agents working and what's
+  waiting for you, the window can be closed and notifications (an agent's permission request or question, the
+  orchestrator writing to you) arrive as macOS ones. The native Mac app can be paired in it too.
+- Team roles can have their own fallback when their subscription runs out (relay to a given one, or wait), set
+  when creating or editing the team.
 - Signing in to Antigravity (agy), which only works in a real terminal: the app shows `relevo-host login
   antigravity` to run on the host and finishes on its own once agy saves the session.
 - The desktop app is a clone of the Mac one: the same menus, sidebar, toolbar, composer, sheets (settings,

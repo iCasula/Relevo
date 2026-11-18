@@ -136,7 +136,8 @@ function threadRowHTML(hostId, s, t, nested = false) {
   const dot = ran ? `<span class="pdot" style="background:${esc(acct?.tint ?? 'var(--tertiary)')}"></span>` : '<span class="pdot empty"></span>';
   const extra = t.worktree ? `<span title="Worktree propio · ${esc(t.worktree)}">${icon('square.stack.3d.down.right', { size: 10, cls: 'small' })}</span>` : '';
   const live = threadOf(hostId, t.id)?.runtime;
-  const status = t.isRunning ? '<span class="spinner"></span>'
+  const status = t.attention ? `<span class="attn" title="${esc(t.attention.text)}">${icon('text.bubble.fill', { size: 11 })}</span>`
+    : t.isRunning ? '<span class="spinner"></span>'
     : live?.limit ? `<span class="orange">${icon('hourglass', { size: 10 })}</span>`
       : t.isWaiting ? `<span class="muted" title="Esperando a una tarea en segundo plano">${icon('clock', { size: 10 })}</span>`
         : `<span class="when">${esc(relative(t.updatedAt))}</span>`;
@@ -1169,24 +1170,59 @@ document.addEventListener('keydown', (e) => {
   });
 })();
 
-// MARK: - Notifications (when the window isn't in front)
+// MARK: - Notifications
+// What needs you: an agent asking for permission or a question (any agent, a team's included), and the
+// orchestrator talking to you (a question, the goal reached, the team paused). Team members finishing turns
+// don't notify: the orchestrator handles that. Plain threads notify when they finish, as before.
+// Inside the native Mac app (window.webkit.messageHandlers.relevo) the notifications are the system's.
+
+const native = () => window.webkit?.messageHandlers?.relevo;
+const ATTENTION = { orquestador: 'El orquestador te escribe', fin: 'Objetivo cumplido', pausa: 'Equipo en pausa' };
 
 function notifyChanges(hostId) {
   for (const t of snap(hostId)?.threads ?? []) {
     const key = `${hostId}/${t.id}`;
     const prev = app.notified.get(key);
-    app.notified.set(key, { running: t.isRunning, approval: t.needsApproval });
-    if (!prev || (!document.hidden && document.hasFocus())) continue;
-    if (!prev.approval && t.needsApproval) notify(hostId, t, `Aprobación pendiente · ${t.title}`, t.title);
-    else if (prev.running && !t.isRunning && !t.needsApproval) notify(hostId, t, t.title, (t.preview ?? '').slice(0, 140));
+    app.notified.set(key, { running: t.isRunning, approval: t.needsApproval, attention: t.attention?.at ?? null });
+    if (!prev) continue;
+    const here = !document.hidden && document.hasFocus() && app.sel?.host === hostId && app.sel?.thread === t.id;
+    if (here) continue;
+    const role = t.team?.role;
+    const who = t.team ? `${t.team.name} · ` : '';
+    if (!prev.approval && t.needsApproval) notify(hostId, t, `${who}Necesita tu respuesta`, t.title);
+    else if (t.attention && t.attention.at !== prev.attention) notify(hostId, t, ATTENTION[t.attention.kind] ?? 'El equipo te necesita', t.attention.text);
+    else if (!role && prev.running && !t.isRunning && !t.needsApproval) notify(hostId, t, t.title, (t.preview ?? '').slice(0, 140));
   }
+  reportStatus();
 }
+
 function notify(hostId, t, title, body) {
+  // With the window in front (another thread open): a toast in the window is enough.
+  if (!document.hidden && document.hasFocus() && !native()) { toast(`${title}: ${body}`.slice(0, 160)); return; }
+  if (native()) { native().postMessage({ type: 'notify', title, body, hostId, threadId: t.id }); return; }
   if (!('Notification' in window) || Notification.permission !== 'granted') return;
   const n = new Notification(title, { body, icon: 'icon.png', tag: `${hostId}/${t.id}` });
   n.onclick = () => { window.focus(); select(hostId, t.id); n.close(); };
 }
-document.addEventListener('click', () => { if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission(); }, { once: true });
+
+/** For the native Mac app's menu bar: agents working, waiting for you, and messages for you. */
+function reportStatus() {
+  if (!native()) return;
+  let working = 0, waiting = 0, attention = 0;
+  const hosts = [];
+  for (const [hostId, h] of app.hosts) {
+    const threads = snap(hostId)?.threads ?? [];
+    working += threads.filter((t) => t.isRunning || t.isWaiting).length;
+    waiting += threads.filter((t) => t.needsApproval).length;
+    attention += threads.filter((t) => t.attention).length;
+    hosts.push({ id: hostId, name: nameOf(h), state: h.info.state });
+  }
+  native().postMessage({ type: 'status', working, waiting, attention, hosts });
+}
+/** The native app opens a thread from a notification. */
+window.relevoOpen = (hostId, threadId) => { if (host(hostId)) select(hostId, threadId); };
+
+document.addEventListener('click', () => { if (!native() && 'Notification' in window && Notification.permission === 'default') Notification.requestPermission(); }, { once: true });
 
 // The relay countdown and relative times move on their own.
 setInterval(() => { if (current().thread?.runtime?.pendingRelay) { T.sig.banner = null; renderBanner(); } }, 1000);

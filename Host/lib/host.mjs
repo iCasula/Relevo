@@ -19,7 +19,7 @@ import { usageReport } from './usage.mjs';
 import { LoginSession } from './login.mjs';
 import { quickCompletion, cleanTitle } from './quick.mjs';
 import { buildAccount, API_PRESETS, ACP_PRESETS, TYPES } from './accounts.mjs';
-import { Teams } from './team.mjs';
+import { Teams, fallbackOf } from './team.mjs';
 
 const PROTOCOL_VERSION = 1;
 const MAX_STORED_ITEMS = 1500;
@@ -1025,6 +1025,7 @@ export class Host {
   send(t, text) {
     if (!text?.trim()) return;
     this.teams.userSpoke(t);
+    if (t.attention) { delete t.attention; this._broadcastSnapshot(); } // you've answered
     if (this._rt(t).isRunning) {
       t.queued.push({ id: uuid(), text });
       this._changed(t);
@@ -1589,7 +1590,7 @@ export class Host {
           id: t.id, projectId: t.projectId, title: t.title, updatedAt: t.updatedAt, isRunning: r.isRunning,
           needsApproval: r.approvals.size > 0, accountId: t.accountId, preview: last?.text?.slice(0, 160) ?? null, isWaiting: !!r.backgroundTasks?.length,
           context: r.context ?? undefined, sessionTokens: r.sessionTokens || undefined,
-          worktree: t.worktree ? t.worktree.branch : null, team: t.team ?? null,
+          worktree: t.worktree ? t.worktree.branch : null, team: t.team ?? null, attention: t.attention ?? null,
         });
       });
     const settings = this.settings;
@@ -1598,7 +1599,7 @@ export class Host {
       autoRelay: settings.limitPlan.mode !== 'ask', pushReady: false,
       // Beyond the shared protocol (the Mac and the iPhone ignore unknown fields).
       hostFeatures: HOST_FEATURES, hostVersion: this.config.version ?? 'dev', hostPlatform: process.platform, hostCLIs: this.config.bins ?? {},
-      hostTeams: this.teams.list.map((x) => ({ id: x.id, projectId: x.projectId, goal: x.goal, status: x.status, auto: x.auto, held: x.held.length, members: x.members.map((m) => { const t = this.threads.get(m.threadId); return clean({ threadId: m.threadId, role: m.role, name: m.name, notes: m.notes, accountId: t?.accountId, model: t?.model ?? 'default', task: m.task ?? undefined, stash: m.stash?.length || undefined }); }) })),
+      hostTeams: this.teams.list.map((x) => ({ id: x.id, projectId: x.projectId, goal: x.goal, status: x.status, auto: x.auto, held: x.held.length, members: x.members.map((m) => { const t = this.threads.get(m.threadId); return clean({ threadId: m.threadId, role: m.role, name: m.name, notes: m.notes, accountId: t?.accountId, model: t?.model ?? 'default', task: m.task ?? undefined, stash: m.stash?.length || undefined, fallback: t ? fallbackOf(t.limitPlan) : undefined }); }) })),
       hostSettings: { ...settings, limitPlanSummary: this._planSummary(settings.limitPlan), accounts: this._accountDefs() },
       hostProviders: {
         api: Object.entries(API_PRESETS).map(([id, p]) => ({ id, name: p.name, keyURL: p.keyURL ?? null })),

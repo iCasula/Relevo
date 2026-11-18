@@ -79,6 +79,24 @@ function rosterLine(host, team, m) {
   return `- ${m.name} (${a ? `${a.name} · ${host._modelName(a, t.model)}` : 'agente'})${what}${where}`;
 }
 
+/**
+ * A member's fallback when its subscription runs out: '' (as in Ajustes), 'wait' (until it resets), or
+ * '<accountId>|<model>' (relay to that one). As the thread's out-of-quota plan, and back.
+ */
+export function planFromFallback(host, fallback) {
+  if (fallback === undefined) return undefined;
+  if (!fallback) return null;
+  if (fallback === 'wait') return { mode: 'wait', targets: [] };
+  const [accountId, model] = String(fallback).split('|');
+  return host._validPlan({ mode: 'chain', targets: [{ accountId, model: model || 'default' }] });
+}
+export function fallbackOf(plan) {
+  if (!plan) return '';
+  if (plan.mode === 'wait') return 'wait';
+  const t = plan.mode === 'chain' && plan.targets?.[0];
+  return t ? `${t.accountId}|${t.model || 'default'}` : '';
+}
+
 /** Instructions as stored: trimmed, at most 2000 characters, or undefined. */
 const noteOf = (x) => String(x ?? '').trim().slice(0, 2000) || undefined;
 
@@ -249,6 +267,8 @@ export class Teams {
       const name = execName(0);
       existing.team = { id: team.id, role: 'executor', name };
       existing.teamPrimed = false;
+      const plan = planFromFallback(h, spec.threadFallback);
+      if (plan !== undefined) existing.limitPlan = plan;
       team.members.push(clean({ threadId: existing.id, role: 'executor', name, notes: noteOf(spec.threadNotes) }));
       h._append(existing, { id: h._uuid(), kind: 'notice', text: `Este hilo es ahora ${name} de un equipo: el Orquestador le irá dando tareas. Puedes seguir escribiéndole tú.` });
       h._changed(existing);
@@ -304,6 +324,8 @@ export class Teams {
     t.title = `${name} · ${clip(team.goal.split('\n')[0], 48)}`;
     t.team = { id: team.id, role, name };
     t.aiTitled = true; // the role and the goal are a better title than one guessed from the first message
+    const plan = planFromFallback(h, pick?.fallback);
+    if (plan !== undefined) t.limitPlan = plan;
     team.members.push(clean({ threadId: t.id, role, name, notes: noteOf(pick?.notes) }));
     return t;
   }
@@ -334,6 +356,8 @@ export class Teams {
         if (m.role !== 'orchestrator') news.push(`${m.name} tiene indicaciones nuevas${m.notes ? `: ${clip(m.notes.replace(/\s+/g, ' '), 300)}` : ' (ninguna)'}`);
         else news.push(`Tus indicaciones han cambiado${m.notes ? `:\n${m.notes}` : ': ya no hay ninguna'}`);
       }
+      const plan = planFromFallback(h, c.fallback);
+      if (plan !== undefined && JSON.stringify(plan) !== JSON.stringify(t.limitPlan ?? null)) { t.limitPlan = plan; h._changed(t); }
       const account = c.accountId && h.accountsById.get(String(c.accountId).toUpperCase());
       const model = c.model || 'default';
       if (account && (account.id !== t.accountId || model !== (t.model || 'default'))) {
@@ -477,7 +501,11 @@ export class Teams {
     if (!team || !member || team.status === 'done') return;
     const h = this.host;
     if (member.role === 'orchestrator') {
-      for (const o of parseOrders(text)) this._order(team, member, o);
+      const orders = parseOrders(text);
+      for (const o of orders) this._order(team, member, o);
+      // A turn with no orders is the orchestrator talking to you (a question, a decision, a summary).
+      const said = withoutOrders(text).trim();
+      if (!orders.length && said && team.status !== 'done') this._attention(thread, 'orquestador', said);
       team.leadTurns = (team.leadTurns ?? 0) + 1;
       this._maybeRefreshLead(team, thread);
       h._saveState();
@@ -523,6 +551,14 @@ export class Teams {
       } else report.push(`(${target.name} está trabajando: no se le ha enviado. Pásale lo que le sirva junto con su siguiente tarea.)`);
     }
     this._toLead(team, member, kind, report.join('\n\n'));
+  }
+
+  /** Something in this thread is for you: the apps notify it until you write there. */
+  _attention(t, kind, text) {
+    if (!t) return;
+    t.attention = { kind, text: clip(text.replace(/\s+/g, ' '), 240), at: Date.now() / 1000 };
+    this.host._changed(t);
+    this.host._broadcastSnapshot();
   }
 
   /** Working, waiting for an answer, or waiting for something it left running in the background. */
@@ -658,6 +694,7 @@ export class Teams {
       }
       case 'fin': {
         team.status = 'done';
+        this._attention(leadThread, 'fin', o.body || 'Objetivo cumplido');
         h._append(leadThread, { id: h._uuid(), kind: 'notice', text: `Equipo: objetivo cumplido${o.body ? ` · ${clip(o.body.replace(/\s+/g, ' '), 200)}` : ''}` });
         h._changed(leadThread);
         h._broadcastSnapshot();
@@ -686,6 +723,7 @@ export class Teams {
       const lead = this._lead(team);
       if (lead) {
         h._append(lead, { id: h._uuid(), kind: 'notice', text: `Equipo en pausa tras ${AUTO_LIMIT} mensajes automáticos seguidos sin ti. Reanúdalo cuando quieras.` });
+        this._attention(lead, 'pausa', `Equipo en pausa tras ${AUTO_LIMIT} mensajes automáticos seguidos sin ti`);
         h._changed(lead);
       }
       h._broadcastSnapshot();

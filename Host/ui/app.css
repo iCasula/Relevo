@@ -549,3 +549,5 @@ input[type=checkbox].check { accent-color: var(--accent); width: 14px; height: 1
 .team-fixed { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; min-height: 26px; }
 .team-notes { font-size: 12px; }
 .team-line.removed { opacity: .6; }
+.team-fb { width: 210px; flex: none; font-size: 12px; }
+.thread-row .attn { color: var(--accent); display: inline-flex; }
