@@ -85,13 +85,19 @@ export function openSettings(tab = 'accounts', hostId) {
   const s = openSheet({ className: 'settings-win', width: 680, focus: false, onClose: () => { settingsOpen = null; } });
   settingsOpen = s;
   const draw = () => {
+    // The refresh keeps where you were scrolled in the subscription's details.
+    const scrolled = s.el.querySelector('.acct-detail')?.scrollTop ?? 0;
+    const wasAccount = state.account;
     const title = TABS.find((t) => t[0] === state.tab)[1];
     s.el.innerHTML = `<div class="settings-tabs"><button class="close" data-close title="Cerrar"></button><div class="wt">${esc(title)}</div>${TABS.map(([id, label, ic]) => `<button class="tab${id === state.tab ? ' on' : ''}" data-tab="${id}">${icon(ic, { size: 26 })}<span>${label}</span></button>`).join('')}</div><div class="settings-body" data-body></div>`;
     s.el.querySelector('[data-close]').onclick = s.close;
     s.el.querySelectorAll('[data-tab]').forEach((b) => { b.onclick = () => { state.tab = b.dataset.tab; draw(); }; });
     const body = s.el.querySelector('[data-body]');
-    if (state.tab === 'accounts') drawAccounts(body, state, draw);
-    else if (state.tab === 'general') drawGeneral(body, state, draw);
+    if (state.tab === 'accounts') {
+      drawAccounts(body, state, draw);
+      const detail = body.querySelector('.acct-detail');
+      if (detail && state.account === wasAccount) detail.scrollTop = scrolled;
+    } else if (state.tab === 'general') drawGeneral(body, state, draw);
     else if (state.tab === 'iphone') drawIPhone(body);
     else drawIntegrations(body);
   };
@@ -155,6 +161,10 @@ function drawAccounts(body, state, redraw) {
   const s = a.status ?? {};
   const isAPI = !!a.usesAPIKey;
   const kind = a.kind.split(':')[0];
+  const cliKey = { claude: 'claude', api: 'claude', codex: 'codex', antigravity: 'antigravity' }[def.type] ?? null;
+  const cliName = { claude: 'claude', codex: 'codex', antigravity: 'agy' }[cliKey];
+  const custom = sn.hostSettings?.cliPaths?.[cliKey] ?? '';
+  const found = cliKey ? sn.hostCLIs?.[cliKey] ?? null : null;
   const canLogin = has(hostId, 'login') && !isAPI && (def.type !== 'acp' || sn.hostProviders?.acp.find((p) => p.id === def.preset)?.login);
   detail.innerHTML = `
     <div class="form-group"><div class="form-row">${badge(a, 30)}<div class="l"><div style="font-weight:700">${esc(a.agentName)}</div>${statusLabel(a)}</div></div></div>
@@ -173,8 +183,16 @@ function drawAccounts(body, state, redraw) {
     <div class="form-group"><div class="form-row"><span style="width:120px">Nombre</span><input class="field-input grow" data-f="name" value="${esc(a.name)}"></div>
       ${def.type === 'api' && def.preset === 'custom' ? `<div class="form-row"><span style="width:120px">URL de la API</span><input class="field-input grow mono" data-f="baseURL" value="${esc(def.baseURL ?? '')}"></div><div class="form-row"><span style="width:120px">Modelos</span><input class="field-input grow mono" data-f="models" value="${esc((def.models ?? []).join(', '))}"></div>` : ''}
       ${def.type === 'acp' && def.preset === 'custom' ? `<div class="form-row"><span style="width:120px">Ruta del ejecutable</span><input class="field-input grow mono" data-f="command" value="${esc(def.command ?? '')}"></div><div class="form-row"><span style="width:120px">Argumentos ACP</span><input class="field-input grow mono" data-f="args" value="${esc((def.args ?? []).join(' '))}"></div>` : ''}
-      <div class="form-row"><span class="grow"></span><button class="btn" data-save-cfg>Guardar cambios</button></div></div>`;
+      <div class="form-row"><span class="grow"></span><button class="btn" data-save-cfg>Guardar cambios</button></div></div>
+    ${cliKey ? `<div class="form-section">Programa</div>
+    <div class="form-group"><div class="form-row"><input class="field-input grow mono" data-cli placeholder="${found ? esc(found) : `Ruta a ${cliName}${sn.hostPlatform === 'win32' ? '.exe' : ''}`}" value="${esc(custom)}"><button class="btn" data-save-cli>Guardar</button></div>
+      <div class="form-row"><div class="caption${found ? '' : ' orange'}">${found ? `${custom ? 'Ruta indicada' : 'Encontrado'}: ${esc(found)}. Déjalo vacío para buscarlo solo.` : `No encuentro «${cliName}» en ${esc(sn.macName ?? 'el host')}. ${sn.hostPlatform === 'win32' ? `En PowerShell, <span class="mono">(Get-Command ${cliName}).Source</span> te dice dónde está: pega aquí esa ruta.` : `En una terminal, <span class="mono">which ${cliName}</span> te dice dónde está: pega aquí esa ruta.`}`}</div></div></div>` : ''}`;
   const $ = (q) => detail.querySelector(q);
+  $('[data-save-cli]')?.addEventListener('click', async () => {
+    const r = await request(hostId, { setSettings: { settings: { cliPaths: { [cliKey]: $('[data-cli]').value } } } });
+    toast(r.ok ? 'Guardado: comprobando la suscripción…' : r.error);
+    if (r.ok) setTimeout(redraw, 1500);
+  });
   detail.querySelectorAll('[data-check]').forEach((b) => { b.onclick = () => { sendTo(hostId, Client.refreshUsage()); toast('Comprobando…'); }; });
   $('[data-login]')?.addEventListener('click', () => openLogin(hostId, a.id));
   $('[data-save-key]')?.addEventListener('click', async () => {
@@ -789,6 +807,77 @@ export function openCompare(hostId, threadId, draft = '') {
       s.close();
       if (ids[0]) main.select(hostId, ids[0]);
     };
+  };
+  draw();
+}
+
+// MARK: - New team (orchestrator + executors + researcher)
+
+export function openNewTeam(hostId, projectId, goal = '') {
+  if (!has(hostId, 'teams')) { toast('Actualiza el host para usar equipos de agentes'); return; }
+  const project = projectOf(hostId, projectId);
+  const accounts = (snap(hostId)?.accounts ?? []).filter((a) => a.status?.loggedIn !== false);
+  if (!project || !accounts.length) { toast(project ? 'No hay ninguna suscripción con sesión iniciada' : 'Elige un proyecto'); return; }
+  const pick = (a, prefer) => ({ accountId: a.id, model: (visibleModels(a).find((m) => prefer.test(m.id)) ?? visibleModels(a)[0])?.id ?? 'default' });
+  const claude = accounts.find((a) => a.kind === 'claude') ?? accounts[0];
+  const other = accounts.find((a) => a.kind.split(':')[0] !== claude.kind.split(':')[0]);
+  const st = {
+    lead: pick(claude, /opus/i),
+    executors: [pick(claude, /sonnet/i)],
+    researcher: other ? pick(other, /.^/) : pick(claude, /sonnet|haiku/i),
+    withResearcher: true,
+    worktrees: true,
+    mode: 'autoEdit',
+  };
+  const s = openSheet({ width: 640 });
+  const row = (key, r, i = null) => {
+    const a = accountOf(hostId, r.accountId) ?? accounts[0];
+    const idx = i === null ? '' : ` data-i="${i}"`;
+    return `<select class="field" style="width:190px" data-acc="${key}"${idx}>${accounts.map((x) => `<option value="${esc(x.id)}"${x.id === r.accountId ? ' selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
+      <select class="field grow" data-model="${key}"${idx}>${visibleModels(a).map((m) => `<option value="${esc(m.id)}"${m.id === r.model ? ' selected' : ''}>${esc(m.name)}</option>`).join('')}</select>`;
+  };
+  const draw = () => {
+    const n = st.executors.length;
+    s.el.innerHTML = `<div class="sheet-title">${icon('person.3.sequence', { size: 16 })} Equipo de agentes en ${esc(project.name)}</div>
+      <div class="sheet-sub">Un orquestador reparte el trabajo entre los ejecutores, responde a sus dudas y los desbloquea; el investigador busca librerías, proyectos open source y documentación para no reinventar nada. Puedes escribir a cualquiera en su hilo.</div>
+      <h3>Objetivo</h3><textarea class="field" data-goal style="min-height:84px;font-family:var(--font);font-size:13px" placeholder="Qué quieres conseguir, con el detalle que tengas">${esc(goal)}</textarea>
+      <div class="team-form">
+        <div class="team-line"><span class="team-role r-orchestrator">${icon('crown.fill', { size: 12 })} Orquestador</span>${row('lead', st.lead)}<span class="tb-spacer"></span></div>
+        ${st.executors.map((r, i) => `<div class="team-line"><span class="team-role r-executor">${icon('wrench.and.screwdriver', { size: 12 })} ${n > 1 ? `Ejecutor ${i + 1}` : 'Ejecutor'}</span>${row('exec', r, i)}<button class="tb-btn" data-rm="${i}"${n <= 1 ? ' disabled' : ''} title="Quitar">${icon('minus.circle', { size: 15 })}</button></div>`).join('')}
+        <div class="team-line"><span class="team-role"></span><button class="btn small" data-add${n >= 4 ? ' disabled' : ''}>${icon('plus', { size: 10 })} Añadir ejecutor</button></div>
+        <div class="team-line"><label class="team-role r-researcher"><input type="checkbox" class="check" data-res${st.withResearcher ? ' checked' : ''}> ${icon('globe', { size: 12 })} Investigador</label>${st.withResearcher ? row('res', st.researcher) : '<span class="caption grow">Sin investigador: el orquestador buscará alternativas por su cuenta</span>'}<span class="tb-spacer"></span></div>
+      </div>
+      <div class="form-group" style="margin-top:12px">
+        <div class="form-row"><span class="grow">Los ejecutores</span><select class="field" data-mode>${[['ask', 'Piden permiso'], ['autoEdit', 'Editan sin pedir permiso'], ['full', 'Acceso total']].map(([v, l]) => `<option value="${v}"${v === st.mode ? ' selected' : ''}>${l}</option>`).join('')}</select></div>
+        ${n > 1 && has(hostId, 'worktrees') ? `<div class="form-row"><label style="display:flex;gap:8px;align-items:center"><input type="checkbox" class="check" data-wt${st.worktrees ? ' checked' : ''}> Cada ejecutor en su propio worktree (su rama; no se pisan)</label></div>` : ''}
+      </div>
+      <div class="caption" style="margin-top:8px">El orquestador y el investigador leen y buscan sin pedir permiso, pero no modifican ficheros. Si los agentes se pasan muchos mensajes seguidos sin ti, el equipo se pone en pausa.</div>
+      <div class="sheet-buttons"><button class="btn" data-no>Cancelar</button><span class="grow"></span><button class="btn primary" data-go>Crear equipo (${1 + n + (st.withResearcher ? 1 : 0)} agentes)</button></div>`;
+    const $ = (q) => s.el.querySelector(q);
+    const keep = () => { goal = $('[data-goal]').value; };
+    const target = (el) => (el.dataset.acc ?? el.dataset.model) === 'lead' ? st.lead : (el.dataset.acc ?? el.dataset.model) === 'res' ? st.researcher : st.executors[Number(el.dataset.i)];
+    s.el.querySelectorAll('[data-acc]').forEach((el) => { el.onchange = () => { const r = target(el); r.accountId = el.value; r.model = visibleModels(accountOf(hostId, el.value))[0]?.id ?? 'default'; keep(); draw(); }; });
+    s.el.querySelectorAll('[data-model]').forEach((el) => { el.onchange = () => { target(el).model = el.value; }; });
+    s.el.querySelectorAll('[data-rm]').forEach((b) => { b.onclick = () => { st.executors.splice(Number(b.dataset.rm), 1); keep(); draw(); }; });
+    $('[data-add]').onclick = () => { st.executors.push({ ...st.executors[st.executors.length - 1] }); keep(); draw(); };
+    $('[data-res]').onchange = (e) => { st.withResearcher = e.target.checked; keep(); draw(); };
+    $('[data-mode]').onchange = (e) => { st.mode = e.target.value; };
+    $('[data-wt]')?.addEventListener('change', (e) => { st.worktrees = e.target.checked; });
+    $('[data-no]').onclick = s.close;
+    $('[data-go]').onclick = async () => {
+      keep();
+      if (!goal.trim()) { $('[data-goal]').focus(); toast('Escribe el objetivo del equipo'); return; }
+      $('[data-go]').disabled = true;
+      $('[data-go]').innerHTML = '<span class="spinner"></span> Creando…';
+      const r = await request(hostId, { createTeam: { team: {
+        projectId, goal: goal.trim(), orchestrator: st.lead, executors: st.executors,
+        researcher: st.withResearcher ? st.researcher : null, worktrees: st.worktrees && st.executors.length > 1, mode: st.mode,
+      } } });
+      if (!r.ok) { toast(r.error); $('[data-go]').disabled = false; $('[data-go]').textContent = 'Crear equipo'; return; }
+      s.close();
+      main.select(hostId, r.threadId);
+    };
+    if (!st.focused) { st.focused = true; setTimeout(() => $('[data-goal]')?.focus(), 0); }
   };
   draw();
 }

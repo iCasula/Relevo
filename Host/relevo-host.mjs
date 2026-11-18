@@ -37,7 +37,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { Host, PROVIDERS } from './lib/host.mjs';
-import { isWindows, which, findIn, spawnCLI, killTree, requestControl, watchControl, loadEnvFile, openAppWindow } from './lib/platform.mjs';
+import { isWindows, findCLI, spawnCLI, killTree, requestControl, watchControl, loadEnvFile, openAppWindow } from './lib/platform.mjs';
 import { Gateway } from './lib/remote.mjs';
 import { startUIServer, uiToken, appURL } from './lib/ui-server.mjs';
 import { DEFAULT_REPO, checkForUpdate, installVersion, installedVersion, latestTag, restoreProgram, PENDING_MARKER } from './lib/updater.mjs';
@@ -50,14 +50,17 @@ loadEnvFile(process.env.RELEVO_ENV_FILE ?? path.join(APP_DIR, '..', 'host.env'))
 function config() {
   const env = process.env;
   const dataDir = path.resolve(env.RELEVO_HOST_DATA ?? path.join(os.homedir(), '.relevo-host'));
-  const cli = (name, override) => {
-    if (override) return override;
-    return findIn(path.join(os.homedir(), '.local', 'bin'), name) ?? which(name);
+  // A path set in host.env wins when it exists; otherwise the CLI is looked for (again on every check, so
+  // one installed after the host started is found without restarting it).
+  const cli = (name, override, hints = []) => {
+    if (override && fs.existsSync(override)) return override;
+    return findCLI(name, hints) ?? override ?? null;
   };
-  const bins = {
-    claude: cli('claude', env.RELEVO_CLAUDE), codex: cli('codex', env.RELEVO_CODEX),
-    gemini: cli('gemini', env.RELEVO_GEMINI), antigravity: cli('agy', env.RELEVO_AGY),
-  };
+  const findBins = () => ({
+    claude: cli('claude', env.RELEVO_CLAUDE, ['Claude']), codex: cli('codex', env.RELEVO_CODEX, ['Codex']),
+    gemini: cli('gemini', env.RELEVO_GEMINI), antigravity: cli('agy', env.RELEVO_AGY, ['Antigravity', 'antigravity-cli', 'Google\\Antigravity']),
+  });
+  const bins = findBins();
   const c = {
     dataDir,
     threadsDir: path.join(dataDir, 'threads'),
@@ -69,6 +72,7 @@ function config() {
     name: env.RELEVO_HOST_NAME ?? os.hostname(),
     port: Number(env.RELEVO_PORT ?? 47820),
     bins,
+    findBins,
     providers: (env.RELEVO_PROVIDERS ?? 'claude,codex,antigravity').split(',').map((p) => p.trim())
       .filter((p) => PROVIDERS[p] && (bins[p] || env.RELEVO_FAKE_AGENT === '1'))
       .map((provider) => ({ provider, bin: bins[provider] ?? provider })),

@@ -40,6 +40,18 @@ What it does today:
   size of the task and the quota left.
 - Quick actions per project (a command, its output, and sending it to the agent), and images pasted or
   dropped in the composer (or anywhere in the window), copied from the transcript, and opened full size.
+- Handoffs between agents are a brief, not the transcript: the goal, the plan, the git state, what each turn did
+  (files touched and commands run, never their contents) and the latest exchange, with code blocks left out —
+  a few thousand tokens however long the thread. The whole conversation goes to `.relevo/trazas/` in the
+  project (kept out of git) for the new agent to read only if it needs a detail.
+- Teams of agents on one project: an orchestrator that hands out tasks, answers the others' questions and
+  unblocks them; one to four executors (each in its own worktree if you want); and a researcher that looks for
+  libraries, open source projects and docs before anyone reinvents them. They talk through tags in their replies
+  (`<relevo:tarea para="Ejecutor 1">…`), so it works with any agent; you can write to any of them, pause the team,
+  and it pauses itself after 60 automatic messages without you.
+- The agents' programs are looked for in PATH, the user's and machine's PATH in the Windows registry and the
+  usual install folders, again on every check (no restart after installing one), or set by hand in Ajustes ›
+  Suscripciones › Programa.
 - The desktop app is a clone of the Mac one: the same menus, sidebar, toolbar, composer, sheets (settings,
   usage, diffs, commit, compare, traza, quick actions) and the subscriptions' limits always visible at the
   bottom of the sidebar, in light and dark.

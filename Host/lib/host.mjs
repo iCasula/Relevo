@@ -12,13 +12,14 @@ import { createCompanionServer } from './transport.mjs';
 import { killTree } from './platform.mjs';
 import { ClaudeSession, FakeSession, probe, fakeProbe } from './claude.mjs';
 import { CodexSession, codexProbe } from './codex.mjs';
-import { handoffText } from './handoff.mjs';
+import { handoffText, saveTrace } from './handoff.mjs';
 import * as gitops from './gitops.mjs';
 import { listDirectory, readThreadImage } from './files.mjs';
 import { usageReport } from './usage.mjs';
 import { LoginSession } from './login.mjs';
 import { quickCompletion, cleanTitle } from './quick.mjs';
 import { buildAccount, API_PRESETS, ACP_PRESETS, TYPES } from './accounts.mjs';
+import { Teams } from './team.mjs';
 
 const PROTOCOL_VERSION = 1;
 const MAX_STORED_ITEMS = 1500;
@@ -31,7 +32,7 @@ const SKIP_DIRS = new Set(['$RECYCLE.BIN', 'System Volume Information', 'lost+fo
 const MODES = new Set(['ask', 'autoEdit', 'full', 'plan']);
 const PLAN_MODES = new Set(['ask', 'mostQuota', 'chain', 'wait']);
 /** What this host does beyond the shared protocol; clients show those controls only when listed. */
-export const HOST_FEATURES = ['projects', 'threads', 'git', 'images', 'usage', 'login', 'settings', 'limitPlans', 'history', 'titles', 'accounts',
+export const HOST_FEATURES = ['teams', 'projects', 'threads', 'git', 'images', 'usage', 'login', 'settings', 'limitPlans', 'history', 'titles', 'accounts',
   'turns', 'worktrees', 'pullRequests', 'suggest', 'quickActions', 'attachments'];
 const IMAGE_UPLOAD = /\.(png|jpe?g|gif|webp)$/i;
 
@@ -110,8 +111,11 @@ export class Host {
       fs.mkdirSync(dir, { recursive: true });
     }
     this._loadState();
+    this.teams = new Teams(this);
     this._limitClaudeHousekeeping();
   }
+
+  _uuid() { return uuid(); }
 
   // MARK: - Persistence
 
@@ -365,6 +369,8 @@ export class Host {
       case 'newWorktreeThread': run(() => ({ threadId: this.createWorktreeThread(String(a.projectId).toUpperCase()).id })); break;
       case 'mergeWorktree': if (t) run(() => this.mergeWorktree(t, a.message, a.remove !== false)); break;
       case 'removeWorktree': if (t) run(() => this.removeWorktree(t, !!a.deleteBranch)); break;
+      case 'createTeam': run(() => this.teams.create(a.team ?? {})); break;
+      case 'teamAction': run(() => this.teams.action(a.teamId, a.action)); break;
       case 'pullRequest': if (t) run(async () => ({ pr: await gitops.pullRequest(t.projectPath) })); break;
       case 'createPullRequest': if (t) run(async () => {
         const url = await gitops.createPullRequest(t.projectPath);
@@ -451,7 +457,19 @@ export class Host {
     if ('suggest' in changes) next.suggest = !!changes.suggest;
     if ('suggestMode' in changes && ['off', 'suggest', 'auto'].includes(changes.suggestMode)) { next.suggestMode = changes.suggestMode; next.suggest = changes.suggestMode !== 'off'; }
     if ('probeMinutes' in changes && [5, 10, 15, 30, 60].includes(Number(changes.probeMinutes))) next.probeMinutes = Number(changes.probeMinutes);
+    if (changes.cliPaths && typeof changes.cliPaths === 'object') {
+      const paths = { ...(next.cliPaths ?? {}) };
+      for (const [k, v] of Object.entries(changes.cliPaths)) {
+        if (!['claude', 'codex', 'antigravity', 'gemini'].includes(k)) continue;
+        const p = String(v ?? '').trim().replace(/^"(.*)"$/, '$1');
+        if (!p) { delete paths[k]; continue; }
+        if (!fs.existsSync(p) || fs.statSync(p).isDirectory()) throw new Error(`No existe el programa ${p}`);
+        paths[k] = p;
+      }
+      next.cliPaths = paths;
+    }
     this.state.settings = next;
+    if (changes.cliPaths) { this._rescanCLIs(true); this.refreshUsage(); }
     this._projectsChanged();
     for (const t of this.threads.values()) if (this.peers.size) this._schedulePatch(t);
     return {};
@@ -472,6 +490,7 @@ export class Host {
     this.agents.delete(t.id);
     this.threads.delete(t.id);
     this.runtime.delete(t.id);
+    this.teams?.forget(t.id);
     fs.rmSync(path.join(this.config.threadsDir, `${t.id}.json`), { force: true });
     if (broadcast) { this._saveState(); this._broadcastSnapshot(); }
     return {};
@@ -888,6 +907,7 @@ export class Host {
 
   send(t, text) {
     if (!text?.trim()) return;
+    this.teams.userSpoke(t);
     if (this._rt(t).isRunning) {
       t.queued.push({ id: uuid(), text });
       this._changed(t);
@@ -910,6 +930,7 @@ export class Host {
     const r = this._rt(t);
     if (!r.isRunning) return;
     t.queuePaused = t.queued.length > 0;
+    r.stopRequested = true;
     r.statusLine = 'Deteniendo…';
     this.agents.get(t.id)?.interrupt();
     this._changed(t);
@@ -977,7 +998,7 @@ export class Host {
     return null;
   }
 
-  _startTurn(t, text, pendingRequest = false) {
+  _startTurn(t, text, pendingRequest = false, meta = {}) {
     const r = this._rt(t);
     const account = this._account(t);
     const problem = this._diskProblem(t);
@@ -996,8 +1017,13 @@ export class Host {
       this._changed(t);
       return;
     }
+    if (!this.config.fakeAgent && !account.bin && (this._rescanCLIs(true), !this._account(t)?.bin)) {
+      this._append(t, { id: uuid(), kind: 'error', text: `No puedo arrancar ${account.agentName}: ${this._missingCLI(account)}` });
+      this._changed(t);
+      return;
+    }
     if (!this._agentSlot(t)) {
-      t.queued.unshift({ id: uuid(), text });
+      t.queued.unshift({ id: uuid(), text, prompt: meta.prompt, from: meta.from, team: !!meta.from });
       r.statusLine = `Esperando: ya hay ${this.settings.maxAgents} agentes trabajando en ${this.config.name}`;
       this._changed(t);
       return;
@@ -1006,17 +1032,22 @@ export class Host {
       const first = text.trim().split('\n')[0];
       t.title = first.length > 60 ? `${first.slice(0, 57)}…` : first;
     }
-    let prompt = text;
+    let prompt = meta.prompt ?? text;
+    const teamPrefix = this.teams.promptPrefix(t, t.handoffPending);
     if (t.handoffPending) {
       const accounts = new Map(this.accounts.map((a) => [a.id, a]));
-      prompt = handoffText({ items: t.items, accounts, projectPath: t.projectPath, target: account, pendingRequest, workState: gitops.workState(t.projectPath) }) + text;
+      const workState = gitops.workState(t.projectPath);
+      const traceFile = saveTrace({ dir: this._traceDir(t), threadId: t.id, title: t.title, items: t.items, accounts, workState });
+      prompt = handoffText({ items: t.items, accounts, projectPath: t.projectPath, target: account, pendingRequest, workState, traceFile }) + text;
       t.handoffPending = false;
     }
     if (t.restoreNote) { prompt = `${t.restoreNote}\n\n${prompt}`; t.restoreNote = null; }
+    prompt = teamPrefix + prompt;
     // The project as it was before this turn, to show what the turn changed and to go back to it.
     const turnBefore = gitops.snapshot(t.projectPath);
-    const userItem = this._append(t, { id: uuid(), kind: 'user', text, turnBefore });
+    const userItem = this._append(t, { id: uuid(), kind: 'user', text, turnBefore, from: meta.from });
     r.turnUserItem = userItem.id;
+    r.stopRequested = false;
     r.suggestion = null;
     r.suggestionDismissed = false;
     this._clearLimitTimers(t);
@@ -1027,6 +1058,15 @@ export class Host {
     t.updatedAt = now();
     this._agent(t).send(prompt);
     this._changed(t);
+  }
+
+  /**
+   * Where a handoff's full conversation goes: inside the project (.relevo/trazas, kept out of git), where the
+   * next agent can read it without asking; outside a repository, the host's data folder.
+   */
+  _traceDir(t) {
+    if (gitops.exclude(t.projectPath, '/.relevo/')) return path.join(t.projectPath, '.relevo', 'trazas');
+    return path.join(this.config.dataDir, 'handoffs');
   }
 
   /** Room for one more agent process: closes the longest-idle one when needed. */
@@ -1075,6 +1115,10 @@ export class Host {
     s.on('toolStarted', (key, name, title, input) => {
       const it = item(`t:${key}`, () => ({ id: uuid(), kind: 'tool', text: title, title, toolName: name, toolState: 'running' }));
       if (input?.command && !it.output) it.output = `$ ${input.command}`;
+      // Claude's plan, as a checklist: the handoff carries the latest one.
+      if (name === 'TodoWrite' && Array.isArray(input?.todos)) {
+        it.plan = input.todos.map((x) => `${x.status === 'completed' ? '[x]' : x.status === 'in_progress' ? '[~]' : '[ ]'} ${x.content ?? x.activeForm ?? ''}`).join('\n');
+      }
       r.statusLine = title; this._touch(t, it); this._changed(t, false);
     });
     s.on('toolOutput', (key, text) => {
@@ -1094,6 +1138,7 @@ export class Host {
       });
       r.approvals.set(it.id, req.respond);
       r.statusLine = it.questions?.length ? 'Esperando tu respuesta…' : 'Esperando tu aprobación…';
+      if (this.teams.onApproval(t, it, req)) return;
       this._changed(t);
     });
     s.on('notice', (text) => { this._append(t, { id: uuid(), kind: 'notice', text }); this._changed(t); });
@@ -1150,6 +1195,15 @@ export class Host {
       r.keys.clear();
       t.updatedAt = now();
       this._changed(t);
+      if (t.team && !r.limitHit && !r.sendNow && !r.stopRequested && !r.pendingSwitch) {
+        const start = userItem ? t.items.indexOf(userItem) : -1;
+        const turn = start >= 0 ? t.items.slice(start + 1) : [];
+        this.teams.onTurnFinished(t, {
+          text: turn.filter((i) => i.kind === 'assistant' && i.text).map((i) => i.text).join('\n\n'),
+          changes: userItem?.turnChanges ?? null,
+          errors: turn.filter((i) => i.kind === 'error').map((i) => i.text),
+        });
+      }
       if (r.pendingSwitch) {
         const { accountId, model, carryOn } = r.pendingSwitch;
         r.pendingSwitch = null;
@@ -1169,7 +1223,7 @@ export class Host {
     const r = this._rt(t);
     if (r.isRunning || t.queuePaused || !t.queued.length) return;
     const q = t.queued.shift();
-    this._startTurn(t, q.text);
+    this._startTurn(t, q.text, false, { prompt: q.prompt, from: q.from });
   }
 
   _resolve(t, itemId, optionId, answers) {
@@ -1274,7 +1328,29 @@ export class Host {
   // MARK: - Limits and housekeeping
 
   refreshUsage() {
+    this._rescanCLIs();
     return Promise.all(this.accounts.map((a) => this._refreshAccount(a)));
+  }
+
+  /**
+   * The agents' programs: a path set from the apps (Ajustes › Suscripciones) wins; the others are looked for
+   * again while any is missing, so a CLI installed after the host started works without restarting it.
+   */
+  _rescanCLIs(force = false) {
+    const custom = this.state.settings.cliPaths ?? {};
+    const current = this.config.bins ?? {};
+    const missing = Object.values(current).some((b) => !b);
+    const found = (force || missing) && this.config.findBins ? this.config.findBins() : current;
+    const next = {};
+    for (const k of new Set([...Object.keys(current), ...Object.keys(found), ...Object.keys(custom)])) {
+      next[k] = custom[k] && fs.existsSync(custom[k]) ? custom[k] : (found[k] ?? current[k] ?? null);
+    }
+    if (JSON.stringify(next) === JSON.stringify(current)) return false;
+    for (const [k, v] of Object.entries(next)) if (v && v !== current[k]) this.log(`${k}: ${v}`);
+    this.config.bins = next;
+    this._buildAccounts();
+    this._broadcastSnapshot();
+    return true;
   }
 
   /** When the iPhone connects: accounts signed out (maybe since logged in over ssh) or not probed lately. */
@@ -1284,13 +1360,18 @@ export class Host {
     }
   }
 
+  _missingCLI(a) {
+    const name = { claude: 'claude', api: 'claude', codex: 'codex', antigravity: 'agy' }[a.def?.type] ?? a.def?.command ?? a.agentName;
+    return `no encuentro «${name}» en ${this.config.name}. Instálalo o indica dónde está en Ajustes › Suscripciones › ${a.name} › Programa.`;
+  }
+
   async _refreshAccount(a) {
     if (a.refreshing) return;
     a.refreshing = true;
     this._broadcastSnapshot();
     let result;
     try {
-      if (!this.config.fakeAgent && !a.bin) throw new Error(`no encuentro el programa de ${a.name} en el host`);
+      if (!this.config.fakeAgent && !a.bin) throw new Error(this._missingCLI(a));
       result = this.config.fakeAgent ? fakeProbe() : await a.probe({ bin: a.bin, env: a.env, cwd: this.config.dataDir, home: a.home });
     } catch (e) {
       result = { loggedIn: a.status?.loggedIn ?? null, windows: a.status?.windows ?? [], error: `No he podido consultar la cuenta: ${e.message}` };
@@ -1356,7 +1437,7 @@ export class Host {
         return clean({
           id: t.id, projectId: t.projectId, title: t.title, updatedAt: t.updatedAt, isRunning: r.isRunning,
           needsApproval: r.approvals.size > 0, accountId: t.accountId, preview: last?.text?.slice(0, 160) ?? null, isWaiting: false,
-          worktree: t.worktree ? t.worktree.branch : null,
+          worktree: t.worktree ? t.worktree.branch : null, team: t.team ?? null,
         });
       });
     const settings = this.settings;
@@ -1364,7 +1445,8 @@ export class Host {
       macName: this.config.name, accounts: this.accounts.map((a) => this._remoteAccount(a)), projects, threads,
       autoRelay: settings.limitPlan.mode !== 'ask', pushReady: false,
       // Beyond the shared protocol (the Mac and the iPhone ignore unknown fields).
-      hostFeatures: HOST_FEATURES, hostVersion: this.config.version ?? 'dev', hostPlatform: process.platform,
+      hostFeatures: HOST_FEATURES, hostVersion: this.config.version ?? 'dev', hostPlatform: process.platform, hostCLIs: this.config.bins ?? {},
+      hostTeams: this.teams.list.map((x) => ({ id: x.id, projectId: x.projectId, goal: x.goal, status: x.status, auto: x.auto, held: x.held.length, members: x.members.map((m) => ({ threadId: m.threadId, role: m.role, name: m.name })) })),
       hostSettings: { ...settings, limitPlanSummary: this._planSummary(settings.limitPlan), accounts: this._accountDefs() },
       hostProviders: {
         api: Object.entries(API_PRESETS).map(([id, p]) => ({ id, name: p.name, keyURL: p.keyURL ?? null })),

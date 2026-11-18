@@ -79,9 +79,10 @@ test('the handoff carries the conversation, the work state and the unfinished re
   assert.match(text, /^<relevo_handoff>/);
   assert.match(text, /como Codex/);
   assert.match(text, /<estado_de_trabajo>\n- Rama: main[\s\S]*auth\.ts \(\+3 −1\)\n<\/estado_de_trabajo>/);
+  assert.match(text, /<objetivo>\nArregla el login\n<\/objetivo>/);
   assert.match(text, /### Usuario\nArregla el login/);
-  assert.match(text, /### Asistente \(Claude\)\nMirando auth\.ts/);
-  assert.match(text, /\[herramienta Edit\] Editar auth\.ts/);
+  assert.match(text, /### Claude\nMirando auth\.ts/);
+  assert.match(text, /- Editar auth\.ts/);
   assert.match(text, /quedó sin terminar/);
 });
 

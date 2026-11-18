@@ -132,6 +132,21 @@ export function workState(cwd) {
   return lines.join('\n');
 }
 
+/** Adds `pattern` to the repository's own ignore list (.git/info/exclude), which is never committed. */
+export function exclude(cwd, pattern) {
+  if (!isRepo(cwd)) return false;
+  const rel = git(cwd, ['rev-parse', '--git-path', 'info/exclude']).out.trim();
+  if (!rel) return false;
+  const file = path.resolve(cwd, rel);
+  try {
+    const text = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+    if (text.split(/\r?\n/).includes(pattern)) return true;
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.appendFileSync(file, `${text && !text.endsWith('\n') ? '\n' : ''}${pattern}\n`);
+    return true;
+  } catch { return false; }
+}
+
 export function initRepo(cwd) {
   return git(cwd, ['init']).ok;
 }

@@ -114,14 +114,21 @@ function renderSidebar() {
       if (!open) continue;
       const threads = s.threads.filter((t) => t.projectId === p.id).sort((a, b) => b.updatedAt - a.updatedAt);
       if (!threads.length) out.push(`<button class="start-thread" data-new-in="${esc(p.id)}" data-host="${esc(hostId)}">Empieza un hilo</button>`);
-      for (const t of threads) out.push(threadRowHTML(hostId, s, t));
+      // A team's threads together, in the team's order, where its most recent one would be.
+      const shown = new Set();
+      for (const t of threads) {
+        if (shown.has(t.id)) continue;
+        const team = t.team && s.hostTeams?.find((x) => x.id === t.team.id);
+        const group = team ? team.members.map((m) => threads.find((x) => x.id === m.threadId)).filter(Boolean) : [t];
+        for (const x of group) { shown.add(x.id); out.push(threadRowHTML(hostId, s, x, team && x !== group[0])); }
+      }
     }
   }
   if (!app.hosts.size) out.push('<div class="side-section">Proyectos</div><div class="side-empty">Aún no hay proyectos</div>');
   $('#side-list').innerHTML = out.join('');
 }
 
-function threadRowHTML(hostId, s, t) {
+function threadRowHTML(hostId, s, t, nested = false) {
   const selected = app.sel?.host === hostId && app.sel.thread === t.id;
   const acct = s.accounts.find((a) => a.id === t.accountId);
   const ran = !!t.preview;
@@ -132,7 +139,8 @@ function threadRowHTML(hostId, s, t) {
     : live?.limit ? `<span class="orange">${icon('hourglass', { size: 10 })}</span>`
       : t.isWaiting ? `<span class="muted" title="Esperando a una tarea en segundo plano">${icon('clock', { size: 10 })}</span>`
         : `<span class="when">${esc(relative(t.updatedAt))}</span>`;
-  return `<button class="thread-row${selected ? ' selected' : ''}" data-thread="${esc(t.id)}" data-host="${esc(hostId)}" title="${esc(t.title)}">${dot}${extra}<span class="title">${esc(t.title)}</span>${status}</button>`;
+  const chip = t.team ? `<span class="role-chip r-${esc(t.team.role)}" title="${esc(t.team.name)} de un equipo">${esc(t.team.role === 'executor' ? t.team.name.replace('Ejecutor', 'Ej.') : ROLE[t.team.role]?.short ?? '')}</span>` : '';
+  return `<button class="thread-row${selected ? ' selected' : ''}${nested ? ' nested' : ''}" data-thread="${esc(t.id)}" data-host="${esc(hostId)}" title="${esc(t.title)}">${dot}${extra}${chip}<span class="title">${esc(t.team ? t.title.replace(/^[^·]+·\s*/, '') : t.title)}</span>${status}</button>`;
 }
 
 // MARK: - «Límites» footer (UsageFooter) — always visible
@@ -233,6 +241,7 @@ function welcomeHTML() {
 function buildThread(detail) {
   detail.innerHTML = `
     <div class="toolbar" id="t-toolbar"></div>
+    <div class="teambar" id="t-team"></div>
     <div class="transcript-wrap"><div class="transcript" id="t-scroll"><div class="rows" id="t-rows"></div></div>
       <button class="jump hidden" id="t-jump" title="Ir al último mensaje">${icon('arrow.down', { size: 15 })}</button></div>
     <div class="dock" id="t-dock">
@@ -244,7 +253,7 @@ function buildThread(detail) {
       </div>
     </div>`;
   T = {
-    toolbar: $('#t-toolbar'), scroll: $('#t-scroll'), rows: $('#t-rows'), jump: $('#t-jump'), banner: $('#t-banner'), queue: $('#t-queue'),
+    toolbar: $('#t-toolbar'), team: $('#t-team'), scroll: $('#t-scroll'), rows: $('#t-rows'), jump: $('#t-jump'), banner: $('#t-banner'), queue: $('#t-queue'),
     composer: $('#t-composer'), draft: $('#draft'), controls: $('#t-controls'), attachments: $('#t-attachments'), cache: new Map(), stick: true, sig: {},
   };
   const { hostId, threadId } = current();
@@ -303,6 +312,7 @@ function renderThread() {
   const { hostId, thread, summary } = current();
   if (!summary && !thread) { render(); return; }
   renderToolbar();
+  renderTeamBar();
   renderTranscript();
   renderBanner();
   renderQueue();
@@ -364,6 +374,57 @@ function rowsOf(items) {
   }
   flush();
   return rows;
+}
+
+// MARK: - Teams
+
+const ROLE = {
+  orchestrator: { label: 'Orquestador', short: 'Orq.', icon: 'crown.fill' },
+  executor: { label: 'Ejecutor', short: 'Ej.', icon: 'wrench.and.screwdriver' },
+  researcher: { label: 'Investigador', short: 'Inv.', icon: 'globe' },
+  relevo: { label: 'Relevo', short: 'Relevo', icon: 'info.circle' },
+  team: { label: 'Equipo', short: 'Equipo', icon: 'person.3.sequence' },
+};
+const teamOf = (hostId, teamId) => snap(hostId)?.hostTeams?.find((x) => x.id === teamId) ?? null;
+
+/** The team a thread belongs to: its members (each a click away, with what it's doing), pause and dissolve. */
+function renderTeamBar() {
+  const { hostId, summary } = current();
+  const team = summary?.team && teamOf(hostId, summary.team.id);
+  let html = '';
+  if (team) {
+    const threads = snap(hostId)?.threads ?? [];
+    const chips = team.members.map((m) => {
+      const t = threads.find((x) => x.id === m.threadId);
+      const state = t?.isRunning ? '<span class="spinner"></span>' : t?.needsApproval ? `<span class="orange">${icon('questionmark.bubble.fill', { size: 11 })}</span>` : '';
+      const tip = `${m.name}${t?.isRunning ? ' · trabajando' : t?.needsApproval ? ' · esperando respuesta' : ' · libre'}`;
+      return `<button class="team-chip r-${m.role}${m.threadId === summary.id ? ' on' : ''}" data-team-go="${esc(m.threadId)}" title="${esc(tip)}">${icon(ROLE[m.role]?.icon ?? 'person.2', { size: 11 })}<span>${esc(m.name)}</span>${state}</button>`;
+    }).join('');
+    const status = team.status === 'paused' ? `<span class="team-status orange">En pausa${team.held ? ` · ${team.held} mensaje${team.held === 1 ? '' : 's'} esperando` : ''}</span>`
+      : team.status === 'done' ? `<span class="team-status green">${icon('checkmark.circle.fill', { size: 11 })} Objetivo cumplido</span>` : '';
+    html = `<span class="team-label" title="${esc(team.goal)}">${icon('person.3.sequence', { size: 13 })}Equipo</span>${chips}<span class="grow"></span>${status}`
+      + (team.status === 'paused' ? `<button class="btn small" data-team-act="resume">${icon('play.rectangle', { size: 11 })} Reanudar</button>`
+        : team.status === 'active' ? `<button class="btn small" data-team-act="pause" title="Los mensajes entre agentes esperan; tú puedes seguir escribiendo">${icon('pause.circle', { size: 11 })} Pausar</button>` : '')
+      + `<button class="tb-btn" data-team-menu title="Más">${icon('chevron.down', { size: 10 })}</button>`;
+  }
+  if (T.sig.team !== html) { T.team.innerHTML = html; T.team.classList.toggle('hidden', !html); T.sig.team = html; }
+}
+
+function teamMenu(anchor) {
+  const { hostId, summary } = current();
+  const team = summary?.team && teamOf(hostId, summary.team.id);
+  if (!team) return;
+  showMenu(anchor, [
+    { info: team.goal.length > 80 ? `${team.goal.slice(0, 78)}…` : team.goal },
+    '-',
+    { label: 'Ir al orquestador', action: () => { const m = team.members.find((x) => x.role === 'orchestrator'); if (m) select(hostId, m.threadId); } },
+    { label: 'Disolver el equipo…', danger: true, action: async () => {
+      const ok = await alertSheet({ title: '¿Disolver el equipo?', message: 'Los hilos se conservan como hilos normales; los agentes dejan de pasarse mensajes.', buttons: [{ label: 'Disolver', role: 'destructive' }, { label: 'Cancelar', role: 'cancel' }] });
+      if (!ok) return;
+      const r = await request(hostId, { teamAction: { teamId: team.id, action: 'dissolve' } });
+      if (!r.ok) toast(r.error);
+    } },
+  ]);
 }
 
 function renderTranscript() {
@@ -482,6 +543,10 @@ function itemHTML(hostId, it, header) {
   const open = app.expandedItems.has(it.id);
   switch (it.kind) {
     case 'user':
+      if (it.from) {
+        const role = ROLE[it.from.role] ?? ROLE.team;
+        return `<div class="from-row r-${esc(it.from.role)}"><div class="from-head">${icon(role.icon, { size: 11 })}<b>${esc(it.from.name)}</b>${it.from.label ? `<span>· ${esc(it.from.label)}</span>` : ''}${it.from.threadId ? `<button class="btn link small" data-team-go="${esc(it.from.threadId)}">Ver hilo</button>` : ''}</div><div class="md">${markdown(it.text)}</div></div>`;
+      }
       return `<div class="user-row"><div class="bubble">${esc(it.text)}</div></div>${imagesHTML(hostId, it.text).replace('class="thumbs"', 'class="thumbs" style="justify-content:flex-end"')}`;
     case 'assistant': {
       const acct = accountOf(hostId, it.accountId);
@@ -788,6 +853,7 @@ function projectContextMenu(x, y, hostId, projectId) {
   if (!p) return;
   const items = [{ label: 'Nuevo hilo', action: () => newThread(hostId, projectId) }];
   if (has(hostId, 'worktrees')) items.push({ label: 'Nuevo hilo en un worktree', action: () => newThread(hostId, projectId, true) });
+  if (has(hostId, 'teams')) items.push({ label: 'Nuevo equipo de agentes…', action: () => sheets.openNewTeam(hostId, projectId) });
   items.push(...projectMenuItems(hostId, projectId));
   if (has(hostId, 'projects')) items.push('-', { label: 'Quitar de Relevo…', danger: true, action: async () => {
     const ok = await alertSheet({ title: `¿Quitar «${p.name}» de Relevo?`, message: 'La carpeta del proyecto no se toca; solo se eliminan los hilos guardados en Relevo.', buttons: [{ label: 'Quitar y borrar sus hilos', role: 'destructive' }, { label: 'Cancelar', role: 'cancel' }] });
@@ -836,6 +902,7 @@ function menubarMenu(name, anchor) {
     file: [
       { label: 'Nuevo hilo', shortcut: 'Ctrl+N', action: () => newThread() },
       { label: 'Nuevo hilo en un worktree', shortcut: 'Ctrl+Alt+N', action: () => { const t = targetProject(); if (t) newThread(t.hostId, t.projectId, true); } },
+      { label: 'Nuevo equipo de agentes…', shortcut: 'Ctrl+Alt+E', action: () => { const t = targetProject(); if (t) sheets.openNewTeam(t.hostId, t.projectId); else sheets.openNewProject(); } },
       { label: 'Añadir proyecto…', shortcut: 'Ctrl+O', action: () => sheets.openNewProject() },
     ],
     agents: [
@@ -924,6 +991,13 @@ document.addEventListener('click', (e) => {
     renderTranscript();
     return;
   }
+  if (d.teamGo) { select(hostId, d.teamGo); return; }
+  if (d.teamAct) {
+    const teamId = summaryOf(hostId, threadId)?.team?.id;
+    if (teamId) request(hostId, { teamAction: { teamId, action: d.teamAct } }).then((r) => { if (!r.ok) toast(r.error); });
+    return;
+  }
+  if (d.teamMenu !== undefined) { teamMenu(el); return; }
   if (d.approve) { sendTo(hostId, Client.approve(threadId, d.approve, d.option)); return; }
   if (d.qOpt) {
     const it = thread?.items.find((i) => i.id === d.qOpt);
@@ -1007,6 +1081,7 @@ document.addEventListener('keydown', (e) => {
   const k = e.key.toLowerCase();
   const { hostId, threadId, thread, summary } = current();
   const run = (fn) => { e.preventDefault(); closeMenus(); fn(); };
+  if (k === 'e' && e.altKey) return run(() => { const t = targetProject(); if (t) sheets.openNewTeam(t.hostId, t.projectId); });
   if (k === 'n' && e.altKey) return run(() => { const t = targetProject(); if (t) newThread(t.hostId, t.projectId, true); });
   if (k === 'n') return run(() => newThread());
   if (k === 'o') return run(() => sheets.openNewProject());

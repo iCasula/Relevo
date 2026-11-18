@@ -309,7 +309,7 @@ export class ClaudeSession extends EventEmitter {
     if (suggestions.length) options.push({ id: 'session', label: 'Permitir en esta sesión', isAllow: true });
     options.push({ id: 'deny', label: 'Denegar', isAllow: false });
     this.emit('approval', {
-      key, title: `${req.display_name ?? req.tool_name}: ${toolTitle(req.tool_name, input)}`, detail, options, questions: null,
+      key, title: `${req.display_name ?? req.tool_name}: ${toolTitle(req.tool_name, input)}`, detail, options, questions: null, toolName: req.tool_name,
       respond: (choice) => {
         if (choice === 'allow') this._respond(rid, { behavior: 'allow', updatedInput: input });
         else if (choice === 'session') this._respond(rid, { behavior: 'allow', updatedInput: input, updatedPermissions: suggestions.map((s) => ({ ...s, destination: 'session' })) });
@@ -407,6 +407,8 @@ export class FakeSession extends EventEmitter {
   constructor(opts) { super(); Object.assign(this, opts); this.turnActive = false; this.lastActive = Date.now(); this.n = 0; }
   get alive() { return true; }
   send(text) {
+    // Team instructions and the «[Orquestador · tarea]» header aren't echoed: the test drives what follows.
+    text = text.replace(/^<relevo_equipo>[\s\S]*?<\/relevo_equipo>\s*/, '').replace(/^\[[^\]\n]+\]\n/, '');
     this.turnActive = true;
     const turn = ++this.n;
     this.emit('status', 'Agente de prueba trabajando…');

@@ -4,7 +4,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
-import { spawn } from 'node:child_process';
+import os from 'node:os';
+import { spawn, spawnSync } from 'node:child_process';
 
 export const isWindows = process.platform === 'win32';
 
@@ -39,6 +40,80 @@ export function which(name) {
     if (p) return p;
   }
   return null;
+}
+
+/** %VAR% expanded with this process's environment (Windows registry paths keep them unexpanded). */
+function expandVars(s) {
+  return s.replace(/%([^%]+)%/g, (m, k) => {
+    const key = Object.keys(process.env).find((x) => x.toLowerCase() === k.toLowerCase());
+    return key ? process.env[key] : m;
+  });
+}
+
+/**
+ * The user's and the machine's PATH as Windows keeps them in the registry. The host runs as a scheduled
+ * task that may start before (or without) the user's environment, so a CLI installed later, or into a
+ * folder only the user's PATH lists, isn't in process.env.PATH.
+ */
+function registryPath() {
+  if (!isWindows) return [];
+  const keys = ['HKCU\\Environment', 'HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment'];
+  const dirs = [];
+  for (const key of keys) {
+    const r = spawnSync('reg', ['query', key, '/v', 'Path'], { encoding: 'utf8', windowsHide: true, timeout: 5000 });
+    const m = /\bPath\s+REG_(?:EXPAND_)?SZ\s+(.*)$/im.exec(r.stdout ?? '');
+    if (m) dirs.push(...m[1].trim().split(';').filter(Boolean).map(expandVars));
+  }
+  return dirs;
+}
+
+/** Folders installers commonly use, for when the CLI isn't on any PATH. `hints` are product folder names. */
+function commonDirs(hints) {
+  const home = os.homedir();
+  if (!isWindows) {
+    return [path.join(home, '.local', 'bin'), '/opt/homebrew/bin', '/usr/local/bin', path.join(home, 'bin'),
+      path.join(home, '.npm-global', 'bin'), ...hints.map((h) => path.join(home, `.${h.toLowerCase()}`, 'bin'))];
+  }
+  const local = process.env.LOCALAPPDATA ?? path.join(home, 'AppData', 'Local');
+  const roaming = process.env.APPDATA ?? path.join(home, 'AppData', 'Roaming');
+  const programs = [process.env.ProgramFiles, process.env['ProgramFiles(x86)']].filter(Boolean);
+  const dirs = [path.join(home, '.local', 'bin'), path.join(roaming, 'npm'), path.join(home, 'scoop', 'shims'),
+    path.join(local, 'Microsoft', 'WinGet', 'Links'), path.join(home, 'bin')];
+  for (const h of hints) {
+    for (const base of [path.join(local, 'Programs'), local, ...programs, home]) {
+      for (const name of [h, `.${h.toLowerCase()}`]) dirs.push(path.join(base, name), path.join(base, name, 'bin'));
+    }
+  }
+  return dirs;
+}
+
+/** One level of subfolders of %LOCALAPPDATA%\\Programs (and their bin), the per-user installers' home on Windows. */
+function programsScan(name) {
+  if (!isWindows) return null;
+  const root = path.join(process.env.LOCALAPPDATA ?? path.join(os.homedir(), 'AppData', 'Local'), 'Programs');
+  let entries = [];
+  try { entries = fs.readdirSync(root, { withFileTypes: true }).filter((e) => e.isDirectory()); } catch { return null; }
+  for (const e of entries) {
+    for (const dir of [path.join(root, e.name), path.join(root, e.name, 'bin')]) {
+      const p = findIn(dir, name);
+      if (p) return p;
+    }
+  }
+  return null;
+}
+
+/**
+ * A CLI by name, looked for harder than `which`: ~/.local/bin, this process's PATH, then (Windows) the
+ * registry's PATH and the usual install folders. `hints` are folder names its installer may use.
+ */
+export function findCLI(name, hints = []) {
+  const first = findIn(path.join(os.homedir(), '.local', 'bin'), name) ?? which(name);
+  if (first) return first;
+  for (const dir of [...registryPath(), ...commonDirs([name, ...hints])]) {
+    const p = dir && findIn(dir, name);
+    if (p) return p;
+  }
+  return programsScan(name);
 }
 
 /** The script an npm `.cmd` shim runs (`"%dp0%\node_modules\@openai\codex\bin\codex.js" %*`), or null. */
