@@ -27,10 +27,10 @@ function next(predicate, timeout = 15_000) {
   const i = inbox.findIndex(predicate);
   if (i >= 0) return Promise.resolve(inbox.splice(i, 1)[0]);
   return new Promise((resolve, reject) => {
-    const w = { predicate, resolve };
+    const w = { predicate, resolve: (msg) => { clearTimeout(w.timer); resolve(msg); } };
     waiters.push(w);
-    setTimeout(() => {
-      waiters.splice(waiters.indexOf(w), 1);
+    w.timer = setTimeout(() => {
+      if (waiters.includes(w)) waiters.splice(waiters.indexOf(w), 1);
       const recent = inbox.filter((m) => m.threadPatch).slice(-3).map((m) => JSON.stringify(m.threadPatch._0.upserts.map((i) => [i.kind, i.text?.slice(0, 60)])) + JSON.stringify(m.threadPatch._0.runtime).slice(0, 200)).join('\n');
       reject(new Error(`timed out waiting for a message; latest:\n${recent}`));
     }, timeout);

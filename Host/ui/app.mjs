@@ -426,8 +426,15 @@ function renderTeamBar() {
     const threads = snap(hostId)?.threads ?? [];
     const chips = team.members.map((m) => {
       const t = threads.find((x) => x.id === m.threadId);
-      const state = t?.isRunning ? '<span class="spinner"></span>' : t?.needsApproval ? `<span class="orange">${icon('questionmark.bubble.fill', { size: 11 })}</span>` : '';
-      const tip = `${m.name}${t?.isRunning ? ' · trabajando' : t?.needsApproval ? ' · esperando respuesta' : ' · libre'}`;
+      const state = t?.needsApproval ? `<span class="orange">${icon('questionmark.bubble.fill', { size: 11 })}</span>`
+        : t?.isRunning ? '<span class="spinner"></span>' : t?.isWaiting ? `<span class="muted">${icon('clock', { size: 11 })}</span>` : '';
+      const ctx = t?.context?.used ? `contexto ${shortTokens(t.context.used)}${t.context.window ? ` de ${shortTokens(t.context.window)}` : ''}` : '';
+      const tip = [
+        `${m.name} · ${t?.needsApproval ? 'esperando respuesta' : t?.isRunning ? 'trabajando' : t?.isWaiting ? 'esperando un trabajo en segundo plano' : 'libre'}`,
+        m.task?.text ? `Tarea: ${m.task.text} (${m.task.state})` : '',
+        [ctx, t?.sessionTokens ? `sesión ${shortTokens(t.sessionTokens)} tokens` : ''].filter(Boolean).join(' · '),
+        m.stash ? `${m.stash} nota${m.stash === 1 ? '' : 's'} del orquestador para su próxima tarea` : '',
+      ].filter(Boolean).join('\n');
       return `<button class="team-chip r-${m.role}${m.threadId === summary.id ? ' on' : ''}" data-team-go="${esc(m.threadId)}" title="${esc(tip)}">${icon(ROLE[m.role]?.icon ?? 'person.2', { size: 11 })}<span>${esc(m.name)}</span>${state}</button>`;
     }).join('');
     const status = team.status === 'paused' ? `<span class="team-status orange">En pausa${team.held ? ` · ${team.held} mensaje${team.held === 1 ? '' : 's'} esperando` : ''}</span>`

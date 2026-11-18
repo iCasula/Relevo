@@ -26,9 +26,9 @@ function next(predicate, timeout = 15_000) {
   const i = inbox.findIndex(predicate);
   if (i >= 0) return Promise.resolve(inbox.splice(i, 1)[0]);
   return new Promise((resolve, reject) => {
-    const w = { predicate, resolve };
+    const w = { predicate, resolve: (msg) => { clearTimeout(w.timer); resolve(msg); } };
     waiters.push(w);
-    setTimeout(() => { waiters.splice(waiters.indexOf(w), 1); reject(new Error(`timed out; host log:\n${log.slice(-1500)}`)); }, timeout);
+    w.timer = setTimeout(() => { if (waiters.includes(w)) waiters.splice(waiters.indexOf(w), 1); reject(new Error(`timed out; host log:\n${log.slice(-1500)}`)); }, timeout);
   });
 }
 

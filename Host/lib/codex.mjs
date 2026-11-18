@@ -314,10 +314,10 @@ export class CodexSession extends EventEmitter {
     const respond = (choice) => this.rpc?.respond(id, { decision: choice });
     if (method === 'item/commandExecution/requestApproval') {
       const detail = [p.reason, p.cwd && `En ${p.cwd}`].filter(Boolean).join('\n');
-      this.emit('approval', { key: p.approvalId ?? p.itemId ?? String(id), title: `Ejecutar: ${shellCommand(p.command) ?? 'comando'}`, detail, options, questions: null, respond });
+      this.emit('approval', { key: p.approvalId ?? p.itemId ?? String(id), title: `Ejecutar: ${shellCommand(p.command) ?? 'comando'}`, detail, options, questions: null, respond, toolName: 'commandExecution' });
     } else if (method === 'item/fileChange/requestApproval') {
       const detail = [p.reason, p.grantRoot && `Permitir escritura en ${p.grantRoot}`].filter(Boolean).join('\n');
-      this.emit('approval', { key: p.itemId ?? String(id), title: 'Aplicar cambios en ficheros', detail, options, questions: null, respond });
+      this.emit('approval', { key: p.itemId ?? String(id), title: 'Aplicar cambios en ficheros', detail, options, questions: null, respond, toolName: 'fileChange' });
     } else if (method === 'execCommandApproval' || method === 'applyPatchApproval') {
       this.rpc?.respond(id, { decision: 'denied' });
     } else {

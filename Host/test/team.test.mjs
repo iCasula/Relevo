@@ -21,16 +21,17 @@ const env = {
   RELEVO_FAKE_AGENT: '1', RELEVO_SUPERVISE: '0', RELEVO_ENV_FILE: path.join(dir, 'none.env'),
 };
 let service, peer, snapshot, team, lead;
+const demo = () => snapshot.projects.find((p) => p.name === 'demo').id;
 const inbox = [], waiters = [];
 
 function next(predicate, timeout = 15_000) {
   const i = inbox.findIndex(predicate);
   if (i >= 0) return Promise.resolve(inbox.splice(i, 1)[0]);
   return new Promise((resolve, reject) => {
-    const w = { predicate, resolve };
+    const w = { predicate, resolve: (msg) => { clearTimeout(w.timer); resolve(msg); } };
     waiters.push(w);
-    setTimeout(() => {
-      waiters.splice(waiters.indexOf(w), 1);
+    w.timer = setTimeout(() => {
+      if (waiters.includes(w)) waiters.splice(waiters.indexOf(w), 1);
       const recent = inbox.filter((m) => m.threadPatch).slice(-4).map((m) => JSON.stringify(m.threadPatch._0.upserts.map((x) => [x.kind, x.from?.name, x.text?.slice(0, 80)]))).join('\n');
       reject(new Error(`timed out waiting for a message; latest:\n${recent}`));
     }, timeout);
@@ -46,10 +47,17 @@ function request(name, body) {
 const fromMember = (name, label) => (m) => m.threadPatch?._0.id === lead
   && m.threadPatch._0.upserts.some((x) => x.kind === 'user' && (x.from?.name === name && x.from?.label === label || x.text?.includes(`[${name} · ${label}]`)));
 const itemOf = (msg, name) => msg.threadPatch._0.upserts.find((x) => x.kind === 'user' && (x.from?.name === name || x.text?.includes(`[${name} ·`)));
+/** The orchestrator's first turn is over: as a patch, or in the full thread if it ended before subscribing. */
+const firstDone = (id) => (m) => (m.thread?._0.id === id && !m.thread._0.runtime.isRunning && m.thread._0.items.some((i) => i.kind === 'assistant'))
+  || (m.threadPatch?._0.id === id && !m.threadPatch._0.runtime.isRunning && m.threadPatch._0.upserts.some((i) => i.kind === 'assistant' && i.usage));
 const idle = (m) => m.threadPatch?._0.id === lead && !m.threadPatch._0.runtime.isRunning && !m.threadPatch._0.runtime.queued?.length;
 
 before(async () => {
   fs.mkdirSync(path.join(dir, 'projects', 'demo'), { recursive: true });
+  const repo = path.join(dir, 'projects', 'repo');
+  fs.mkdirSync(repo, { recursive: true });
+  fs.writeFileSync(path.join(repo, 'README.md'), 'repo\n');
+  for (const args of [['init', '-q'], ['add', '-A'], ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'init']]) execFileSync('git', args, { cwd: repo });
   service = spawn(process.execPath, [SCRIPT, 'serve'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '';
   await new Promise((resolve, reject) => {
@@ -87,7 +95,7 @@ test('orders are read outside code blocks and members found by name', () => {
 test('a team starts with the orchestrator working on the goal', async () => {
   const claude = snapshot.accounts.find((a) => a.kind === 'claude'), codex = snapshot.accounts.find((a) => a.kind === 'codex');
   const r = await request('createTeam', { team: {
-    projectId: snapshot.projects[0].id, goal: 'Añadir login con OAuth',
+    projectId: demo(), goal: 'Añadir login con OAuth',
     orchestrator: { accountId: claude.id }, executors: [{ accountId: codex.id }], researcher: { accountId: claude.id, model: 'haiku' },
   } });
   assert.ok(r.ok, r.error);
@@ -132,7 +140,7 @@ test('pausing holds the messages between agents until the team is resumed', asyn
 });
 
 test('a coordinator joins a thread that already did work: the thread becomes the executor', async () => {
-  peer.send(Client.newThread(snapshot.projects[0].id, 'J1'));
+  peer.send(Client.newThread(demo(), 'J1'));
   const old = (await next((m) => m.created?.requestId === 'J1')).created.threadId;
   peer.send(Client.subscribe(old));
   peer.send(Client.send(old, 'traduce los textos del menú principal'));
@@ -159,7 +167,7 @@ test('a coordinator joins a thread that already did work: the thread becomes the
 test('worktrees in a folder without git: the executors share it instead of the team failing', async () => {
   const claude = snapshot.accounts.find((a) => a.kind === 'claude');
   const r = await request('createTeam', { team: {
-    projectId: snapshot.projects[0].id, goal: 'Dos ejecutores sin git', worktrees: true,
+    projectId: demo(), goal: 'Dos ejecutores sin git', worktrees: true,
     orchestrator: { accountId: claude.id }, executors: [{ accountId: claude.id }, { accountId: claude.id }], researcher: null,
   } });
   assert.ok(r.ok, r.error);
@@ -195,11 +203,11 @@ test('editing a team keeps its threads and tells the orchestrator what changed',
 
 test("orders for a busy executor go back to the orchestrator instead of piling up", async () => {
   const claude = snapshot.accounts.find((a) => a.kind === 'claude');
-  const r = await request('createTeam', { team: { projectId: snapshot.projects[0].id, goal: 'Cola', orchestrator: { accountId: claude.id }, executors: [{ accountId: claude.id }], researcher: null } });
+  const r = await request('createTeam', { team: { projectId: demo(), goal: 'Cola', orchestrator: { accountId: claude.id }, executors: [{ accountId: claude.id }], researcher: null } });
   assert.ok(r.ok, r.error);
   const boss = r.threadId;
   peer.send(Client.subscribe(boss));
-  await next((m) => m.threadPatch?._0.id === boss && !m.threadPatch._0.runtime.isRunning && m.threadPatch._0.upserts.some((i) => i.kind === 'assistant' && i.usage));
+  await next(firstDone(boss));
   // The executor gets busy (a question waiting for its answer)…
   peer.send(Client.send(boss, '<relevo:tarea para="Ejecutor">pregunta algo</relevo:tarea>'));
   await next((m) => m.threadPatch?._0.id === boss && m.threadPatch._0.upserts.some((i) => i.from?.label === 'pregunta'));
@@ -218,4 +226,51 @@ test("orders for a busy executor go back to the orchestrator instead of piling u
   peer.send(Client.subscribe(boss));
   const report = await next((m) => m.threadPatch?._0.id === boss && m.threadPatch._0.upserts.some((i) => i.from?.label === 'informe'));
   assert.match(report.threadPatch._0.upserts.find((i) => i.from?.label === 'informe').text, /No entregado a Ejecutor[\s\S]*haz A/);
+});
+
+test('orders: para= among other attributes, and integrar de=', () => {
+  assert.deepEqual(parseOrders('<relevo:respuesta para="Ejecutor 1" force="true">x</relevo:respuesta>'), [{ type: 'respuesta', to: 'Ejecutor 1', body: 'x' }]);
+  assert.deepEqual(parseOrders('<relevo:integrar de="Ejecutor 2"/>'), [{ type: 'integrar', to: 'Ejecutor 2', body: '' }]);
+});
+
+test("an answer to someone who didn't ask isn't delivered: it goes with its next task", async () => {
+  const claude = snapshot.accounts.find((a) => a.kind === 'claude');
+  const r = await request('createTeam', { team: { projectId: demo(), goal: 'Acuses', orchestrator: { accountId: claude.id }, executors: [{ accountId: claude.id }], researcher: null } });
+  const boss = r.threadId;
+  peer.send(Client.subscribe(boss));
+  await next(firstDone(boss));
+  peer.send(Client.send(boss, '<relevo:respuesta para="Ejecutor">Recibido, sigue así</relevo:respuesta>'));
+  const saved = await next((m) => m.threadPatch?._0.id === boss && m.threadPatch._0.upserts.some((i) => i.kind === 'notice' && /Respuesta guardada para la próxima tarea de Ejecutor/.test(i.text)));
+  void saved;
+  peer.send(Client.send(boss, '<relevo:tarea para="Ejecutor">haz C</relevo:tarea>'));
+  const fromEx = (i) => i.kind === 'user' && (i.from?.name === 'Ejecutor' || i.text?.includes('[Ejecutor · informe]'));
+  const report = await next((m) => m.threadPatch?._0.id === boss && m.threadPatch._0.upserts.some(fromEx));
+  assert.match(report.threadPatch._0.upserts.find(fromEx).text, /Notas anteriores del Orquestador: Recibido, sigue así[\s\S]*haz C/);
+});
+
+test("waiting for a background job doesn't wake the orchestrator; the result does", async () => {
+  const claude = snapshot.accounts.find((a) => a.kind === 'claude');
+  const r = await request('createTeam', { team: { projectId: demo(), goal: 'Fondo', orchestrator: { accountId: claude.id }, executors: [{ accountId: claude.id }], researcher: null } });
+  const boss = r.threadId;
+  peer.send(Client.subscribe(boss));
+  await next(firstDone(boss));
+  peer.send(Client.send(boss, '<relevo:tarea para="Ejecutor">segundo plano</relevo:tarea>'));
+  const fromEx = (i) => i.kind === 'user' && (i.from?.name === 'Ejecutor' || i.text?.includes('[Ejecutor ·'));
+  const report = await next((m) => m.threadPatch?._0.id === boss && m.threadPatch._0.upserts.some(fromEx), 20_000);
+  const item = report.threadPatch._0.upserts.find(fromEx);
+  assert.match(item.text, /Compilación terminada/, 'the first message it gets is the final report');
+  assert.doesNotMatch(item.text, /sigue en segundo plano/, 'not the wait');
+});
+
+test('integrar merges an executor worktree without the orchestrator touching git', async () => {
+  const claude = snapshot.accounts.find((a) => a.kind === 'claude');
+  const repo = snapshot.projects.find((p) => p.name === 'repo').id;
+  const r = await request('createTeam', { team: { projectId: repo, goal: 'Integrar', worktrees: true, orchestrator: { accountId: claude.id }, executors: [{ accountId: claude.id }, { accountId: claude.id }], researcher: null } });
+  assert.ok(r.ok, r.error);
+  const boss = r.threadId;
+  peer.send(Client.subscribe(boss));
+  await next(firstDone(boss));
+  peer.send(Client.send(boss, '<relevo:integrar de="Ejecutor 2"/>'));
+  const done = await next((m) => m.threadPatch?._0.id === boss && m.threadPatch._0.upserts.some((i) => i.from?.label === 'integración'), 20_000);
+  assert.match(done.threadPatch._0.upserts.find((i) => i.from?.label === 'integración').text, /Integrado: la rama relevo\/\w+ de Ejecutor 2/);
 });

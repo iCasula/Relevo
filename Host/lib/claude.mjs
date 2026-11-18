@@ -200,7 +200,18 @@ export class ClaudeSession extends EventEmitter {
         if (o.subtype === 'init' && o.session_id) {
           this.resumeId = o.session_id;
           this.emit('session', o.session_id);
-          if (!this.turnActive) { this.turnActive = true; this.emit('turnStarted'); }
+          // An init we didn't ask for: the CLI woke up by itself (a background task finished).
+          if (!this.turnActive) { this.turnActive = true; this.emit('turnStarted', this.finishedTask ? `Terminó en segundo plano: ${this.finishedTask}. El agente retoma.` : null); }
+          this.finishedTask = null;
+        } else if (o.subtype === 'background_tasks_changed') {
+          // Builds, emulators and monitors the agent left running: while any is alive it isn't really idle.
+          const before = new Map((this.background ?? []).map((b) => [b.id, b]));
+          this.background = (o.tasks ?? []).filter((x) => x.task_id).map((x) => ({
+            id: x.task_id, description: x.description ?? x.task_type ?? 'tarea', startedAt: before.get(x.task_id)?.startedAt ?? Date.now() / 1000,
+          }));
+          this.emit('backgroundTasks', this.background);
+        } else if (o.subtype === 'task_notification') {
+          this.finishedTask = (this.background ?? []).find((b) => b.id === o.task_id)?.description ?? o.description ?? 'una tarea';
         } else if (o.subtype === 'api_retry') this.emit('status', 'Reintentando la llamada a la API…');
         else if (o.subtype === 'compact_boundary') this.emit('notice', 'Claude ha compactado el contexto');
         break;
@@ -404,9 +415,10 @@ export async function probe({ bin, env, cwd }) {
 
 /** Stand-in for tests (RELEVO_FAKE_AGENT=1): streams an echo and asks for a permission when told to. */
 export class FakeSession extends EventEmitter {
-  constructor(opts) { super(); Object.assign(this, opts); this.turnActive = false; this.lastActive = Date.now(); this.n = 0; }
-  get alive() { return true; }
+  constructor(opts) { super(); Object.assign(this, opts); this.turnActive = false; this.lastActive = Date.now(); this.n = 0; this.closed = false; }
+  get alive() { return !this.closed; }
   send(text) {
+    this.closed = false; // like the real ones: a closed session starts again with the next message
     // Team instructions and the «[Orquestador · tarea]» header aren't echoed: the test drives what follows.
     text = text.replace(/^<relevo_equipo>[\s\S]*?<\/relevo_equipo>\s*/, '').replace(/^\[[^\]\n]+\]\n/, '');
     this.turnActive = true;
@@ -438,6 +450,25 @@ export class FakeSession extends EventEmitter {
       }, 100);
       return;
     }
+    // «segundo plano»: leaves a job running and ends the turn; when it ends, wakes up and reports.
+    if (/^segundo plano/i.test(text)) {
+      setTimeout(() => {
+        this.emit('backgroundTasks', [{ id: `job${turn}`, description: 'compilación de prueba', startedAt: Date.now() / 1000 }]);
+        this.emit('textDelta', `t${turn}`, 'ESTADO: esperando\nLa compilación sigue en segundo plano.');
+        this.turnActive = false;
+        this.emit('turnFinished');
+        setTimeout(() => {
+          this.emit('backgroundTasks', []);
+          this.turnActive = true;
+          this.emit('turnStarted', 'Terminó en segundo plano: compilación de prueba. El agente retoma.');
+          this.emit('textDelta', `r${turn}`, 'ESTADO: hecho\nCompilación terminada sin errores.');
+          this.emit('tokens', { tokens: 100, cacheShare: 0.5, cost: 0 });
+          this.turnActive = false;
+          this.emit('turnFinished');
+        }, 1500);
+      }, 100);
+      return;
+    }
     if (/^pregunta/i.test(text)) {
       this.emit('approval', {
         key: `q${turn}`, title: 'El agente pregunta', detail: null,
@@ -460,7 +491,7 @@ export class FakeSession extends EventEmitter {
   setModel(m) { this.model = m; }
   setEffort(e) { this.effort = e; }
   refreshUsage() {}
-  close() {}
+  close() { this.closed = true; }
 }
 
 export function fakeProbe() {

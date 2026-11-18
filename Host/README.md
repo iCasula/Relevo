@@ -52,6 +52,12 @@ What it does today:
   work («Añadir coordinador a este hilo»): the thread becomes the executor, with its agent and session, and the
   orchestrator starts from a brief of it. Each agent can get its own instructions, and a team can be edited
   afterwards (goal, models, instructions, members added or removed) without losing threads or sessions.
+- Teams spend less: an answer to someone who didn't ask is kept for its next task instead of opening a turn;
+  an agent waiting for a background job (Claude's builds, emulators, monitors) isn't reported as done, isn't
+  closed for being idle and counts as busy; reports carry only what's new; executors start reports with
+  `ESTADO:`; the orchestrator sees a task board, can `integrar` an executor's worktree without touching git,
+  and gets a fresh session (with a brief of its own thread) when it grows too long. A Codex researcher runs
+  read-only, without asking for each read.
 - DeepSeek Harness (`dsh --profile acp`) as an ACP agent, with whatever sign-in dsh was set up with.
 - The agents' programs are looked for in PATH, the user's and machine's PATH in the Windows registry and the
   usual install folders, again on every check (no restart after installing one), or set by hand in Ajustes ›

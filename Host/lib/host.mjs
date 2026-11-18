@@ -292,13 +292,14 @@ export class Host {
       if (t.queued.length && !t.queuePaused) this._next(t);
     }
     this.interrupted.clear();
+    this.teams.afterRestart();
   }
 
   // MARK: - Updates without cutting the agents
 
   /** Agents working or waiting for an answer right now. */
   busyAgents() {
-    return [...this.threads.values()].filter((t) => { const r = this._rt(t); return r.isRunning || r.approvals.size > 0; }).length;
+    return [...this.threads.values()].filter((t) => { const r = this._rt(t); return r.isRunning || r.approvals.size > 0 || r.backgroundTasks?.length > 0; }).length;
   }
 
   /**
@@ -1089,6 +1090,8 @@ export class Host {
     t.sessionId = null;
     t.handoffPending = t.items.some((i) => i.kind === 'user');
     r.limit = null;
+    r.sessionTokens = 0;
+    r.context = null;
     this._append(t, {
       id: uuid(), kind: 'notice', accountId: target.id,
       text: `Relevo: ${from.name} · ${this._modelName(from, fromModel)} → ${target.name} · ${this._modelName(target, t.model)}${t.handoffPending ? ' · contexto y traza traspasados' : ''}`,
@@ -1153,7 +1156,8 @@ export class Host {
       const accounts = new Map(this.accounts.map((a) => [a.id, a]));
       const workState = gitops.workState(t.projectPath);
       const traceFile = saveTrace({ dir: this._traceDir(t), threadId: t.id, title: t.title, items: t.items, accounts, workState });
-      prompt = handoffText({ items: t.items, accounts, projectPath: t.projectPath, target: account, pendingRequest, workState, traceFile }) + text;
+      prompt = handoffText({ items: t.items, accounts, projectPath: t.projectPath, target: account, pendingRequest, workState, traceFile, fresh: !!t.freshSession }) + text;
+      t.freshSession = false;
       t.handoffPending = false;
     }
     if (t.restoreNote) { prompt = `${t.restoreNote}\n\n${prompt}`; t.restoreNote = null; }
@@ -1189,7 +1193,7 @@ export class Host {
     if (this.agents.get(t.id)?.alive) return true;
     const alive = [...this.agents.entries()].filter(([, s]) => s.alive);
     if (alive.length < this.settings.maxAgents) return true;
-    const idle = alive.filter(([id, s]) => !s.turnActive && !this._rt(this.threads.get(id)).approvals.size)
+    const idle = alive.filter(([id, s]) => !s.turnActive && !this._rt(this.threads.get(id)).approvals.size && !this._rt(this.threads.get(id)).backgroundTasks?.length)
       .sort(([, a], [, b]) => a.lastActive - b.lastActive);
     if (!idle.length) return false;
     idle[0][1].close(true);
@@ -1199,8 +1203,10 @@ export class Host {
   _agent(t) {
     let s = this.agents.get(t.id);
     if (s) return s;
+    const r0 = this._rt(t);
     const account = this._account(t);
     const Session = this.config.fakeAgent ? FakeSession : account.Session;
+    r0.backgroundTasks = []; // a new process: nothing of the old one is still running
     s = new Session({
       bin: account.bin, args: account.args, cwd: t.projectPath, env: account.env, model: t.model, effort: t.effort, mode: t.mode,
       resumeId: t.sessionId, agentName: account.agentName, loginHint: account.loginHint,
@@ -1229,6 +1235,8 @@ export class Host {
     });
     s.on('toolStarted', (key, name, title, input) => {
       const it = item(`t:${key}`, () => ({ id: uuid(), kind: 'tool', text: title, title, toolName: name, toolState: 'running' }));
+      // Some agents (Antigravity) announce a tool before its parameters: the real title comes later.
+      if (title && title !== name && it.title !== title) { it.title = title; it.text = title; }
       if (input?.command && !it.output) it.output = `$ ${input.command}`;
       // Claude's plan, as a checklist: the handoff carries the latest one.
       if (name === 'TodoWrite' && Array.isArray(input?.todos)) {
@@ -1257,6 +1265,8 @@ export class Host {
       this._changed(t);
     });
     s.on('notice', (text) => { this._append(t, { id: uuid(), kind: 'notice', text }); this._changed(t); });
+    s.on('backgroundTasks', (list) => { r.backgroundTasks = list; this._changed(t); this._checkRestart(); });
+    s.on('context', (used, window) => { r.context = { used, window: window ?? null }; });
     s.on('failure', (f) => {
       this._append(t, { id: uuid(), kind: 'error', text: f.message, accountId: account.id });
       if (f.kind === 'auth') {
@@ -1281,13 +1291,21 @@ export class Host {
       this._broadcastSnapshot();
     });
     s.on('tokens', (u) => {
+      // Antigravity says the conversation's total; the others are added up turn by turn.
+      r.sessionTokens = u.conversationTotal ?? ((r.sessionTokens ?? 0) + (u.tokens ?? 0));
       const lastAssistant = [...(r.turnItems ?? [])].reverse().map((id) => this._item(t, id)).find((x) => x?.kind === 'assistant');
       const target = lastAssistant ?? t.items[t.items.length - 1];
       if (!target) return;
       target.usage = clean({ tokens: u.tokens, cacheShare: u.cacheShare, cost: u.cost, costEstimated: true, paid: false });
       this._touch(t, target);
     });
-    s.on('turnStarted', () => { r.isRunning = true; r.turnItems = []; r.statusLine = `${account.name} retoma por su cuenta…`; this._changed(t); });
+    s.on('turnStarted', (reason) => {
+      r.isRunning = true;
+      r.turnItems = [];
+      r.statusLine = `${account.name} retoma por su cuenta…`;
+      if (reason) this._append(t, { id: uuid(), kind: 'notice', text: reason });
+      this._changed(t);
+    });
     s.on('turnFinished', () => {
       // A turn that ran means the account is signed in, whatever the last probe said.
       if (account.status?.loggedIn === false && !r.limit) this._refreshAccount(account);
@@ -1312,12 +1330,15 @@ export class Host {
       t.updatedAt = now();
       this._changed(t);
       if (t.team && !r.limitHit && !r.sendNow && !r.stopRequested && !r.pendingSwitch) {
-        const start = userItem ? t.items.indexOf(userItem) : -1;
-        const turn = start >= 0 ? t.items.slice(start + 1) : [];
+        // Only what's new since the last report (a turn the agent resumed by itself continues the same request).
+        const start = Math.max(userItem ? t.items.indexOf(userItem) + 1 : 0, r.reportedUpTo?.get(userItem?.id) ?? 0);
+        const turn = t.items.slice(start);
+        r.reportedUpTo = new Map([[userItem?.id, t.items.length]]);
         this.teams.onTurnFinished(t, {
           text: turn.filter((i) => i.kind === 'assistant' && i.text).map((i) => i.text).join('\n\n'),
           changes: userItem?.turnChanges ?? null,
           errors: turn.filter((i) => i.kind === 'error').map((i) => i.text),
+          background: r.backgroundTasks ?? [],
         });
       }
       if (r.pendingSwitch) {
@@ -1508,7 +1529,8 @@ export class Host {
     for (const [id, s] of this.agents) {
       const t = this.threads.get(id);
       if (!t) continue;
-      if (s.alive && !s.turnActive && !this._rt(t).approvals.size && Date.now() - s.lastActive > IDLE_CLOSE_MS) s.close(true);
+      // Never one with something running in the background (closing it would kill its build or emulator).
+      if (s.alive && !s.turnActive && !this._rt(t).approvals.size && !this._rt(t).backgroundTasks?.length && Date.now() - s.lastActive > IDLE_CLOSE_MS) s.close(true);
     }
     // Agents' temporary files live on the data disk; remove what's older than a day.
     const dayAgo = Date.now() - 24 * 3600_000;
@@ -1553,7 +1575,8 @@ export class Host {
         for (let i = t.items.length - 1; i >= 0 && !last; i--) if (t.items[i].kind === 'assistant' || t.items[i].kind === 'user') last = t.items[i];
         return clean({
           id: t.id, projectId: t.projectId, title: t.title, updatedAt: t.updatedAt, isRunning: r.isRunning,
-          needsApproval: r.approvals.size > 0, accountId: t.accountId, preview: last?.text?.slice(0, 160) ?? null, isWaiting: false,
+          needsApproval: r.approvals.size > 0, accountId: t.accountId, preview: last?.text?.slice(0, 160) ?? null, isWaiting: !!r.backgroundTasks?.length,
+          context: r.context ?? undefined, sessionTokens: r.sessionTokens || undefined,
           worktree: t.worktree ? t.worktree.branch : null, team: t.team ?? null,
         });
       });
@@ -1563,7 +1586,7 @@ export class Host {
       autoRelay: settings.limitPlan.mode !== 'ask', pushReady: false,
       // Beyond the shared protocol (the Mac and the iPhone ignore unknown fields).
       hostFeatures: HOST_FEATURES, hostVersion: this.config.version ?? 'dev', hostPlatform: process.platform, hostCLIs: this.config.bins ?? {},
-      hostTeams: this.teams.list.map((x) => ({ id: x.id, projectId: x.projectId, goal: x.goal, status: x.status, auto: x.auto, held: x.held.length, members: x.members.map((m) => { const t = this.threads.get(m.threadId); return clean({ threadId: m.threadId, role: m.role, name: m.name, notes: m.notes, accountId: t?.accountId, model: t?.model ?? 'default' }); }) })),
+      hostTeams: this.teams.list.map((x) => ({ id: x.id, projectId: x.projectId, goal: x.goal, status: x.status, auto: x.auto, held: x.held.length, members: x.members.map((m) => { const t = this.threads.get(m.threadId); return clean({ threadId: m.threadId, role: m.role, name: m.name, notes: m.notes, accountId: t?.accountId, model: t?.model ?? 'default', task: m.task ?? undefined, stash: m.stash?.length || undefined }); }) })),
       hostSettings: { ...settings, limitPlanSummary: this._planSummary(settings.limitPlan), accounts: this._accountDefs() },
       hostProviders: {
         api: Object.entries(API_PRESETS).map(([id, p]) => ({ id, name: p.name, keyURL: p.keyURL ?? null })),
@@ -1582,7 +1605,7 @@ export class Host {
       isRunning: r.isRunning, statusLine: r.statusLine, limit: r.limit ? clean(r.limit) : null, mode: t.mode,
       selectedAccountId: account?.id, selectedModel: t.model, selectedEffort: t.effort, relayCandidates: candidates,
       queued: t.queued.map((q) => ({ id: q.id, text: q.text })), queuePaused: t.queuePaused,
-      usage: (account?.status?.windows ?? []).map(remoteWindow), backgroundTasks: [],
+      usage: (account?.status?.windows ?? []).map(remoteWindow), backgroundTasks: (r.backgroundTasks ?? []).map((b) => ({ id: b.id, description: b.description, startedAt: b.startedAt })),
       limitPlan: t.limitPlan ? { ...t.limitPlan, summary: this._planSummary(t.limitPlan) } : null,
       defaultLimitPlan: { ...this.settings.limitPlan, summary: this._planSummary(this.settings.limitPlan) },
       pendingRelay: r.pendingRelay ?? null, resumeAt: r.resumeAt ?? null,

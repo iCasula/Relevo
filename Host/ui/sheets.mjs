@@ -909,7 +909,7 @@ export function openNewTeam(hostId, projectId, goal = '', { threadId = null } = 
         ${st.executors.length ? `<div class="form-row"><span class="grow">Los ejecutores nuevos</span><select class="field" data-mode>${[['ask', 'Piden permiso'], ['autoEdit', 'Editan sin pedir permiso'], ['full', 'Acceso total']].map(([v, l]) => `<option value="${v}"${v === st.mode ? ' selected' : ''}>${l}</option>`).join('')}</select></div>` : ''}
         ${n > 1 && has(hostId, 'worktrees') && st.executors.length ? `<div class="form-row"><label style="display:flex;gap:8px;align-items:center"><input type="checkbox" class="check" data-wt${st.worktrees ? ' checked' : ''}> Cada ejecutor nuevo en su propio worktree (su rama; no se pisan)</label></div>` : ''}
       </div>
-      <div class="caption" style="margin-top:8px">El orquestador y el investigador leen y buscan sin pedir permiso, pero no modifican ficheros. Si los agentes se pasan muchos mensajes seguidos sin ti, el equipo se pone en pausa.</div>
+      <div class="caption" style="margin-top:8px">El orquestador y el investigador leen y buscan sin pedir permiso (el investigador con Codex, en solo lectura); el orquestador no debería editar, pero si le das acceso total podría. Si los agentes se pasan muchos mensajes seguidos sin ti, el equipo se pone en pausa.</div>
       <div class="sheet-buttons"><button class="btn" data-no>Cancelar</button><span class="grow"></span><button class="btn primary" data-go>${joining ? 'Añadir coordinador' : 'Crear equipo'} (${1 + n + (st.withResearcher ? 1 : 0)} agentes)</button></div>`;
     const $ = (q) => s.el.querySelector(q);
     const keep = () => { goal = $('[data-goal]').value; persist(); };

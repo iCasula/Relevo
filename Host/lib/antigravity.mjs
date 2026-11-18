@@ -179,8 +179,17 @@ export class AntigravitySession extends EventEmitter {
       }
       const u = r.usage;
       if (u) {
-        const tokens = u.total_tokens ?? ((u.input_tokens ?? 0) + (u.output_tokens ?? 0));
-        if (tokens) this.emit('tokens', { tokens, cacheShare: u.input_tokens ? (u.cache_read_tokens ?? 0) / u.input_tokens : null, cost: null });
+        // agy reports the conversation's running totals: this turn is the difference with the last result.
+        const total = u.total_tokens ?? ((u.input_tokens ?? 0) + (u.output_tokens ?? 0));
+        const prev = this.lastUsage && this.lastUsage.conversation === this.conversationId ? this.lastUsage : { total: 0, input: 0, cache: 0 };
+        const grew = total >= prev.total;
+        const tokens = grew ? total - prev.total : total;
+        const input = grew ? (u.input_tokens ?? 0) - prev.input : (u.input_tokens ?? 0);
+        const cache = grew ? (u.cache_read_tokens ?? 0) - prev.cache : (u.cache_read_tokens ?? 0);
+        this.lastUsage = { conversation: this.conversationId, total, input: u.input_tokens ?? 0, cache: u.cache_read_tokens ?? 0 };
+        // A resumed conversation's first result has no previous total here: it only sets the baseline.
+        const baselineOnly = prev.total === 0 && this.resumed && this.turn === 1;
+        if (tokens > 0 && !baselineOnly) this.emit('tokens', { tokens, cacheShare: input > 0 ? Math.min(1, Math.max(0, cache / input)) : null, cost: null, conversationTotal: total });
       }
       this.turnActive = false;
       this.emit('turnFinished');

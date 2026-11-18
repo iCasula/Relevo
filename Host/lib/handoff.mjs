@@ -163,10 +163,13 @@ function latestPlan(items) {
  * The text that goes before the new message when another agent takes the thread over.
  * `traceFile`: where the whole conversation was saved (see `saveTrace`), so the agent can look details up.
  */
-export function handoffText({ items, accounts, projectPath, target, pendingRequest, workState = null, traceFile = null, budget = BRIEF_BUDGET }) {
+export function handoffText({ items, accounts, projectPath, target, pendingRequest, workState = null, traceFile = null, budget = BRIEF_BUDGET, fresh = false }) {
   const agents = [...new Set(items.filter((i) => i.kind === 'assistant').map((i) => accounts.get(i.accountId)?.agentName).filter(Boolean))].join(', ');
+  const intro = fresh
+    ? 'Sigues con tu propio trabajo en una sesión nueva: Relevo la ha renovado porque la anterior se había hecho muy larga. Esto es un resumen de lo que llevabas, no la conversación entera.'
+    : `Retomas una tarea que llevaba otro agente de IA (${agents || 'otro agente'}): el usuario ha cambiado de proveedor desde Relevo (normalmente porque el anterior se quedó sin cuota) y ahora sigues tú, como ${target.agentName}. Esto es un resumen, no la conversación entera.`;
   const head = `<relevo_handoff>
-Retomas una tarea que llevaba otro agente de IA (${agents || 'otro agente'}): el usuario ha cambiado de proveedor desde Relevo (normalmente porque el anterior se quedó sin cuota) y ahora sigues tú, como ${target.agentName}. Esto es un resumen, no la conversación entera.
+${intro}
 - Proyecto: ${projectPath}
 - El código y los cambios ya están en disco: léelos de los ficheros (git status, git diff), no esperes encontrarlos aquí.
 - Comprueba lo que quedó a medias antes de repetirlo y no rehagas lo que ya está hecho.${traceFile ? `\n- Si te falta algún detalle, la conversación completa está en ${traceFile} (léela solo si hace falta).` : ''}`;
