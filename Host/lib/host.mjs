@@ -110,6 +110,7 @@ export class Host {
     for (const dir of [config.dataDir, config.threadsDir, config.claudeConfigDir, config.codexHome, config.tmpDir, config.cacheDir, config.projectsRoot]) {
       fs.mkdirSync(dir, { recursive: true });
     }
+    this.interrupted = new Set(); // threads whose turn the last stop cut (see _wasCut)
     this._loadState();
     this.teams = new Teams(this);
     this._limitClaudeHousekeeping();
@@ -168,9 +169,23 @@ export class Host {
       const t = { ...meta, items: stored.items, totalItems: stored.totalItems ?? stored.items.length, queued: meta.queued ?? [] };
       if (!this.accountsById.has(t.accountId)) t.accountId = this.accounts[0]?.id;
       this.threads.set(meta.id, t);
+      if (this._wasCut(t)) this.interrupted.add(t.id);
     }
     // `pair` and other one-off commands read the state; only the service (or a brand-new state) writes it.
     if (!this.config.readOnly || created) this._saveState();
+  }
+
+  /**
+   * The thread's last turn was cut by the host stopping (a restart, an update that didn't wait, a crash): it
+   * started and never finished. Recent turns only, and never a turn that was itself such a resumption.
+   */
+  _wasCut(t) {
+    let u = null;
+    for (let i = t.items.length - 1; i >= 0 && !u; i--) if (t.items[i].kind === 'user') u = t.items[i];
+    if (!u || u.done || u.from?.label === 'reinicio') return false;
+    if (now() - (u.date ?? 0) > 12 * 3600) return false;
+    const started = u.started || u.turnBefore;
+    return !!started && !u.turnAfter;
   }
 
   /** Settings changed from the apps (stored in state.json), over the defaults from host.env. */
@@ -247,14 +262,27 @@ export class Host {
     this.probeTimer = setTimeout(probe, (this.settings.probeMinutes || 10) * 60_000);
     this.probeTimer.unref?.();
     setInterval(() => this._housekeeping(), 60_000).unref();
-    // Messages held back while an update waited for the agents carry on now, with the new version.
-    setTimeout(() => {
-      for (const t of this.threads.values()) {
-        if (!t.resumeAfterRestart) continue;
-        delete t.resumeAfterRestart;
-        if (t.queued.length && !t.queuePaused) this._next(t);
+    // After a restart: the turns it cut carry on where they were, and messages waiting in a queue go out (those
+    // held back by an update included). Agents beyond the limit wait their turn as usual.
+    setTimeout(() => this._resumeAfterRestart(), 3000).unref();
+  }
+
+  _resumeAfterRestart() {
+    for (const t of this.threads.values()) {
+      delete t.resumeAfterRestart;
+      if (this._rt(t).isRunning) continue;
+      if (this.interrupted.has(t.id)) {
+        this.interrupted.delete(t.id);
+        this._append(t, { id: uuid(), kind: 'notice', text: 'Relevo se ha reiniciado a mitad de este turno: el agente sigue donde lo dejó' });
+        this._startTurn(t, 'Relevo se ha reiniciado y el turno anterior se cortó a medias. Sigue donde lo dejaste.', false, {
+          from: { name: 'Relevo', role: 'relevo', label: 'reinicio' },
+          prompt: '(Relevo se ha reiniciado y tu turno anterior se cortó a medias: los comandos que estuvieran en marcha se pararon.) Comprueba en qué estado quedó lo que estabas haciendo (ficheros, compilaciones, procesos) y sigue con la tarea donde la dejaste; no repitas lo que ya esté hecho.',
+        });
+        continue;
       }
-    }, 3000).unref();
+      if (t.queued.length && !t.queuePaused) this._next(t);
+    }
+    this.interrupted.clear();
   }
 
   // MARK: - Updates without cutting the agents
@@ -1012,6 +1040,8 @@ export class Host {
         r.isRunning = false;
         r.statusLine = null;
         r.approvals.clear();
+        const stopped = r.turnUserItem && this._item(t, r.turnUserItem);
+        if (stopped) stopped.done = true; // stopped by you: not to be resumed after a restart
         this._append(t, { id: uuid(), kind: 'notice', text: 'Detenido' });
         this._changed(t);
       }, 2000);
@@ -1121,7 +1151,7 @@ export class Host {
     prompt = teamPrefix + prompt;
     // The project as it was before this turn, to show what the turn changed and to go back to it.
     const turnBefore = gitops.snapshot(t.projectPath);
-    const userItem = this._append(t, { id: uuid(), kind: 'user', text, turnBefore, from: meta.from });
+    const userItem = this._append(t, { id: uuid(), kind: 'user', text, turnBefore, from: meta.from, started: true });
     r.turnUserItem = userItem.id;
     r.stopRequested = false;
     r.suggestion = null;
@@ -1256,6 +1286,7 @@ export class Host {
       r.statusLine = null;
       r.finishedAt = Date.now();
       const userItem = r.turnUserItem && this._item(t, r.turnUserItem);
+      if (userItem) userItem.done = true;
       if (userItem?.turnBefore) {
         userItem.turnAfter = gitops.snapshot(t.projectPath);
         // «3 ficheros · +40 −12» under the reply: what this turn changed.

@@ -58,7 +58,8 @@ What it does today:
   Suscripciones › Programa.
 - Updates don't cut the agents: the new version is installed at once, but the service restarts only when no
   agent is working or waiting for an answer; messages sent meanwhile wait in their queue and go out on their own
-  after the restart (or «Reiniciar ahora», or `relevo-host update --now`).
+  after the restart (or «Reiniciar ahora», or `relevo-host update --now`). If a restart does cut a turn (forced,
+  or a crash), the agent carries on where it was when the host is back, and waiting queues go out.
 - The desktop app on its own (`relevo-host desktop`, or `Host/deploy/install-mac-desktop.sh` for «Relevo Hosts.app»
   on a Mac): the same window managing hosts on other machines, e.g. the Windows PC from the Mac, with no agents of
   its own. The native Mac app can be paired in it too.

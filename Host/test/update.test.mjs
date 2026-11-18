@@ -98,3 +98,29 @@ test('an update waits for the working agent, holds new messages and sends them a
   const done = await next((m) => m.threadPatch?._0.id === other && m.threadPatch._0.upserts.some((i) => i.kind === 'assistant' && /mensaje durante la actualización/.test(i.text) && i.usage));
   assert.ok(done);
 });
+
+test('after a restart that cut a turn, the agent carries on and its queue goes out', async () => {
+  // (The host from the previous test is running.)
+  const snapshot = await (async () => { peer.send(Client.hello('Test')); return (await next((m) => m.snapshot)).snapshot._0; })();
+  peer.send(Client.newThread(snapshot.projects[0].id, 'K'));
+  const id = (await next((m) => m.created?.requestId === 'K')).created.threadId;
+  peer.send(Client.subscribe(id));
+  peer.send(Client.send(id, 'pregunta y espera'));
+  await next((m) => m.threadPatch?._0.id === id && m.threadPatch._0.upserts.some((i) => i.kind === 'approval'));
+  peer.send(Client.send(id, 'mensaje en cola'));
+  await next((m) => m.threadPatch?._0.id === id && m.threadPatch._0.runtime.queued?.length === 1);
+
+  // The host stops mid-turn (as a forced restart does) and comes back.
+  const exited = new Promise((resolve) => service.once('exit', resolve));
+  fs.writeFileSync(path.join(dir, 'data', 'control', 'restartNow'), '');
+  await exited;
+  peer.close();
+  inbox.length = 0;
+  log = '';
+  await start();
+  peer.send(Client.subscribe(id));
+  const resumed = await next((m) => m.threadPatch?._0.id === id && m.threadPatch._0.upserts.some((i) => i.kind === 'user' && i.from?.label === 'reinicio'), 20_000);
+  assert.ok(resumed.threadPatch._0.upserts.some((i) => i.kind === 'notice' && /se ha reiniciado a mitad/.test(i.text)));
+  // The resumed turn ends, then the queued message runs.
+  await next((m) => m.threadPatch?._0.id === id && m.threadPatch._0.upserts.some((i) => i.kind === 'assistant' && /mensaje en cola/.test(i.text) && i.usage), 20_000);
+});
