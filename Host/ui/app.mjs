@@ -6,7 +6,7 @@ import { icon, badge, toolSymbol } from './icons.mjs';
 import { showMenu, closeMenus, openPopover, alertSheet, promptSheet, toast } from './kit.mjs';
 import {
   app, hooks, save, host, snap, nameOf, has, accountOf, modelOf, modelName, visibleModels, maxPercent, threadOf, summaryOf, projectOf,
-  connect, post, sendTo, request, createThread, Client, uuid, shortTokens, usd, pct, reset, relative, usageColor, effortName, MODES,
+  connect, post, sendTo, request, createThread, Client, uuid, shortTokens, usd, pct, reset, relative, clock, fullDate, usageColor, effortName, MODES,
   PLAN_SUMMARY, copyText,
 } from './core.mjs';
 import * as sheets from './sheets.mjs';
@@ -133,7 +133,8 @@ function threadRowHTML(hostId, s, t, nested = false) {
   const selected = app.sel?.host === hostId && app.sel.thread === t.id;
   const acct = s.accounts.find((a) => a.id === t.accountId);
   const ran = !!t.preview;
-  const dot = ran ? `<span class="pdot" style="background:${esc(acct?.tint ?? 'var(--tertiary)')}"></span>` : '<span class="pdot empty"></span>';
+  // The agent's provider, with its real logo (a hollow dot for a thread that hasn't run yet).
+  const dot = acct && (ran || t.team) ? `<span class="prov" title="${esc(acct.name)}">${badge(acct, 13)}</span>` : '<span class="pdot empty"></span>';
   const extra = t.worktree ? `<span title="Worktree propio · ${esc(t.worktree)}">${icon('square.stack.3d.down.right', { size: 10, cls: 'small' })}</span>` : '';
   const live = threadOf(hostId, t.id)?.runtime;
   const status = t.attention ? `<span class="attn" title="${esc(t.attention.text)}">${icon('text.bubble.fill', { size: 11 })}</span>`
@@ -436,7 +437,8 @@ function renderTeamBar() {
         [ctx, t?.sessionTokens ? `sesión ${shortTokens(t.sessionTokens)} tokens` : ''].filter(Boolean).join(' · '),
         m.stash ? `${m.stash} nota${m.stash === 1 ? '' : 's'} del orquestador para su próxima tarea` : '',
       ].filter(Boolean).join('\n');
-      return `<button class="team-chip r-${m.role}${m.threadId === summary.id ? ' on' : ''}" data-team-go="${esc(m.threadId)}" title="${esc(tip)}">${icon(ROLE[m.role]?.icon ?? 'person.2', { size: 11 })}<span>${esc(m.name)}</span>${state}</button>`;
+      const prov = accountOf(hostId, m.accountId);
+      return `<button class="team-chip r-${m.role}${m.threadId === summary.id ? ' on' : ''}" data-team-go="${esc(m.threadId)}" title="${esc(tip)}">${icon(ROLE[m.role]?.icon ?? 'person.2', { size: 11 })}<span>${esc(m.name)}</span>${prov ? badge(prov, 12) : ''}${state}</button>`;
     }).join('');
     const status = team.status === 'paused' ? `<span class="team-status orange">En pausa${team.held ? ` · ${team.held} mensaje${team.held === 1 ? '' : 's'} esperando` : ''}</span>`
       : team.status === 'done' ? `<span class="team-status green">${icon('checkmark.circle.fill', { size: 11 })} Objetivo cumplido</span>` : '';
@@ -537,14 +539,15 @@ function renderTranscript() {
 /** Usage and changes of each turn, keyed by the turn's last item (the Mac's TurnFooter). */
 function turnFooters(items) {
   const out = new Map();
-  let user = null, last = null, usage = null;
+  let user = null, last = null, usage = null, first = null;
   const close = () => {
-    if (last && (usage || user?.turnChanges)) out.set(last.id, { usage, changes: user?.turnChanges ?? null, userId: user?.id });
+    if (last && (usage || user?.turnChanges)) out.set(last.id, { usage, changes: user?.turnChanges ?? null, userId: user?.id, at: last.date, from: first?.date });
   };
   for (const it of items) {
-    if (it.kind === 'user') { close(); user = it; last = null; usage = null; continue; }
+    if (it.kind === 'user') { close(); user = it; last = null; usage = null; first = null; continue; }
     if (it.kind === 'notice') continue;
     last = it;
+    first ??= it;
     if (it.usage) usage = it.usage;
   }
   close();
@@ -564,6 +567,8 @@ function footerHTML(f) {
     } else if (u.context) bits.push(`<span>contexto ${shortTokens(u.context)}</span>`);
     parts.push(`<button data-turn-usage='${esc(JSON.stringify(u))}' title="Consumo de este turno">${bits.join('')}</button>`);
   }
+  // When the turn ended, if it isn't the minute shown on its first message.
+  if (f.at && clock(f.at) !== clock(f.from)) parts.push(`<span class="ended" title="${esc(fullDate(f.at))}">terminó ${esc(clock(f.at))}</span>`);
   if (f.changes) parts.push(`<button class="changes" data-turn-changes="${esc(f.userId)}" title="Ver lo que cambió este turno, comentarlo o deshacerlo">${icon('doc.badge.ellipsis', { size: 11 })}${f.changes.files} ${f.changes.files === 1 ? 'fichero' : 'ficheros'} · +${f.changes.added} −${f.changes.removed}</button>`);
   return parts.length ? `<div class="turn-footer">${parts.join('')}</div>` : '';
 }
@@ -585,12 +590,12 @@ function itemHTML(hostId, it, header) {
     case 'user':
       if (it.from) {
         const role = ROLE[it.from.role] ?? ROLE.team;
-        return `<div class="from-row r-${esc(it.from.role)}"><div class="from-head">${icon(role.icon, { size: 11 })}<b>${esc(it.from.name)}</b>${it.from.label ? `<span>· ${esc(it.from.label)}</span>` : ''}${it.from.threadId ? `<button class="btn link small" data-team-go="${esc(it.from.threadId)}">Ver hilo</button>` : ''}</div><div class="md">${markdown(it.text)}</div></div>`;
+        return `<div class="from-row r-${esc(it.from.role)}"><div class="from-head">${icon(role.icon, { size: 11 })}<b>${esc(it.from.name)}</b>${it.from.label ? `<span>· ${esc(it.from.label)}</span>` : ''}${timeHTML(it.date)}${it.from.threadId ? `<button class="btn link small" data-team-go="${esc(it.from.threadId)}">Ver hilo</button>` : ''}</div><div class="md">${markdown(it.text)}</div></div>`;
       }
-      return `<div class="user-row"><div class="bubble">${esc(it.text)}</div></div>${imagesHTML(hostId, it.text).replace('class="thumbs"', 'class="thumbs" style="justify-content:flex-end"')}`;
+      return `<div class="user-row"><div class="bubble" title="${esc(fullDate(it.date))}">${esc(it.text)}</div></div>${imagesHTML(hostId, it.text).replace('class="thumbs"', 'class="thumbs" style="justify-content:flex-end"')}`;
     case 'assistant': {
       const acct = accountOf(hostId, it.accountId);
-      const author = header && acct ? `<div class="author">${badge(acct, 14)}<b>${esc(acct.name)}</b><span class="m">${esc(modelName(acct, it.model))}</span></div>` : '';
+      const author = header && acct ? `<div class="author">${badge(acct, 14)}<b>${esc(acct.name)}</b><span class="m">${esc(modelName(acct, it.model))}</span>${timeHTML(it.date)}</div>` : '';
       return `${author}<div class="md">${markdown(it.text)}</div>${imagesHTML(hostId, it.text)}`;
     }
     case 'reasoning':
@@ -610,6 +615,11 @@ function itemHTML(hostId, it, header) {
     case 'approval': return it.questions?.length ? questionHTML(it) : approvalHTML(it);
     default: return `<div class="notice"><span class="c">${esc(it.text)}</span></div>`;
   }
+}
+
+/** When a message was sent: the time (the full date on hover). */
+function timeHTML(at) {
+  return at ? `<span class="when-at" title="${esc(fullDate(at))}">${esc(clock(at))}</span>` : '';
 }
 
 function approvalHTML(it) {
@@ -714,13 +724,56 @@ function suggestionHTML(hostId, sg) {
     + `<button class="icon-plain" data-suggestion="dismiss" title="Ocultar hasta el próximo mensaje">${icon('xmark', { size: 11 })}</button></div>`;
 }
 
+// A model change from the picker waits a few seconds, so a misclick can be undone before anything happens.
+const SWITCH_DELAY = 10;
+const pendingSwitches = new Map(); // "host/thread" → { hostId, threadId, accountId, model, at, timer, tick }
+
+function pickModel(hostId, threadId, accountId, model) {
+  const key = `${hostId}/${threadId}`;
+  dropSwitch(key);
+  const rt = threadOf(hostId, threadId)?.runtime;
+  if (!(rt && accountId === rt.selectedAccountId && model === rt.selectedModel)) {
+    const p = { hostId, threadId, accountId, model, at: Date.now() + SWITCH_DELAY * 1000 };
+    p.timer = setTimeout(() => applySwitch(key), SWITCH_DELAY * 1000);
+    p.tick = setInterval(() => { const el = T?.queue.querySelector(`[data-secs="${CSS.escape(key)}"]`); if (el) el.textContent = String(Math.max(0, Math.ceil((p.at - Date.now()) / 1000))); }, 250);
+    pendingSwitches.set(key, p);
+  }
+  renderQueue();
+  renderControls();
+}
+function dropSwitch(key) {
+  const p = pendingSwitches.get(key);
+  if (!p) return null;
+  clearTimeout(p.timer);
+  clearInterval(p.tick);
+  pendingSwitches.delete(key);
+  return p;
+}
+/** Sends a waiting model change now (its time is up, you pressed "Ya", or a message is about to go). */
+function applySwitch(key) {
+  const p = dropSwitch(key);
+  if (p) sendTo(p.hostId, Client.select(p.threadId, p.accountId, p.model));
+  const c = current();
+  if (`${c.hostId}/${c.threadId}` === key) { renderQueue(); renderControls(); }
+}
+
+function switchHTML(hostId, threadId) {
+  const p = pendingSwitches.get(`${hostId}/${threadId}`);
+  if (!p) return '';
+  const a = accountOf(hostId, p.accountId);
+  const from = accountOf(hostId, threadOf(hostId, threadId)?.runtime?.selectedAccountId);
+  const secs = Math.max(0, Math.ceil((p.at - Date.now()) / 1000));
+  const relay = from && a && from.id !== a.id;
+  return `<div class="card switch-card">${icon('arrow.triangle.2.circlepath', { size: 13, cls: 'muted' })}<span class="grow">Cambio a ${badge(a, 14)}<b>${esc(a?.name ?? '?')} · ${esc(modelName(a, p.model))}</b> en <span data-secs="${esc(`${hostId}/${threadId}`)}">${secs}</span> s${relay ? ' <span class="caption">(con todo el contexto)</span>' : ''}</span><button class="btn small" data-switch="undo" title="No cambiar de modelo">Deshacer</button><button class="btn small primary" data-switch="now">Ya</button></div>`;
+}
+
 function renderQueue() {
-  const { thread } = current();
+  const { hostId, threadId, thread } = current();
   const rt = thread?.runtime;
   const q = rt?.queued ?? [];
-  let html = '';
+  let html = switchHTML(hostId, threadId);
   if (q.length) {
-    html = `<div class="card queue-card"><div class="qh${rt.queuePaused ? ' paused' : ''}">${icon(rt.queuePaused ? 'pause.circle' : 'text.append', { size: 11 })}<span class="grow">${rt.queuePaused ? 'Cola en pausa' : 'En cola · se envían al terminar cada turno'}</span>${rt.queuePaused ? `<button class="btn small" data-cmd="resumeQueue"${rt.isRunning ? ' disabled' : ''} title="Enviar el siguiente mensaje de la cola">Reanudar</button>` : ''}</div>`
+    html += `<div class="card queue-card"><div class="qh${rt.queuePaused ? ' paused' : ''}">${icon(rt.queuePaused ? 'pause.circle' : 'text.append', { size: 11 })}<span class="grow">${rt.queuePaused ? 'Cola en pausa' : 'En cola · se envían al terminar cada turno'}</span>${rt.queuePaused ? `<button class="btn small" data-cmd="resumeQueue"${rt.isRunning ? ' disabled' : ''} title="Enviar el siguiente mensaje de la cola">Reanudar</button>` : ''}</div>`
       + q.map((m, i) => `<div class="qr"><span class="n">${i + 1}</span><span class="tx">${esc(m.text)}</span><button class="icon-plain orange" data-queued-now="${esc(m.id)}" title="Enviar ya: interrumpe al agente y le manda este mensaje ahora">${icon('bolt.fill', { size: 12 })}</button><button class="icon-plain tert" data-dequeue="${esc(m.id)}" title="Quitar de la cola">${icon('xmark.circle.fill', { size: 13 })}</button></div>`).join('')
       + (rt.queuePaused ? '<div class="caption">El último turno no terminó bien (error, límite o detenido). Revisa y reanuda cuando quieras.</div>' : '') + '</div>';
   }
@@ -769,6 +822,7 @@ function sendDraft(now) {
   const text = [T.draft.value.trim(), ...files].filter(Boolean).join('\n\n');
   if (!text) return;
   const runningNow = thread?.runtime?.isRunning;
+  applySwitch(`${hostId}/${threadId}`); // a model change you just picked goes first
   sendTo(hostId, now && runningNow ? Client.sendNow(threadId, text) : Client.send(threadId, text));
   T.draft.value = '';
   app.drafts.delete(`${hostId}/${threadId}`);
@@ -811,11 +865,13 @@ function modelMenu(anchor) {
   const { hostId, threadId, thread } = current();
   const rt = thread?.runtime;
   const items = [];
+  const pending = pendingSwitches.get(`${hostId}/${threadId}`);
+  const chosen = pending ? { acc: pending.accountId, model: pending.model } : { acc: rt?.selectedAccountId, model: rt?.selectedModel };
   for (const a of snap(hostId)?.accounts ?? []) {
     const s = a.status;
     const state = s?.noPlan ? ' · plan sin acceso' : s?.exhausted ? ' · agotada' : s?.windows?.length ? ` · ${Math.round(maxPercent(a))}% usado` : '';
     items.push({ section: `${a.name} · ${s?.email ?? a.agentName}${state}${s?.loggedIn === false ? ' · sin sesión' : ''}` });
-    for (const m of visibleModels(a)) items.push({ label: m.name, checked: a.id === rt?.selectedAccountId && m.id === rt?.selectedModel, help: m.detail ?? '', action: () => sendTo(hostId, Client.select(threadId, a.id, m.id)) });
+    for (const m of visibleModels(a)) items.push({ label: m.name, checked: a.id === chosen.acc && m.id === chosen.model, help: m.detail ?? '', action: () => pickModel(hostId, threadId, a.id, m.id) });
   }
   if (rt?.defaultLimitPlan) items.push('-', { label: `Si se acaba la cuota: ${planSummary(hostId, rt.limitPlan ?? rt.defaultLimitPlan)}`, submenu: limitPlanItems(hostId, threadId, rt) });
   items.push('-', { label: 'Gestionar suscripciones…', action: () => sheets.openSettings('accounts', hostId) });
@@ -1046,6 +1102,11 @@ document.addEventListener('click', (e) => {
     return;
   }
   if (d.teamGo) { select(hostId, d.teamGo); return; }
+  if (d.switch) {
+    const key = `${hostId}/${threadId}`;
+    if (d.switch === 'now') applySwitch(key); else { dropSwitch(key); renderQueue(); renderControls(); toast('Cambio de modelo cancelado'); }
+    return;
+  }
   if (d.teamAct) {
     const teamId = summaryOf(hostId, threadId)?.team?.id;
     if (teamId) request(hostId, { teamAction: { teamId, action: d.teamAct } }).then((r) => { if (!r.ok) toast(r.error); });

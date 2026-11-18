@@ -52,7 +52,7 @@ struct ThreadListView: View {
                 }
                 ForEach(viewModel.sections) { section in
                     Section {
-                        if section.threads.isEmpty {
+                        if section.threads.isEmpty && section.teams.isEmpty {
                             Text("Sin hilos todavía")
                                 .foregroundStyle(.secondary)
                         }
@@ -64,6 +64,18 @@ struct ThreadListView: View {
                     } header: {
                         ProjectHeader(project: section.project, isCreating: viewModel.creatingIn == section.project.id) {
                             Task { await viewModel.newThread(in: section.project) }
+                        }
+                    }
+                    ForEach(section.teams) { group in
+                        Section {
+                            ForEach(group.threads) { thread in
+                                NavigationLink(value: thread.id) {
+                                    ThreadRow(thread: thread, account: viewModel.account(for: thread), isLive: viewModel.client.isConnected,
+                                              task: group.team.members.first { $0.threadId == thread.id }?.task)
+                                }
+                            }
+                        } header: {
+                            TeamHeader(team: group.team, projectName: section.project.name)
                         }
                     }
                 }
@@ -158,11 +170,55 @@ private struct ProjectHeader: View {
     }
 }
 
+private struct TintedIconLabel: LabelStyle {
+    let tint: Color
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 5) {
+            configuration.icon.foregroundStyle(tint).imageScale(.small)
+            configuration.title
+        }
+    }
+}
+
+private struct TeamHeader: View {
+    let team: RemoteTeam
+    let projectName: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Image(systemName: "person.3.sequence")
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Equipo · \(projectName)")
+                Text(team.goal.split(separator: "\n").first.map(String.init) ?? team.goal)
+                    .font(.caption2)
+                    .textCase(nil)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+            Spacer()
+            if team.isPaused {
+                Label("En pausa", systemImage: "pause.circle.fill")
+                    .labelStyle(.titleAndIcon)
+                    .textCase(nil)
+                    .foregroundStyle(.orange)
+            }
+        }
+    }
+}
+
 struct ThreadRow: View {
     let thread: RemoteThreadSummary
     let account: RemoteAccount?
     /// Without a connection the agent state could be old, so it isn't shown.
     var isLive = true
+    /// What the team member is on (team threads only).
+    var task: RemoteTeamMember.Task?
+
+    /// A team thread's title without its "Name · " prefix (the chip already says who it is).
+    private var title: String {
+        guard let name = thread.team?.name, thread.title.hasPrefix(name + " · ") else { return thread.title }
+        return String(thread.title.dropFirst(name.count + 3))
+    }
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -170,15 +226,28 @@ struct ThreadRow: View {
                 .padding(.top, 2)
             VStack(alignment: .leading, spacing: 3) {
                 HStack(alignment: .firstTextBaseline) {
-                    Text(thread.title)
-                        .font(.headline)
-                        .lineLimit(1)
+                    // A team member is named by its role (the team's goal is in the section header).
+                    if let team = thread.team {
+                        Label(team.name, systemImage: team.role.symbol)
+                            .labelStyle(TintedIconLabel(tint: team.role.color))
+                            .font(.headline)
+                            .lineLimit(1)
+                    } else {
+                        Text(title)
+                            .font(.headline)
+                            .lineLimit(1)
+                    }
                     Spacer(minLength: 6)
                     Text(thread.updatedAt, format: .relative(presentation: .numeric, unitsStyle: .abbreviated))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                if let preview = thread.preview, !preview.isEmpty {
+                if let line = task?.line {
+                    Text(line)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                } else if let preview = thread.preview, !preview.isEmpty, thread.attention == nil || !isLive {
                     Text(MarkdownInline.plain(preview))
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
@@ -186,6 +255,11 @@ struct ThreadRow: View {
                 }
                 if !isLive {
                     EmptyView()
+                } else if let attention = thread.attention, !thread.needsApproval {
+                    Label(attention.text ?? "Te escribe", systemImage: "text.bubble.fill")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.tint)
+                        .lineLimit(2)
                 } else if thread.needsApproval {
                     Label("Esperando tu aprobación", systemImage: "hand.raised.fill")
                         .font(.caption.weight(.semibold))

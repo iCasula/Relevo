@@ -842,6 +842,12 @@ function fallbackSelect(hostId, attrs, value) {
     + accounts.map((a) => `<optgroup label="Sin cuota → ${esc(a.name)}">${visibleModels(a).map((m) => opt(`${a.id}|${m.id}`, `→ ${a.name} · ${m.name}`)).join('')}</optgroup>`).join('') + '</select>';
 }
 
+/** One picker that sets what every agent of the team does when its quota runs out. */
+function allFallbackRow(hostId, shared) {
+  const select = fallbackSelect(hostId, 'data-fb-all', shared ?? '*').replace('<option value=""', `${shared === null ? '<option value="*" selected>Cada uno el suyo</option>' : ''}<option value=""`);
+  return `<div class="team-line team-all"><span class="team-role">${icon('arrow.triangle.2.circlepath', { size: 12 })} Para todos</span><span class="caption grow">Qué hace cada agente si se le acaba la cuota (lo puedes cambiar en cada uno)</span>${select}<span class="tb-spacer"></span></div>`;
+}
+
 /**
  * A team of agents. With `threadId`, the team joins that thread instead: it becomes the first executor (same
  * agent, same session) and the orchestrator gets a brief of what it has done.
@@ -902,6 +908,10 @@ export function openNewTeam(hostId, projectId, goal = '', { threadId = null } = 
     const fb = key === 'thread' ? st.threadFallback : key === 'lead' ? st.lead.fallback : key === 'res' ? st.researcher.fallback : st.executors[i]?.fallback;
     return `<div class="team-line"><span class="team-role"></span><input class="field-input grow team-notes" data-notes="${key}"${idx} placeholder="Indicaciones para este agente (opcional)" value="${esc(value ?? '')}">${fallbackSelect(hostId, `data-fb="${key}"${idx}`, fb)}<span class="tb-spacer"></span></div>`;
   };
+  // Every agent's "out of quota" choice, to set them all at once.
+  const fallbacks = () => [st.lead.fallback, ...(joining ? [st.threadFallback] : []), ...st.executors.map((e) => e.fallback), ...(st.withResearcher ? [st.researcher.fallback] : [])].map((x) => x ?? '');
+  const sharedFallback = () => { const v = fallbacks(); return v.every((x) => x === v[0]) ? v[0] : null; };
+  const setAllFallbacks = (v) => { st.lead.fallback = v; if (joining) st.threadFallback = v; for (const e of st.executors) e.fallback = v; st.researcher.fallback = v; };
   const draw = () => {
     const n = st.executors.length + (joining ? 1 : 0);
     const execLabel = (i) => (n > 1 ? `Ejecutor ${i + 1}` : 'Ejecutor');
@@ -916,6 +926,7 @@ export function openNewTeam(hostId, projectId, goal = '', { threadId = null } = 
         <div class="team-line"><span class="team-role"></span><button class="btn small" data-add${n >= 4 ? ' disabled' : ''}>${icon('plus', { size: 10 })} Añadir ejecutor</button></div>
         <div class="team-line"><label class="team-role r-researcher"><input type="checkbox" class="check" data-res${st.withResearcher ? ' checked' : ''}> ${icon('globe', { size: 12 })} Investigador</label>${st.withResearcher ? row('res', st.researcher) : '<span class="caption grow">Sin investigador: el orquestador buscará alternativas por su cuenta</span>'}<span class="tb-spacer"></span></div>
         ${st.withResearcher ? notes('res', st.researcher.notes) : ''}
+        ${allFallbackRow(hostId, sharedFallback())}
       </div>
       <div class="form-group" style="margin-top:12px${st.executors.length ? '' : ';display:none'}">
         ${st.executors.length ? `<div class="form-row"><span class="grow">Los ejecutores nuevos</span><select class="field" data-mode>${[['ask', 'Piden permiso'], ['autoEdit', 'Editan sin pedir permiso'], ['full', 'Acceso total']].map(([v, l]) => `<option value="${v}"${v === st.mode ? ' selected' : ''}>${l}</option>`).join('')}</select></div>` : ''}
@@ -930,7 +941,8 @@ export function openNewTeam(hostId, projectId, goal = '', { threadId = null } = 
     s.el.querySelectorAll('[data-acc]').forEach((el) => { el.onchange = () => { const r = target(el); r.accountId = el.value; r.model = visibleModels(accountOf(hostId, el.value))[0]?.id ?? 'default'; keep(); draw(); }; });
     s.el.querySelectorAll('[data-model]').forEach((el) => { el.onchange = () => { target(el).model = el.value; persist(); }; });
     s.el.querySelectorAll('[data-notes]').forEach((el) => { el.oninput = () => { if (el.dataset.notes === 'thread') st.threadNotes = el.value; else target(el).notes = el.value; persist(); }; });
-    s.el.querySelectorAll('[data-fb]').forEach((el) => { el.onchange = () => { if (el.dataset.fb === 'thread') st.threadFallback = el.value; else { const k = el.dataset.fb; (k === 'lead' ? st.lead : k === 'res' ? st.researcher : st.executors[Number(el.dataset.i)]).fallback = el.value; } persist(); }; });
+    s.el.querySelectorAll('[data-fb]').forEach((el) => { el.onchange = () => { if (el.dataset.fb === 'thread') st.threadFallback = el.value; else { const k = el.dataset.fb; (k === 'lead' ? st.lead : k === 'res' ? st.researcher : st.executors[Number(el.dataset.i)]).fallback = el.value; } keep(); draw(); }; });
+    $('[data-fb-all]').onchange = (e) => { if (e.target.value === '*') return; setAllFallbacks(e.target.value); keep(); draw(); };
     s.el.querySelectorAll('[data-rm]').forEach((b) => { b.onclick = () => { st.executors.splice(Number(b.dataset.rm), 1); keep(); draw(); }; });
     $('[data-add]').onclick = () => { st.executors.push(st.executors.length ? { ...st.executors[st.executors.length - 1], notes: '' } : pick(claude, /sonnet/i)); keep(); draw(); };
     $('[data-res]').onchange = (e) => { st.withResearcher = e.target.checked; keep(); draw(); };
@@ -967,10 +979,16 @@ export function openTeamEditor(hostId, teamId) {
   const st = {
     goal: team.goal,
     members: team.members.map((m) => ({ ...m, accountId: m.accountId ?? usable[0]?.id, model: m.model ?? 'default', notes: m.notes ?? '', fallback: m.fallback ?? '', remove: false })),
+    allFallback: null, // the "for everyone" picker, until a member's own differs
     adds: [], // { role, accountId, model, notes }
     worktrees: true,
   };
-  const original = JSON.stringify(st.members.map(({ threadId, accountId, model, notes, fallback }) => ({ threadId, accountId, model, notes, fallback })));
+  const original = JSON.stringify(st.members.map(({ threadId, accountId, model, notes, fallback, name }) => ({ threadId, accountId, model, notes, fallback, name })));
+  const canRename = has(hostId, 'teamRename');
+  const nameField = (key, m) => (canRename ? `<input class="team-name" data-name="${key}" value="${esc(m.name)}" maxlength="32" spellcheck="false" title="Nombre del agente: el orquestador lo usa para darle órdenes">` : esc(m.name));
+  const everyone = () => [...st.members.filter((m) => !m.remove), ...st.adds];
+  // The "for everyone" picker shows the shared value when all have the same one.
+  const sharedFallback = () => { const v = everyone().map((m) => m.fallback ?? ''); return v.every((x) => x === v[0]) ? v[0] : null; };
   const hasResearcher = () => st.members.some((m) => m.role === 'researcher' && !m.remove) || st.adds.some((a) => a.role === 'researcher');
   const s = openSheet({ width: 700 });
   const selects = (key, r) => {
@@ -989,9 +1007,10 @@ export function openTeamEditor(hostId, teamId) {
       <div class="team-form">
         ${st.members.map((m, i) => { const [ic, cls] = ROLE_UI[m.role] ?? ROLE_UI.executor; return m.remove
           ? `<div class="team-line removed"><span class="team-role ${cls}">${icon(ic, { size: 12 })} ${esc(m.name)}</span><span class="caption grow">Sale del equipo (su hilo se conserva como uno normal)</span><button class="btn small" data-undo="${i}">Deshacer</button></div>`
-          : `<div class="team-line"><span class="team-role ${cls}">${icon(ic, { size: 12 })} ${esc(m.name)}</span>${selects(`m${i}`, m)}${m.role === 'orchestrator' ? '<span class="tb-spacer"></span>' : `<button class="tb-btn" data-rm="${i}" title="Sacar del equipo"${m.role === 'executor' && executors <= 1 ? ' disabled' : ''}>${icon('minus.circle', { size: 15 })}</button>`}</div>${notesRow(`m${i}`, m.notes)}`; }).join('')}
+          : `<div class="team-line"><span class="team-role ${cls}">${icon(ic, { size: 12 })} ${nameField(`m${i}`, m)}</span>${selects(`m${i}`, m)}${m.role === 'orchestrator' ? '<span class="tb-spacer"></span>' : `<button class="tb-btn" data-rm="${i}" title="Sacar del equipo"${m.role === 'executor' && executors <= 1 ? ' disabled' : ''}>${icon('minus.circle', { size: 15 })}</button>`}</div>${notesRow(`m${i}`, m.notes)}`; }).join('')}
         ${st.adds.map((a, i) => { const [ic, cls] = ROLE_UI[a.role]; return `<div class="team-line"><span class="team-role ${cls}">${icon(ic, { size: 12 })} ${a.role === 'executor' ? 'Ejecutor nuevo' : 'Investigador'}</span>${selects(`a${i}`, a)}<button class="tb-btn" data-rm-add="${i}" title="Quitar">${icon('minus.circle', { size: 15 })}</button></div>${notesRow(`a${i}`, a.notes)}`; }).join('')}
         <div class="team-line"><span class="team-role"></span><button class="btn small" data-add-exec${executors >= 4 ? ' disabled' : ''}>${icon('plus', { size: 10 })} Añadir ejecutor</button>${hasResearcher() ? '' : `<button class="btn small" data-add-res>${icon('plus', { size: 10 })} Añadir investigador</button>`}</div>
+        ${allFallbackRow(hostId, sharedFallback())}
       </div>
       ${st.adds.some((a) => a.role === 'executor') && has(hostId, 'worktrees') ? `<div class="form-group" style="margin-top:12px"><div class="form-row"><label style="display:flex;gap:8px;align-items:center"><input type="checkbox" class="check" data-wt${st.worktrees ? ' checked' : ''}> Los ejecutores nuevos, cada uno en su worktree (si el proyecto es un repositorio git)</label></div></div>` : ''}
       <div class="sheet-buttons"><button class="btn" data-no>Cancelar</button><span class="grow"></span><button class="btn primary" data-go>Guardar cambios</button></div>`;
@@ -1001,7 +1020,9 @@ export function openTeamEditor(hostId, teamId) {
     s.el.querySelectorAll('[data-acc]').forEach((el) => { el.onchange = () => { const r = target(el.dataset.acc); r.accountId = el.value; r.model = visibleModels(accountOf(hostId, el.value))[0]?.id ?? 'default'; keep(); draw(); }; });
     s.el.querySelectorAll('[data-model]').forEach((el) => { el.onchange = () => { target(el.dataset.model).model = el.value; }; });
     s.el.querySelectorAll('[data-notes]').forEach((el) => { el.oninput = () => { target(el.dataset.notes).notes = el.value; }; });
-    s.el.querySelectorAll('[data-fb]').forEach((el) => { el.onchange = () => { target(el.dataset.fb).fallback = el.value; }; });
+    s.el.querySelectorAll('[data-fb]').forEach((el) => { el.onchange = () => { target(el.dataset.fb).fallback = el.value; keep(); draw(); }; });
+    $('[data-fb-all]').onchange = (e) => { if (e.target.value === '*') return; for (const m of everyone()) m.fallback = e.target.value; keep(); draw(); };
+    s.el.querySelectorAll('[data-name]').forEach((el) => { el.oninput = () => { target(el.dataset.name).name = el.value; }; });
     s.el.querySelectorAll('[data-rm]').forEach((b) => { b.onclick = () => { st.members[Number(b.dataset.rm)].remove = true; keep(); draw(); }; });
     s.el.querySelectorAll('[data-undo]').forEach((b) => { b.onclick = () => { st.members[Number(b.dataset.undo)].remove = false; keep(); draw(); }; });
     s.el.querySelectorAll('[data-rm-add]').forEach((b) => { b.onclick = () => { st.adds.splice(Number(b.dataset.rmAdd), 1); keep(); draw(); }; });
@@ -1013,9 +1034,13 @@ export function openTeamEditor(hostId, teamId) {
     $('[data-go]').onclick = async () => {
       keep();
       const before = JSON.parse(original);
+      for (const m of st.members) m.name = String(m.name ?? '').replace(/\s+/g, ' ').trim();
+      const names = st.members.filter((m) => !m.remove).map((m) => m.name.toLowerCase());
+      if (names.some((n) => !n)) { toast('Cada agente necesita un nombre'); return; }
+      if (new Set(names).size !== names.length) { toast('Dos agentes no pueden llamarse igual'); return; }
       const changes = {
         goal: st.goal.trim() !== team.goal ? st.goal.trim() : undefined,
-        members: st.members.filter((m, i) => !m.remove && JSON.stringify({ threadId: m.threadId, accountId: m.accountId, model: m.model, notes: m.notes, fallback: m.fallback }) !== JSON.stringify(before[i])).map(({ threadId, accountId, model, notes, fallback }) => ({ threadId, accountId, model, notes, fallback })),
+        members: st.members.filter((m, i) => !m.remove && JSON.stringify({ threadId: m.threadId, accountId: m.accountId, model: m.model, notes: m.notes, fallback: m.fallback, name: m.name }) !== JSON.stringify(before[i])).map(({ threadId, accountId, model, notes, fallback, name }) => ({ threadId, accountId, model, notes, fallback, name: canRename ? name : undefined })),
         remove: st.members.filter((m) => m.remove).map((m) => m.threadId),
         add: { executors: st.adds.filter((a) => a.role === 'executor'), researcher: st.adds.find((a) => a.role === 'researcher') ?? null },
         worktrees: st.worktrees,

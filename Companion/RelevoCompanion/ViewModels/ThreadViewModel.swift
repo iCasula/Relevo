@@ -65,6 +65,11 @@ final class ThreadViewModel {
     var thread: RemoteThread? { client.threads[threadId] }
     var summary: RemoteThreadSummary? { client.snapshot?.threads.first { $0.id == threadId } }
     var title: String { thread?.title ?? summary?.title ?? "Hilo" }
+    /// The team this thread belongs to (Relevo hosts).
+    var team: RemoteTeam? {
+        guard let id = summary?.team?.id else { return nil }
+        return client.snapshot?.hostTeams?.first { $0.id == id }
+    }
     var items: [RemoteItem] { thread?.items ?? [] }
     var runtime: RemoteRuntime? { thread?.runtime }
     var isLoading: Bool { thread == nil }

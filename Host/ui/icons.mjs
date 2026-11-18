@@ -1,5 +1,6 @@
 // Line icons standing in for the SF Symbols the Mac app uses (one table, keyed by the SF name). 24×24 viewBox,
 // drawn with currentColor so they follow the text colour.
+import { LOGO_SVG } from './logos.mjs';
 
 const P = {
   'square.and.pencil': '<path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.4 2.6a2.1 2.1 0 0 1 3 3L12 15l-4 1 1-4Z"/>',
@@ -113,8 +114,21 @@ const GLYPH = {
 };
 
 /** The Mac's ProviderBadge: a rounded square in the provider's tint (gradient) with its symbol in white. */
+/** Which real logo a subscription shows (by provider), or null for the tinted glyph. */
+export function logoKey(account) {
+  const k = account?.kind ?? '';
+  if (k === 'claude' || k === 'api:anthropic') return 'claude';
+  if (k === 'codex') return 'openai';
+  if (k === 'gemini') return 'antigravity';
+  if (k === 'acp:gemini') return 'gemini';
+  if (/deepseek|dsh/.test(k)) return 'deepseek';
+  return null;
+}
+
 export function badge(account, size = 16) {
   if (!account) return '';
+  const logo = LOGO_SVG[logoKey(account)];
+  if (logo) return `<span class="badge-p logo" style="width:${size}px;height:${size}px" title="${(account.name ?? '').replace(/"/g, '&quot;')}"><svg viewBox="0 0 24 24" width="${size * 0.92}" height="${size * 0.92}" ${logo.attrs} xmlns="http://www.w3.org/2000/svg">${logo.body}</svg></span>`;
   const tint = account.tint || '#888';
   const glyph = GLYPH[account.symbol] ?? `<text x="12" y="16.5" font-size="13" font-weight="700" text-anchor="middle" fill="#fff" stroke="none">${(account.name ?? '?')[0]}</text>`;
   return `<span class="badge-p" style="width:${size}px;height:${size}px;border-radius:${size * 0.28}px;background:linear-gradient(180deg, color-mix(in srgb, ${tint} 88%, white), color-mix(in srgb, ${tint} 92%, black))">`

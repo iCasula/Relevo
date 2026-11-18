@@ -11,10 +11,14 @@ struct TranscriptItemView: View {
     var body: some View {
         switch item.kind {
         case .user:
-            UserBubble(text: item.text)
+            if let sender = item.from {
+                AgentMessageRow(item: item, sender: sender, currentThread: viewModel.threadId)
+            } else {
+                UserBubble(text: item.text)
+            }
         case .assistant:
             VStack(alignment: .leading, spacing: 6) {
-                if showsAuthor { AuthorLine(account: viewModel.account(item.accountId), model: item.model) }
+                if showsAuthor { AuthorLine(account: viewModel.account(item.accountId), model: item.model, date: item.date) }
                 MarkdownText(text: item.text)
                 let images = FileReference.imageReferences(in: item.text)
                 if !images.isEmpty {
@@ -239,6 +243,7 @@ private struct UserBubble: View {
 private struct AuthorLine: View {
     let account: RemoteAccount?
     let model: String?
+    let date: Date
 
     var body: some View {
         HStack(spacing: 6) {
@@ -248,6 +253,9 @@ private struct AuthorLine: View {
             Text(account?.modelName(model) ?? model ?? "")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            Text(date, format: Calendar.current.isDateInToday(date) ? .dateTime.hour().minute() : .dateTime.day().month(.abbreviated).hour().minute())
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.tertiary)
         }
     }
 }

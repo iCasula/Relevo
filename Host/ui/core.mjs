@@ -205,6 +205,19 @@ export function relative(at) {
   return rtf.format(Math.round(s / (30 * 86_400)), 'month');
 }
 
+/** Time of a message: "14:05" today, "ayer 14:05", "12 nov 14:05" (seconds since 1970). */
+export function clock(at) {
+  if (!at) return '';
+  const d = new Date(at * 1000), today = new Date();
+  const hm = d.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
+  const day = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diff = Math.round((day(today) - day(d)) / 86_400_000);
+  if (diff === 0) return hm;
+  if (diff === 1) return `ayer ${hm}`;
+  return `${d.toLocaleDateString('es-ES', { day: 'numeric', month: 'short', ...(d.getFullYear() !== today.getFullYear() ? { year: 'numeric' } : {}) })} ${hm}`;
+}
+export const fullDate = (at) => (at ? new Date(at * 1000).toLocaleString('es-ES', { dateStyle: 'full', timeStyle: 'medium' }) : '');
+
 export const usageColor = (p) => (p >= 90 ? 'var(--red)' : p >= 70 ? 'var(--orange)' : 'var(--usage-green)');
 
 export const EFFORTS = { none: 'Sin razonamiento', minimal: 'Mínimo', low: 'Bajo', medium: 'Medio', high: 'Alto', xhigh: 'Muy alto', max: 'Máximo', ultra: 'Ultra', disabled: 'Desactivado', enabled: 'Activado' };

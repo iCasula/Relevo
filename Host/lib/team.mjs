@@ -65,8 +65,16 @@ export function findMember(team, name) {
   return team.members.find((m) => norm(m.name) === n)
     ?? team.members.find((m) => m.role === 'executor' && norm(m.name).endsWith(n) && /^\d+$/.test(n))
     ?? team.members.find((m) => norm(ROLES[m.role].label) === n && team.members.filter((x) => x.role === m.role).length === 1)
+    // A name it had before you renamed it (the orchestrator may still use it for a while).
+    ?? team.members.find((m) => (m.formerNames ?? []).some((x) => norm(x) === n))
     ?? null;
 }
+
+/** A member's name as you typed it: one line, no quotes or angle brackets (it goes in para="…"), at most 32. */
+export function memberName(s) {
+  return String(s ?? '').replace(/["“”'<>]/g, '').replace(/\s+/g, ' ').trim().slice(0, 32);
+}
+const RESERVED = new Set(['relevo', 'usuario', 'tu', 'yo', 'todos', 'equipo']);
 
 // MARK: - What each role is told
 
@@ -343,6 +351,41 @@ export class Teams {
     if (!team) throw new Error('Equipo desconocido');
     const leadMember = team.members.find((m) => m.role === 'orchestrator');
     const news = [];
+    // Names first, all of them checked before anything changes.
+    const renames = new Map();
+    for (const c of changes.members ?? []) {
+      if (c.name === undefined) continue;
+      const m = team.members.find((x) => x.threadId === String(c.threadId).toUpperCase());
+      const name = memberName(c.name);
+      if (!m || name === m.name) continue;
+      if (!name) throw new Error('Cada agente necesita un nombre');
+      if (RESERVED.has(norm(name))) throw new Error(`«${name}» no puede ser el nombre de un agente`);
+      renames.set(m, name);
+    }
+    const finalName = (m) => renames.get(m) ?? m.name;
+    const leaving = new Set((changes.remove ?? []).map((id) => String(id).toUpperCase()));
+    const seen = new Set();
+    for (const m of team.members) {
+      if (leaving.has(m.threadId)) continue;
+      const n = norm(finalName(m));
+      if (seen.has(n)) throw new Error(`Dos agentes no pueden llamarse «${finalName(m)}»`);
+      seen.add(n);
+    }
+    for (const [m, name] of renames) {
+      const old = m.name;
+      m.formerNames = [...new Set([...(m.formerNames ?? []), old])].filter((x) => norm(x) !== norm(name)).slice(-4);
+      if (!m.formerNames.length) delete m.formerNames;
+      m.name = name;
+      const t = h.threads.get(m.threadId);
+      if (t) {
+        if (t.team) t.team = { ...t.team, name };
+        if (t.title?.startsWith(`${old} · `)) t.title = `${name} · ${t.title.slice(old.length + 3)}`;
+        t.teamPrimed = false; // its next message says who it is now
+        h._append(t, { id: h._uuid(), kind: 'notice', text: `${old} ahora se llama ${name}` });
+        h._changed(t);
+      }
+      news.push(m.role === 'orchestrator' ? `Ahora te llamas ${name}` : `${old} ahora se llama ${name}: usa ese nombre en para="…"`);
+    }
     const goal = String(changes.goal ?? '').trim();
     if (goal && goal !== team.goal) { team.goal = goal; news.push(`Nuevo objetivo:\n${goal}`); }
 

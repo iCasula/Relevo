@@ -6,8 +6,17 @@ import RelevoProtocol
 final class ThreadListViewModel {
     struct ProjectSection: Identifiable {
         let project: RemoteProject
+        /// Threads that aren't in a team.
         let threads: [RemoteThreadSummary]
+        /// Its teams, each with its members' threads in the team's order (orchestrator first).
+        var teams: [TeamSection] = []
         var id: UUID { project.id }
+    }
+
+    struct TeamSection: Identifiable {
+        let team: RemoteTeam
+        let threads: [RemoteThreadSummary]
+        var id: String { team.id }
     }
 
     let client: CompanionClient
@@ -31,10 +40,18 @@ final class ThreadListViewModel {
             if !query.isEmpty {
                 threads = threads.filter {
                     $0.title.localizedStandardContains(query) || ($0.preview?.localizedStandardContains(query) ?? false)
+                        || ($0.team?.name.localizedStandardContains(query) ?? false)
                 }
                 if threads.isEmpty { return nil }
             }
-            return ProjectSection(project: project, threads: threads.sorted { $0.updatedAt > $1.updatedAt })
+            // A team's threads go together under the team, most recently active team first.
+            let teams = (snapshot.hostTeams ?? []).filter { $0.projectId == project.id }.compactMap { team -> TeamSection? in
+                let members = team.members.compactMap { m in threads.first { $0.id == m.threadId } }
+                return members.isEmpty ? nil : TeamSection(team: team, threads: members)
+            }.sorted { ($0.threads.map(\.updatedAt).max() ?? .distantPast) > ($1.threads.map(\.updatedAt).max() ?? .distantPast) }
+            let inTeams = Set(teams.flatMap { $0.threads.map(\.id) })
+            return ProjectSection(project: project, threads: threads.filter { !inTeams.contains($0.id) }.sorted { $0.updatedAt > $1.updatedAt },
+                                  teams: teams)
         }
     }
 

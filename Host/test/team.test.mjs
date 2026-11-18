@@ -323,3 +323,25 @@ test("a timer that names an agent isn't cut short by another agent's report", as
   await next((m) => m.threadPatch?._0.id === boss && m.threadPatch._0.upserts.some((i) => i.kind === 'user' && (i.from?.name === 'Ejecutor 1' || i.text?.includes('[Ejecutor 1 ·'))), 25_000);
   assert.ok(Date.now() - sent > 10_000, `Ejecutor 1's report cut the timer for Ejecutor 2 (${Date.now() - sent} ms)`);
 });
+
+test('renaming a member: its thread, the orders that name it (new and old name) and duplicates refused', async () => {
+  const claude = snapshot.accounts.find((a) => a.kind === 'claude');
+  const r = await request('createTeam', { team: { projectId: demo(), goal: 'Nombres', orchestrator: { accountId: claude.id }, executors: [{ accountId: claude.id }, { accountId: claude.id }], researcher: null } });
+  assert.ok(r.ok, r.error);
+  const boss = r.threadId;
+  peer.send(Client.subscribe(boss));
+  await next(firstDone(boss));
+  const t0 = (await next((m) => m.snapshot?._0.hostTeams?.some((x) => x.goal === 'Nombres'))).snapshot._0.hostTeams.find((x) => x.goal === 'Nombres');
+  const [, ex1, ex2] = t0.members;
+  const dup = await request('updateTeam', { teamId: t0.id, changes: { members: [{ threadId: ex1.threadId, name: 'Ejecutor 2' }] } });
+  assert.equal(dup.ok, false, 'two members with one name');
+  const ok = await request('updateTeam', { teamId: t0.id, changes: { members: [{ threadId: ex1.threadId, name: 'Gráficos "GPU"' }, { threadId: ex2.threadId, fallback: 'wait' }] } });
+  assert.ok(ok.ok, ok.error);
+  const snap = (await next((m) => m.snapshot?._0.hostTeams?.find((x) => x.id === t0.id)?.members[1].name === 'Gráficos GPU')).snapshot._0;
+  assert.equal(snap.threads.find((x) => x.id === ex1.threadId).team.name, 'Gráficos GPU');
+  assert.match(snap.threads.find((x) => x.id === ex1.threadId).title, /^Gráficos GPU · /);
+  // The orchestrator still using the old name reaches the same agent.
+  peer.send(Client.send(boss, '<relevo:tarea para="Ejecutor 1">haz V</relevo:tarea>'));
+  const report = await next((m) => m.threadPatch?._0.id === boss && m.threadPatch._0.upserts.some((i) => i.kind === 'user' && (i.from?.name === 'Gráficos GPU' || i.text?.includes('[Gráficos GPU ·'))), 25_000);
+  assert.ok(report);
+});

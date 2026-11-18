@@ -10,6 +10,8 @@ struct ThreadDetailView: View {
     /// Bumped to go to the last line: on sending, or from the arrow button.
     @State private var jump = 0
     @AppStorage("showTurnUsage") private var showTurnUsage = true
+    @State private var showingTeam = false
+    @Environment(AppRouter.self) private var router
 
     init(client: CompanionClient, threadId: UUID) {
         _viewModel = State(initialValue: ThreadViewModel(client: client, threadId: threadId))
@@ -19,6 +21,17 @@ struct ThreadDetailView: View {
         transcript
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 ComposerArea(viewModel: viewModel)
+            }
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if let team = viewModel.team {
+                    TeamStrip(team: team, currentThread: viewModel.threadId, client: viewModel.client) { showingTeam = true }
+                }
+            }
+            .sheet(isPresented: $showingTeam) {
+                if let id = viewModel.team?.id {
+                    TeamSheet(teamId: id, client: viewModel.client) { router.open(thread: $0) }
+                        .presentationDetents([.medium, .large])
+                }
             }
             .navigationTitle(viewModel.title)
             .navigationSubtitle(viewModel.subtitle)

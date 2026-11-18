@@ -35,6 +35,8 @@ public enum ClientMessage: Codable, Sendable {
     case setLimitPlan(threadId: UUID, plan: RemoteLimitPlan?)
     /// About the limit in progress: relay now, don't relay, carry on now, don't wait.
     case limitAction(threadId: UUID, action: LimitAction)
+    /// A team of agents: pause, resume (Relevo hosts only; the Mac app has no teams).
+    case teamAction(teamId: String, action: String)
 }
 
 public enum LimitAction: String, Codable, Sendable {

@@ -127,10 +127,16 @@ public struct RemoteThreadSummary: Codable, Hashable, Identifiable, Sendable {
     public var preview: String?
     /// Waiting for background tasks it left running (not working). Older Macs don't send it.
     public var isWaiting: Bool?
+    /// Its place in a team of agents (Relevo hosts only).
+    public var team: RemoteTeamRef?
+    /// Something in it waits for you: the orchestrator talking to you, a question… (Relevo hosts only).
+    public var attention: RemoteAttention?
 
     public init(id: UUID, projectId: UUID, title: String, updatedAt: Date, isRunning: Bool, needsApproval: Bool,
-                accountId: UUID?, preview: String?, isWaiting: Bool? = nil) {
+                accountId: UUID?, preview: String?, isWaiting: Bool? = nil, team: RemoteTeamRef? = nil, attention: RemoteAttention? = nil) {
         self.isWaiting = isWaiting
+        self.team = team
+        self.attention = attention
         self.id = id
         self.projectId = projectId
         self.title = title
@@ -142,6 +148,99 @@ public struct RemoteThreadSummary: Codable, Hashable, Identifiable, Sendable {
     }
 }
 
+// MARK: - Teams of agents (sent by Relevo hosts; the Mac app has none)
+
+public enum RemoteTeamRole: String, Codable, Hashable, Sendable {
+    case orchestrator, executor, researcher, relevo, team
+    public init(from decoder: Decoder) throws {
+        self = RemoteTeamRole(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .team
+    }
+    public var label: String {
+        switch self {
+        case .orchestrator: "Orquestador"
+        case .executor: "Ejecutor"
+        case .researcher: "Investigador"
+        case .relevo: "Relevo"
+        case .team: "Equipo"
+        }
+    }
+    /// SF Symbol.
+    public var symbol: String {
+        switch self {
+        case .orchestrator: "crown.fill"
+        case .executor: "wrench.and.screwdriver"
+        case .researcher: "globe"
+        case .relevo: "arrow.triangle.2.circlepath"
+        case .team: "person.3"
+        }
+    }
+}
+
+/// A thread's place in a team.
+public struct RemoteTeamRef: Codable, Hashable, Sendable {
+    public var id: String
+    public var role: RemoteTeamRole
+    public var name: String
+}
+
+/// Why a thread wants you to look at it.
+public struct RemoteAttention: Codable, Hashable, Sendable {
+    public var kind: String
+    public var text: String?
+    public var at: Date?
+}
+
+/// Who sent a message that arrived in a thread: another agent of its team, or Relevo.
+public struct RemoteSender: Codable, Hashable, Sendable {
+    public var name: String
+    public var role: RemoteTeamRole
+    /// What kind of message: informe, pregunta, tarea, respuesta…
+    public var label: String?
+    /// The sender's thread.
+    public var threadId: UUID?
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try c.decode(String.self, forKey: .name)
+        role = (try? c.decode(RemoteTeamRole.self, forKey: .role)) ?? .team
+        label = try? c.decodeIfPresent(String.self, forKey: .label)
+        threadId = (try? c.decodeIfPresent(String.self, forKey: .threadId)).flatMap { UUID(uuidString: $0) }
+    }
+}
+
+public struct RemoteTeamMember: Codable, Hashable, Identifiable, Sendable {
+    public struct Task: Codable, Hashable, Sendable {
+        public var text: String?
+        /// en curso, hecha, bloqueado, esperando…
+        public var state: String?
+        public var since: Date?
+    }
+    public var threadId: UUID
+    public var role: RemoteTeamRole
+    public var name: String
+    public var notes: String?
+    public var accountId: UUID?
+    public var model: String?
+    public var task: Task?
+    /// Messages kept for it until its next task.
+    public var stash: Int?
+    public var id: UUID { threadId }
+}
+
+public struct RemoteTeam: Codable, Hashable, Identifiable, Sendable {
+    public var id: String
+    public var projectId: UUID
+    public var goal: String
+    /// active, paused…
+    public var status: String
+    /// Messages between agents held while paused.
+    public var held: Int?
+    public var members: [RemoteTeamMember]
+
+    public var isPaused: Bool { status == "paused" }
+    public var lead: RemoteTeamMember? { members.first { $0.role == .orchestrator } }
+}
+
 /// Everything except thread transcripts: sent on connect and whenever it changes.
 public struct RemoteSnapshot: Codable, Hashable, Sendable {
     public var macName: String
@@ -151,15 +250,32 @@ public struct RemoteSnapshot: Codable, Hashable, Sendable {
     public var autoRelay: Bool
     /// The Mac can update the Live Activity through APNs while the app is closed.
     public var pushReady: Bool?
+    /// Teams of agents (Relevo hosts only).
+    public var hostTeams: [RemoteTeam]?
 
     public init(macName: String, accounts: [RemoteAccount], projects: [RemoteProject], threads: [RemoteThreadSummary], autoRelay: Bool,
-                pushReady: Bool?) {
+                pushReady: Bool?, hostTeams: [RemoteTeam]? = nil) {
+        self.hostTeams = hostTeams
         self.macName = macName
         self.accounts = accounts
         self.projects = projects
         self.threads = threads
         self.autoRelay = autoRelay
         self.pushReady = pushReady
+    }
+}
+
+extension RemoteSnapshot {
+    /// Teams are extra: if they don't decode (a newer host), the rest of the snapshot still does.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        macName = try c.decode(String.self, forKey: .macName)
+        accounts = try c.decode([RemoteAccount].self, forKey: .accounts)
+        projects = try c.decode([RemoteProject].self, forKey: .projects)
+        threads = try c.decode([RemoteThreadSummary].self, forKey: .threads)
+        autoRelay = try c.decode(Bool.self, forKey: .autoRelay)
+        pushReady = try c.decodeIfPresent(Bool.self, forKey: .pushReady)
+        hostTeams = try? c.decodeIfPresent([RemoteTeam].self, forKey: .hostTeams)
     }
 }
 
@@ -220,6 +336,8 @@ public struct RemoteItem: Codable, Hashable, Identifiable, Sendable {
     public var answers: [String: String]?
     /// Tokens and cost of the turn this item closes.
     public var usage: RemoteTurnUsage?
+    /// A message from another agent of the team (or Relevo) instead of you (Relevo hosts only).
+    public var from: RemoteSender?
 
     public init(id: String, kind: Kind, text: String, title: String?, output: String?, toolName: String?, toolState: ToolState?,
                 accountId: UUID?, model: String?, date: Date, options: [RemoteOption]?, resolution: String?,

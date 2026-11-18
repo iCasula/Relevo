@@ -33,7 +33,7 @@ const MODES = new Set(['ask', 'autoEdit', 'full', 'plan']);
 const PLAN_MODES = new Set(['ask', 'mostQuota', 'chain', 'wait']);
 /** What this host does beyond the shared protocol; clients show those controls only when listed. */
 export const HOST_FEATURES = ['teams', 'projects', 'threads', 'git', 'images', 'usage', 'login', 'settings', 'limitPlans', 'history', 'titles', 'accounts',
-  'turns', 'worktrees', 'pullRequests', 'suggest', 'quickActions', 'attachments'];
+  'turns', 'worktrees', 'pullRequests', 'suggest', 'quickActions', 'attachments', 'teamRename'];
 const IMAGE_UPLOAD = /\.(png|jpe?g|gif|webp)$/i;
 
 /** Providers this host can run. Each account is one provider with its own CLI login on this machine. */
