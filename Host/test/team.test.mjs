@@ -345,3 +345,45 @@ test('renaming a member: its thread, the orders that name it (new and old name) 
   const report = await next((m) => m.threadPatch?._0.id === boss && m.threadPatch._0.upserts.some((i) => i.kind === 'user' && (i.from?.name === 'Gráficos GPU' || i.text?.includes('[Gráficos GPU ·'))), 25_000);
   assert.ok(report);
 });
+
+test('decisions: the orchestrator keeps them, every agent hears them, and they survive a fresh session', async () => {
+  const claude = snapshot.accounts.find((a) => a.kind === 'claude');
+  const r = await request('createTeam', { team: { projectId: demo(), goal: 'Decisiones', orchestrator: { accountId: claude.id }, executors: [{ accountId: claude.id }], researcher: null } });
+  assert.ok(r.ok, r.error);
+  const boss = r.threadId;
+  peer.send(Client.subscribe(boss));
+  await next(firstDone(boss));
+  // The echo orchestrator repeats this: a decision and a task in one reply.
+  peer.send(Client.send(boss, '<relevo:decision>Usamos shadPS4 como referencia para GNM</relevo:decision> <relevo:tarea para="Ejecutor">haz W</relevo:tarea>'));
+  const team = (await next((m) => m.snapshot?._0.hostTeams?.find((x) => x.goal === 'Decisiones')?.decisions?.length === 1)).snapshot._0.hostTeams.find((x) => x.goal === 'Decisiones');
+  assert.equal(team.decisions[0].text, 'Usamos shadPS4 como referencia para GNM');
+  // The executor's report comes back; the decision went in its first message (its preamble).
+  await next((m) => m.threadPatch?._0.id === boss && m.threadPatch._0.upserts.some((i) => i.kind === 'user' && (i.from?.name === 'Ejecutor' || i.text?.includes('[Ejecutor ·'))), 25_000);
+  // You add one and withdraw it.
+  const add = await request('teamDecisions', { teamId: team.id, add: 'Sin audio por ahora' });
+  assert.ok(add.ok, add.error);
+  const dup = await request('teamDecisions', { teamId: team.id, add: 'sin  audio por ahora' });
+  assert.equal(dup.ok, false);
+  const rm = await request('teamDecisions', { teamId: team.id, remove: '2' });
+  assert.ok(rm.ok, rm.error);
+  await next((m) => { const x = m.snapshot?._0.hostTeams?.find((y) => y.id === team.id); return x && x.decisions.length === 1 && x.decisions[0].id === 1; });
+});
+
+test('a fresh orchestrator session gets the decisions, the board and the last reports', async () => {
+  const { preamble } = await import('../lib/team.mjs');
+  const host = {
+    threads: new Map([['L', { projectPath: '/p' }], ['E', { projectPath: '/p' }]]),
+    accountsById: new Map(), projects: () => [], _modelName: () => 'm', _rt: () => ({ approvals: new Map() }),
+    teams: { _status: () => 'Estado del equipo: Ejecutor libre' },
+  };
+  const team = { goal: 'G', decisions: [{ id: 1, text: 'Usamos shadPS4' }], members: [
+    { threadId: 'L', role: 'orchestrator', name: 'Orquestador' },
+    { threadId: 'E', role: 'executor', name: 'Ejecutor', lastReport: { text: 'ESTADO: hecho, menú carga', at: 0 } },
+  ] };
+  const fresh = preamble(host, team, team.members[0], true);
+  assert.match(fresh, /#1 Usamos shadPS4/);
+  assert.match(fresh, /Estado del equipo: Ejecutor libre/);
+  assert.match(fresh, /Ejecutor \(.*\): ESTADO: hecho, menú carga/);
+  assert.doesNotMatch(preamble(host, team, team.members[0], false), /Último informe/);
+  assert.match(preamble(host, team, team.members[1]), /#1 Usamos shadPS4/);
+});

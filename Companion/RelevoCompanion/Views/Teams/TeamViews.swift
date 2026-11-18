@@ -179,6 +179,7 @@ struct TeamSheet: View {
                     } footer: {
                         Text("Cambia nombres, modelos o el plan si se acaba la cuota desde Relevo en el ordenador.")
                     }
+                    DecisionsSection(team: team, client: client)
                     Section {
                         if team.isPaused {
                             Button("Reanudar el equipo", systemImage: "play.fill") { client.send(.teamAction(teamId: team.id, action: "resume")) }
@@ -204,6 +205,59 @@ struct TeamSheet: View {
                 ToolbarItem(placement: .confirmationAction) { Button("Listo") { dismiss() } }
             }
         }
+    }
+}
+
+/// What the team decided: Relevo reminds every agent. Swipe to withdraw one, or add your own.
+private struct DecisionsSection: View {
+    let team: RemoteTeam
+    let client: CompanionClient
+    @State private var draft = ""
+
+    var body: some View {
+        Section {
+            ForEach(team.decisions ?? []) { decision in
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text("#\(decision.id)")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(decision.text)
+                            .font(.callout)
+                            .textSelection(.enabled)
+                        Text(decision.by == "usuario" ? "Tú" : decision.by ?? "")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .swipeActions {
+                    Button("Retirar", systemImage: "trash", role: .destructive) {
+                        client.send(.teamDecisions(teamId: team.id, add: nil, remove: String(decision.id)))
+                    }
+                    .disabled(!client.isConnected)
+                }
+            }
+            HStack {
+                TextField("Añadir una decisión", text: $draft, axis: .vertical)
+                    .lineLimit(1...3)
+                    .submitLabel(.done)
+                    .onSubmit(add)
+                Button("Añadir", systemImage: "plus.circle.fill", action: add)
+                    .labelStyle(.iconOnly)
+                    .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !client.isConnected)
+            }
+        } header: {
+            Text("Decisiones")
+        } footer: {
+            Text("Lo que ya está decidido. Relevo se lo recuerda a cada agente, también cuando empieza una sesión nueva o cambia de proveedor.")
+        }
+    }
+
+    private func add() {
+        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        client.send(.teamDecisions(teamId: team.id, add: text, remove: nil))
+        draft = ""
     }
 }
 

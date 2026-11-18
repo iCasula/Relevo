@@ -25,9 +25,11 @@ export const ROLES = {
 };
 
 /** Bumped when the agents' instructions change: teams made before get them again. */
-const RULES_VERSION = 4;
+const RULES_VERSION = 5;
 /** The orchestrator gets a fresh session (with a brief of its own thread) past any of these. */
-const LEAD_REFRESH = { context: 150_000, conversation: 1_200_000, turns: 40 };
+const LEAD_REFRESH = { context: 150_000, conversation: 1_200_000, turns: 60, share: 0.6 };
+/** Decisions the team keeps (the oldest go first past this). */
+const DECISIONS_MAX = 40;
 
 /** Automatic messages in a row (with no message from you) before the team pauses itself. */
 export const AUTO_LIMIT = 60;
@@ -35,7 +37,7 @@ const REPORT_MAX = 2_500;
 
 // MARK: - Orders in the agents' replies
 
-const TAG = /<relevo:(tarea|urgente|investigar|respuesta|pregunta|integrar|fin)\b([^>]*?)(?:\/>|>([\s\S]*?)<\/relevo:\1\s*>)/gi;
+const TAG = /<relevo:(tarea|urgente|investigar|respuesta|pregunta|integrar|fin|decisi[oó]n|descartar)\b([^>]*?)(?:\/>|>([\s\S]*?)<\/relevo:\1\s*>)/gi;
 const FENCED = /```[\s\S]*?(?:```|$)/g;
 
 /** The orders in a reply, outside code blocks: [{ type, to, body }]. */
@@ -46,7 +48,7 @@ export function parseOrders(text) {
     // para="…" (or de="…" for integrar) anywhere among the attributes, quoted or not.
     const attr = /\b(?:para|de)\s*=\s*(?:["“']([^"”']+)["”']|([^\s"”'>/]+))/i.exec(m[2]);
     const to = (attr?.[1] ?? attr?.[2])?.trim() || null;
-    out.push({ type: m[1].toLowerCase(), to, body: (m[3] ?? '').trim() });
+    out.push({ type: m[1].toLowerCase().replace('decisión', 'decision'), to, body: (m[3] ?? '').trim() });
   }
   return out;
 }
@@ -111,7 +113,20 @@ const noteOf = (x) => String(x ?? '').trim().slice(0, 2000) || undefined;
 /** What you wrote for this agent when creating the team, if anything. */
 const notesOf = (member) => (member.notes ? `\nIndicaciones del usuario para ti:\n${member.notes}\n` : '');
 
-export function preamble(host, team, member) {
+/** The team's decisions, for an agent starting (or starting over): what not to reopen. */
+export function decisionsBlock(team) {
+  const list = team.decisions ?? [];
+  if (!list.length) return '';
+  return `\nDecisiones del equipo (ya tomadas: síguelas y no las reabras salvo que aparezca evidencia nueva que las contradiga; en ese caso dilo antes de cambiar de rumbo):\n${list.map((d) => `#${d.id} ${d.text}`).join('\n')}\n`;
+}
+
+/** Where the team stood when the orchestrator starts a fresh session: the board and each agent's last report. */
+function boardBlock(host, team, lead) {
+  const reports = team.members.filter((m) => m !== lead && m.lastReport).map((m) => `- ${m.name} (${new Date(m.lastReport.at * 1000).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}): ${m.lastReport.text}`);
+  return `\nDónde está el equipo ahora (vienes de una sesión anterior; esto y las decisiones son lo que importa de ella):\n${host.teams._status(team, lead)}\n${reports.length ? `Último informe de cada uno:\n${reports.join('\n')}\n` : ''}`;
+}
+
+export function preamble(host, team, member, fresh = false) {
   const t = host.threads.get(member.threadId);
   const roster = team.members.map((m) => rosterLine(host, team, m)).join('\n');
   const executors = team.members.filter((m) => m.role === 'executor');
@@ -128,6 +143,7 @@ Para dar órdenes, escríbelas tal cual en tu respuesta (fuera de bloques de có
 <relevo:tarea para="${executors[0]?.name ?? 'Ejecutor 1'}">qué hacer, criterio de terminado, ficheros o pistas</relevo:tarea>
 ${researcher ? `<relevo:investigar para="${executors[0]?.name ?? 'Ejecutor 1'}">qué averiguar y para qué</relevo:investigar>  (para= es opcional: a quién más le llega el informe)\n` : ''}<relevo:respuesta para="${executors[0]?.name ?? 'Ejecutor 1'}">respuesta a su duda o cómo desbloquearse</relevo:respuesta>
 ${executors.some((e) => host.threads.get(e.threadId)?.worktree) ? '<relevo:integrar de="Ejecutor 2"/>  fusiona en la rama principal el worktree de un ejecutor que ha terminado (lo hace Relevo, sin que tú toques git).\n' : ''}<relevo:fin>resumen para el usuario</relevo:fin>  cuando el objetivo esté cumplido y revisado.
+<relevo:decision>una decisión firme, en una línea (qué y por qué)</relevo:decision>  Relevo la guarda y se la recuerda a todo el equipo, también a ti en tus sesiones nuevas. Úsala para lo que no debe reabrirse: tecnologías y proyectos elegidos (p. ej. «usamos shadPS4 como referencia para GNM»), enfoques descartados y por qué, criterios del usuario. <relevo:descartar>3</relevo:descartar> retira la decisión #3 si deja de valer.
 
 <relevo:urgente para="${executors[0]?.name ?? 'Ejecutor 1'}">…</relevo:urgente>  solo si lo que está haciendo ahora es claramente erróneo o ya no sirve: interrumpe su turno.
 
@@ -140,7 +156,7 @@ Cómo funciona la entrega: a un agente que está trabajando solo le llega lo urg
 - Tareas pequeñas y comprobables. No des a dos ejecutores los mismos ficheros a la vez.
 ${researcher ? `- Antes de que un ejecutor construya algo que ya puede existir (una librería, un proyecto open source, un ejemplo), o en cuanto lleve dos intentos fallidos con el mismo problema, pide al ${researcher.name} que lo busque, y pasa al ejecutor la recomendación concreta.\n` : '- Si un ejecutor lleva dos intentos fallidos con el mismo problema, para y busca otro enfoque (librerías o proyectos open source que ya lo resuelvan) antes de insistir.\n'}- Responde tú las dudas que puedas. Si solo el usuario puede decidir, pregúntaselo en tu respuesta sin dar órdenes y espera.
 - Sé breve y gasta poco: todos ven el código en disco, no lo copies en los mensajes; no leas el proyecto entero, apóyate en los informes y lee solo lo que necesites para decidir.
-${notesOf(member)}
+${notesOf(member)}${decisionsBlock(team)}${fresh ? boardBlock(host, team, member) : ''}
 Objetivo del usuario:
 ${team.goal}
 </relevo_equipo>
@@ -158,7 +174,7 @@ Tu trabajo es averiguar, no implementar: no modifiques ficheros del proyecto.
 - Busca en internet (buscador, documentación, GitHub, issues, foros) y en el código del proyecto lo que acorte el camino: librerías, proyectos open source, ejemplos y soluciones a errores conocidos.
 - Responde con un informe accionable y corto (unas 40 líneas como mucho): las opciones que recomiendas con enlace, licencia y lo madura que parece cada una, por qué encaja aquí, cómo aplicarla en pasos concretos, y los riesgos. Nada de volcados de código largos.
 - Si la petición no está clara, termina con <relevo:pregunta>tu duda</relevo:pregunta>.
-${notesOf(member)}</relevo_equipo>
+${notesOf(member)}${decisionsBlock(team)}</relevo_equipo>
 
 `;
   }
@@ -172,7 +188,7 @@ ${roster}
 - Si dejas algo en segundo plano (una compilación, un emulador) y terminas el turno para esperarlo, no hace falta que informes: Relevo lo sabe y el orquestador no te escribirá hasta que acabes.
 - Si te bloqueas o necesitas una decisión, termina tu respuesta con <relevo:pregunta>tu duda concreta</relevo:pregunta> y espera la respuesta.${researcher ? ` Si llevas dos intentos fallidos con el mismo problema, pregunta: el ${researcher.name} puede buscar soluciones que ya existan.` : ''}
 - Otros agentes pueden estar trabajando en el mismo proyecto: toca solo lo que te pidan.
-${notesOf(member)}</relevo_equipo>
+${notesOf(member)}${decisionsBlock(team)}</relevo_equipo>
 
 `;
 }
@@ -509,9 +525,17 @@ export class Teams {
   promptPrefix(thread, freshSession) {
     const team = this.of(thread);
     const member = this.memberOf(thread);
-    if (!team || !member || (thread.teamPrimed && !freshSession)) return '';
+    if (!team || !member) return '';
+    // Notes for the orchestrator (decisions you set or withdrew…) also go with a message you write it.
+    let notes = '';
+    if (member.role === 'orchestrator' && team.notes?.length) {
+      notes = `${team.notes.map((n) => `(${n})`).join('\n')}\n\n`;
+      team.notes = [];
+    }
+    if (thread.teamPrimed && !freshSession) return notes;
     thread.teamPrimed = true;
-    return preamble(this.host, team, member);
+    member.decisionsSeen = team.nextDecision ?? 0; // the preamble lists them all
+    return preamble(this.host, team, member, !!freshSession && member.role === 'orchestrator') + notes;
   }
 
   /**
@@ -548,7 +572,7 @@ export class Teams {
       this._dispatch(team, member, thread, orders);
       // A turn with no orders is the orchestrator talking to you (a question, a decision, a summary).
       const said = withoutOrders(text).trim();
-      if (!orders.length && said && team.status !== 'done') this._attention(thread, 'orquestador', said);
+      if (!orders.some((o) => !['decision', 'descartar'].includes(o.type)) && said && team.status !== 'done') this._attention(thread, 'orquestador', said);
       team.leadTurns = (team.leadTurns ?? 0) + 1;
       this._maybeRefreshLead(team, thread);
       h._saveState();
@@ -582,6 +606,8 @@ export class Teams {
     const kind = member.role === 'researcher' ? 'informe de investigación' : errors?.length && !body ? 'error'
       : state === 'esperando' ? 'espera (no necesita respuesta)' : 'informe';
     this._setTask(member, state === 'bloqueado' ? 'bloqueado' : state === 'esperando' ? 'esperando' : 'hecha');
+    // What it said last, for the orchestrator's next fresh session.
+    member.lastReport = { text: clip(headTail(elideCode(body, 4), 900).replace(/\n{2,}/g, '\n'), 900), at: Date.now() / 1000 };
     // A researcher's report also goes straight to whoever it was for, if it's free to read it now.
     const forName = member.role === 'researcher' ? member.reportFor : null;
     member.reportFor = null;
@@ -649,10 +675,56 @@ export class Teams {
    * A long orchestrator session costs on every turn: past a size it starts a new one, with a brief of its
    * own thread (goal, what each turn did, the latest exchange) and the team instructions again.
    */
+  /** Keeps a decision for the whole team (from the orchestrator or you). Returns it, or null if it was already there. */
+  addDecision(team, text, by) {
+    const clean = clip(String(text ?? '').replace(/\s+/g, ' ').trim(), 400);
+    if (!clean) return null;
+    team.decisions ??= [];
+    if (team.decisions.some((d) => norm(d.text) === norm(clean))) return null;
+    team.nextDecision = (team.nextDecision ?? 0) + 1;
+    const d = { id: team.nextDecision, text: clean, by, at: Date.now() / 1000 };
+    team.decisions.push(d);
+    if (team.decisions.length > DECISIONS_MAX) team.decisions.splice(0, team.decisions.length - DECISIONS_MAX);
+    this.host._saveState();
+    this.host._broadcastSnapshot();
+    return d;
+  }
+
+  /** Withdraws decisions by number ("3", "#3, #5"). */
+  dropDecisions(team, which) {
+    const ids = new Set(String(which ?? '').match(/\d+/g)?.map(Number) ?? []);
+    const gone = (team.decisions ?? []).filter((d) => ids.has(d.id));
+    if (!gone.length) return [];
+    team.decisions = team.decisions.filter((d) => !ids.has(d.id));
+    this.host._saveState();
+    this.host._broadcastSnapshot();
+    return gone;
+  }
+
+  /** You add or withdraw a decision from the apps: the orchestrator hears it with its next message. */
+  editDecisions(teamId, { add, remove } = {}) {
+    const team = this.byId(teamId);
+    if (!team) throw new Error('Equipo desconocido');
+    const lead = team.members.find((m) => m.role === 'orchestrator');
+    if (add) {
+      const d = this.addDecision(team, add, 'usuario');
+      if (!d) throw new Error(String(add).trim() ? 'Esa decisión ya está guardada' : 'Escribe la decisión');
+      team.notes = [...(team.notes ?? []), `El usuario ha fijado la decisión #${d.id}: ${d.text}`];
+    }
+    if (remove !== undefined && remove !== null) {
+      const gone = this.dropDecisions(team, String(remove));
+      if (gone.length) team.notes = [...(team.notes ?? []), `El usuario ha retirado ${gone.map((d) => `la decisión #${d.id} («${clip(d.text, 120)}»)`).join(' y ')}`];
+    }
+    if (lead) lead.decisionsSeen = team.nextDecision ?? 0; // told through the notes instead
+    return {};
+  }
+
   _maybeRefreshLead(team, t) {
     const h = this.host;
     const r = h._rt(t);
-    const big = (r.context?.used ?? 0) > LEAD_REFRESH.context || (r.sessionTokens ?? 0) > LEAD_REFRESH.conversation || team.leadTurns >= LEAD_REFRESH.turns;
+    // A model with a small window renews sooner, one with a big window no later than LEAD_REFRESH.context.
+    const contextLimit = Math.min(LEAD_REFRESH.context, (r.context?.window ?? Infinity) * LEAD_REFRESH.share);
+    const big = (r.context?.used ?? 0) > contextLimit || (r.sessionTokens ?? 0) > LEAD_REFRESH.conversation || team.leadTurns >= LEAD_REFRESH.turns;
     if (!big) return;
     team.leadTurns = 0;
     h.agents.get(t.id)?.close();
@@ -663,7 +735,7 @@ export class Teams {
     t.teamPrimed = false;
     r.sessionTokens = 0;
     r.context = null;
-    h._append(t, { id: h._uuid(), kind: 'notice', text: 'Sesión del orquestador renovada para no arrastrar todo el contexto: el siguiente mensaje lleva un resumen de lo hecho' });
+    h._append(t, { id: h._uuid(), kind: 'notice', text: `Sesión del orquestador renovada para no arrastrar todo el contexto: el siguiente mensaje lleva un resumen, el estado del equipo${team.decisions?.length ? ` y las ${team.decisions.length} decisiones guardadas` : ''}` });
     h._changed(t);
   }
 
@@ -765,6 +837,23 @@ export class Teams {
         );
         return;
       }
+      case 'decision': {
+        const d = this.addDecision(team, o.body, lead.name);
+        if (d) {
+          lead.decisionsSeen = d.id;
+          h._append(leadThread, { id: h._uuid(), kind: 'notice', text: `Decisión #${d.id} guardada: ${clip(d.text, 200)}` });
+          h._changed(leadThread);
+        }
+        return;
+      }
+      case 'descartar': {
+        const gone = this.dropDecisions(team, o.body || o.to);
+        if (gone.length) {
+          h._append(leadThread, { id: h._uuid(), kind: 'notice', text: `Decisión retirada: ${gone.map((d) => `#${d.id}`).join(', ')}` });
+          h._changed(leadThread);
+        }
+        return;
+      }
       case 'fin': {
         team.status = 'done';
         this._attention(leadThread, 'fin', o.body || 'Objetivo cumplido');
@@ -809,9 +898,17 @@ export class Teams {
       team.notes = [];
     }
     const header = `[${from.name}${from.label ? ` · ${from.label}` : ''}]`;
+    // Decisions taken since this agent last heard them (unless its next message brings the whole preamble).
+    let fresh = '';
+    const seen = member.decisionsSeen ?? 0;
+    const news = (team.decisions ?? []).filter((d) => d.id > seen);
+    if (news.length && t.teamPrimed) {
+      fresh = `(Decisiones nuevas del equipo: síguelas.\n${news.map((d) => `#${d.id} ${d.text}`).join('\n')})\n\n`;
+    }
+    member.decisionsSeen = team.nextDecision ?? 0;
     // The orchestrator always sees where the team stands, so it doesn't pile orders on someone busy.
     const status = member.role === 'orchestrator' ? `\n\n(${this._status(team, member)})` : '';
-    const prompt = `${header}\n${text}${status}`;
+    const prompt = `${fresh}${header}\n${text}${status}`;
     const meta = { from: { threadId: from.threadId ?? null, name: from.name, role: from.role, label: from.label ?? null } };
     const r = h._rt(t);
     if (urgent && r.isRunning && member.role !== 'orchestrator') {

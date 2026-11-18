@@ -1056,6 +1056,41 @@ export function openTeamEditor(hostId, teamId) {
   draw();
 }
 
+// MARK: - Team decisions
+
+/** What the team has decided: Relevo reminds every agent, also after a fresh session or a relay. */
+export function openTeamDecisions(hostId, teamId) {
+  const s = openSheet({ width: 620 });
+  let busy = false;
+  const draw = () => {
+    const team = snap(hostId)?.hostTeams?.find((x) => x.id === teamId);
+    if (!team) { s.close(); return; }
+    const list = team.decisions ?? [];
+    const when = (at) => new Date(at * 1000).toLocaleString('es-ES', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+    s.el.innerHTML = `<div class="sheet-title">${icon('checklist', { size: 16 })} Decisiones del equipo</div>
+      <div class="sheet-sub">Lo que ya está decidido y no debe reabrirse. El orquestador las guarda con <code>&lt;relevo:decision&gt;</code>; Relevo se las da a cada agente nuevo, en cada sesión renovada y en cada relevo de proveedor, y avisa a los demás de las nuevas.</div>
+      <div class="decisions">${list.length ? list.map((d) => `<div class="decision"><span class="d-id">#${d.id}</span><div class="grow"><div class="d-text selectable">${esc(d.text)}</div><div class="caption">${d.by === 'usuario' ? 'Tú' : esc(d.by ?? '')} · ${esc(when(d.at))}</div></div><button class="tb-btn" data-drop="${d.id}" title="Retirar esta decisión (se avisa al orquestador)">${icon('trash', { size: 12 })}</button></div>`).join('')
+        : '<div class="caption" style="padding:10px 2px">Aún no hay ninguna. Añade las que ya estén claras (por ejemplo, qué proyecto usáis de base) y el orquestador irá guardando las suyas.</div>'}</div>
+      <div class="team-line" style="margin-top:10px"><input class="field-input grow" data-new placeholder="Una decisión, en una línea: qué y por qué" maxlength="400"><button class="btn primary" data-add>Añadir</button></div>
+      <div class="sheet-buttons"><span class="grow"></span><button class="btn" data-close>Listo</button></div>`;
+    const $ = (q) => s.el.querySelector(q);
+    const send = async (body) => {
+      if (busy) return;
+      busy = true;
+      const r = await request(hostId, { teamDecisions: { teamId, ...body } });
+      busy = false;
+      if (!r.ok) { toast(r.error); return; }
+      setTimeout(draw, 200); setTimeout(draw, 800); // the snapshot with the change is on its way
+    };
+    $('[data-add]').onclick = () => { const v = $('[data-new]').value.trim(); if (v) send({ add: v }); else $('[data-new]').focus(); };
+    $('[data-new]').onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); $('[data-add]').click(); } };
+    s.el.querySelectorAll('[data-drop]').forEach((b) => { b.onclick = () => send({ remove: b.dataset.drop }); });
+    $('[data-close]').onclick = s.close;
+    setTimeout(() => $('[data-new]')?.focus(), 0);
+  };
+  draw();
+}
+
 // MARK: - Traza (WorkStateSheet)
 
 export async function openTraza(hostId, threadId) {

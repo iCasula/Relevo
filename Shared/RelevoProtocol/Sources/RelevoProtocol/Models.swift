@@ -227,6 +227,14 @@ public struct RemoteTeamMember: Codable, Hashable, Identifiable, Sendable {
     public var id: UUID { threadId }
 }
 
+public struct RemoteTeamDecision: Codable, Hashable, Identifiable, Sendable {
+    public var id: Int
+    public var text: String
+    /// The orchestrator's name, or "usuario".
+    public var by: String?
+    public var at: Date?
+}
+
 public struct RemoteTeam: Codable, Hashable, Identifiable, Sendable {
     public var id: String
     public var projectId: UUID
@@ -236,6 +244,8 @@ public struct RemoteTeam: Codable, Hashable, Identifiable, Sendable {
     /// Messages between agents held while paused.
     public var held: Int?
     public var members: [RemoteTeamMember]
+    /// What the team decided (Relevo reminds every agent of it).
+    public var decisions: [RemoteTeamDecision]?
 
     public var isPaused: Bool { status == "paused" }
     public var lead: RemoteTeamMember? { members.first { $0.role == .orchestrator } }

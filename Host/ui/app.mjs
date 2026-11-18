@@ -445,6 +445,7 @@ function renderTeamBar() {
     html = `<span class="team-label" title="${esc(team.goal)}">${icon('person.3.sequence', { size: 13 })}Equipo</span>${chips}<span class="grow"></span>${status}`
       + (team.status === 'paused' ? `<button class="btn small" data-team-act="resume">${icon('play.rectangle', { size: 11 })} Reanudar</button>`
         : team.status === 'active' ? `<button class="btn small" data-team-act="pause" title="Los mensajes entre agentes esperan; tú puedes seguir escribiendo">${icon('pause.circle', { size: 11 })} Pausar</button>` : '')
+      + (has(hostId, 'teamDecisions') ? `<button class="tb-btn team-dec" data-team-decisions title="Decisiones del equipo${team.decisions?.length ? ` (${team.decisions.length})` : ''}: Relevo se las recuerda a todos los agentes, también tras renovar o relevar una sesión">${icon('checklist', { size: 13 })}${team.decisions?.length ? `<span>${team.decisions.length}</span>` : ''}</button>` : '')
       + `<button class="tb-btn" data-team-edit title="Editar el equipo: modelos, indicaciones, miembros">${icon('pencil', { size: 12 })}</button>`
       + `<button class="tb-btn" data-team-menu title="Más">${icon('chevron.down', { size: 10 })}</button>`;
   }
@@ -1113,6 +1114,7 @@ document.addEventListener('click', (e) => {
     return;
   }
   if (d.teamMenu !== undefined) { teamMenu(el); return; }
+  if (d.teamDecisions !== undefined) { const id = summaryOf(hostId, threadId)?.team?.id; if (id) sheets.openTeamDecisions(hostId, id); return; }
   if (d.teamEdit !== undefined) { const id = summaryOf(hostId, threadId)?.team?.id; if (id) sheets.openTeamEditor(hostId, id); return; }
   if (d.approve) { sendTo(hostId, Client.approve(threadId, d.approve, d.option)); return; }
   if (d.qOpt) {

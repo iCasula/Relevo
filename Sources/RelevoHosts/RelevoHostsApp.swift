@@ -165,10 +165,13 @@ final class HostsModel: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
         web.uiDelegate = self
         web.allowsBackForwardNavigationGestures = false
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 820),
-                         styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+                         styleMask: [.titled, .closable, .miniaturizable, .resizable],
                          backing: .buffered, defer: false)
+        // A real title bar: the page never sits under the window buttons, and the window moves, resizes,
+        // zooms (double-click or the green button) and goes full screen like any other.
         w.title = "Relevo Hosts"
-        w.titlebarAppearsTransparent = true
+        w.titleVisibility = .visible
+        w.collectionBehavior.insert(.fullScreenPrimary)
         w.isReleasedWhenClosed = false
         w.minSize = NSSize(width: 820, height: 520)
         w.contentView = web

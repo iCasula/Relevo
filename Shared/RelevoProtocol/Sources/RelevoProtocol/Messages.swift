@@ -37,6 +37,8 @@ public enum ClientMessage: Codable, Sendable {
     case limitAction(threadId: UUID, action: LimitAction)
     /// A team of agents: pause, resume (Relevo hosts only; the Mac app has no teams).
     case teamAction(teamId: String, action: String)
+    /// Add a decision to a team, or withdraw one by number (Relevo hosts only).
+    case teamDecisions(teamId: String, add: String?, remove: String?)
 }
 
 public enum LimitAction: String, Codable, Sendable {
