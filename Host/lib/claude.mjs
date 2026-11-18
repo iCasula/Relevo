@@ -461,7 +461,7 @@ export class FakeSession extends EventEmitter {
     // «temporizador …»: says it (orders included) and then waits on a 12 s timer, unless interrupted.
     if (/^temporizador/i.test(text)) {
       this.emit('textDelta', `t${turn}`, `Eco (${this.model}, ${this.mode}): ${text}`);
-      this.emit('toolStarted', `sched${turn}`, 'schedule', 'schedule', {});
+      this.emit('toolStarted', `sched${turn}`, 'schedule', 'schedule', { prompt: text.replace(/<relevo:[\s\S]*$/, '').trim() });
       setTimeout(() => {
         if (!this.turnActive || this.n !== turn) return;
         this.emit('toolFinished', `sched${turn}`, true, '');

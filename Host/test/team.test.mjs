@@ -311,3 +311,15 @@ test("an orchestrator waiting on a timer sends its orders at once and stops wait
   assert.ok(Date.now() - sent < 9_000, `the report arrived ${Date.now() - sent} ms later: the order or the report waited for the 12 s timer`);
   assert.match(report.threadPatch._0.upserts.find((i) => i.kind === 'user' && (i.from?.name === 'Ejecutor' || i.text?.includes('[Ejecutor ·'))).text, /haz T/);
 });
+
+test("a timer that names an agent isn't cut short by another agent's report", async () => {
+  const claude = snapshot.accounts.find((a) => a.kind === 'claude');
+  const r = await request('createTeam', { team: { projectId: demo(), goal: 'Temporizador con nombre', orchestrator: { accountId: claude.id }, executors: [{ accountId: claude.id }, { accountId: claude.id }], researcher: null } });
+  const boss = r.threadId;
+  peer.send(Client.subscribe(boss));
+  await next(firstDone(boss));
+  const sent = Date.now();
+  peer.send(Client.send(boss, 'temporizador para revisar al Ejecutor 2 <relevo:tarea para="Ejecutor 1">haz U</relevo:tarea>'));
+  await next((m) => m.threadPatch?._0.id === boss && m.threadPatch._0.upserts.some((i) => i.kind === 'user' && (i.from?.name === 'Ejecutor 1' || i.text?.includes('[Ejecutor 1 ·'))), 25_000);
+  assert.ok(Date.now() - sent > 10_000, `Ejecutor 1's report cut the timer for Ejecutor 2 (${Date.now() - sent} ms)`);
+});

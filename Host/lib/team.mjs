@@ -576,7 +576,11 @@ export class Teams {
     if (!team || member?.role !== 'orchestrator') return;
     const r = this.host._rt(thread);
     r.waitingTimer = isWaitTool(name, title, input);
-    if (r.waitingTimer) this._dispatch(team, member, thread, parseOrders(turnText));
+    if (!r.waitingTimer) return;
+    // Who it's waiting for, if the timer says (Antigravity's schedule carries what it's for).
+    const said = `${title ?? ''} ${JSON.stringify(input ?? {})}`;
+    r.waitingFor = team.members.filter((m) => m !== member && new RegExp(`\\b${m.name.replace(/\s+/g, '\\s*')}\\b`, 'i').test(said)).map((m) => m.name);
+    this._dispatch(team, member, thread, parseOrders(turnText));
   }
 
   /** Something in this thread is for you: the apps notify it until you write there. */
@@ -776,8 +780,12 @@ export class Teams {
       const waiting = t.queued.find((q) => q.team);
       if (waiting) this._merge(waiting, header, text, prompt, member.role);
       else t.queued.push({ id: h._uuid(), text, prompt, header, from: meta.from, team: true });
-      // An orchestrator only waiting on its own timer stops waiting: what it was waiting for has arrived.
-      if (member.role === 'orchestrator' && r.waitingTimer && !r.approvals.size) {
+      // An orchestrator only waiting on its own timer stops waiting when what it waits for arrives: a message
+      // from the agent the timer names (any, if it names none), or anything that can't wait (a question, a
+      // blocker, an error, Relevo).
+      const pressing = ['pregunta', 'error', 'aviso', 'urgente'].includes(from.label) || from.role === 'relevo' || /^\s*\**ESTADO:?\**\s*bloqueado/im.test(text);
+      const awaited = !r.waitingFor?.length || r.waitingFor.includes(from.name);
+      if (member.role === 'orchestrator' && r.waitingTimer && !r.approvals.size && (awaited || pressing)) {
         r.waitingTimer = false;
         r.statusLine = `Llega un mensaje de ${from.name}: deja de esperar…`;
         h.agents.get(t.id)?.interrupt();
