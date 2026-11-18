@@ -9,7 +9,7 @@ import os from 'node:os';
 import { EventEmitter } from 'node:events';
 import readline from 'node:readline';
 import { spawnCLI, killTree, isWindows } from './platform.mjs';
-import { classify } from './claude.mjs';
+import { classify, resetFromText } from './claude.mjs';
 
 export const NO_KEYCHAIN = { SSH_CONNECTION: '127.0.0.1 0 127.0.0.1 0', RELEVO_AGY_NO_KEYCHAIN: '1' };
 const AUTH_MARKER = /Authentication required|sign in|not logged in/i;
@@ -158,7 +158,15 @@ export class AntigravitySession extends EventEmitter {
   _fail(kind, message) {
     if (this.failed) return;
     this.failed = true;
-    this.emit('failure', { kind, message, resetsAt: null });
+    let resetsAt = kind === 'limit' ? resetFromText(message) : null;
+    if (kind === 'limit') this.limitUntil = resetsAt ?? Date.now() / 1000 + 3600;
+    // Out of quota, agy just exits with code 1 and no reason on the next turns: still the same limit.
+    if (kind === 'other' && this.limitUntil > Date.now() / 1000 && /terminó con código 1|exit(?:ed)? (?:with )?code 1/i.test(message)) {
+      kind = 'limit';
+      resetsAt = this.limitUntil;
+      message = `Sin cuota de Antigravity hasta ${new Date(this.limitUntil * 1000).toLocaleString('es-ES', { weekday: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })} (todos sus modelos comparten la cuota de la cuenta de Google).`;
+    }
+    this.emit('failure', { kind, message, resetsAt });
   }
 
   _line(line) {

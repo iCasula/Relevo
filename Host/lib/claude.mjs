@@ -52,7 +52,15 @@ function toDate(v) {
 // Specific phrases only: a bare "401", "quota" or "capacity" anywhere in a long stderr tail (a test log, a
 // file the agent printed) mustn't mark the account signed out or out of quota.
 const AUTH_RE = /not logged in|please run \/login|invalid api key|oauth token has expired|authentication_error|\b401\b[^\n]{0,40}unauthori[sz]ed|token (?:has been )?revoked/i;
-const LIMIT_RE = /usage limit|rate[ _-]limit(?:ed| reached| exceeded|_error)|limit reached|out of extra usage|exceeded your (?:current )?quota|insufficient_quota|quota (?:exceeded|exhausted)|\b429\b[^\n]{0,40}too many requests/i;
+const LIMIT_RE = /usage limit|rate[ _-]limit(?:ed| reached| exceeded|_error)|limit reached|out of extra usage|exceeded your (?:current )?quota|insufficient_quota|quota (?:exceeded|exhausted|reached)|individual quota|hit your [\w -]{0,20}limit|upgrade your subscription to increase your limits|resource[_ ]exhausted|\b429\b[^\n]{0,40}too many requests/i;
+
+/** «Resets in 166h28m11s» / «resets in 2d 3h» → epoch seconds, or null. */
+export function resetFromText(message, from = Date.now()) {
+  const m = /resets? in\s*(?:(\d+)\s*d)?\s*(?:(\d+)\s*h)?\s*(?:(\d+)\s*m(?:in)?)?\s*(?:(\d+)\s*s)?/i.exec(String(message ?? ''));
+  if (!m || !(m[1] || m[2] || m[3] || m[4])) return null;
+  const secs = (Number(m[1] ?? 0) * 24 + Number(m[2] ?? 0)) * 3600 + Number(m[3] ?? 0) * 60 + Number(m[4] ?? 0);
+  return from / 1000 + secs;
+}
 const UNAVAILABLE_RE = /overloaded_error|\boverloaded\b|\b529\b|over capacity|capacity constraints/i;
 
 export function classify(message) {
