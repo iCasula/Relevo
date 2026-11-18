@@ -168,3 +168,27 @@ test('worktrees in a folder without git: the executors share it instead of the t
   assert.ok(t.items.some((i) => i.kind === 'notice' && /Sin worktrees/.test(i.text)));
   assert.ok(t.items.some((i) => i.kind === 'user' && i.text === 'Dos ejecutores sin git'), 'the orchestrator started');
 });
+
+test('editing a team keeps its threads and tells the orchestrator what changed', async () => {
+  const s0 = (await next((m) => m.snapshot?._0.hostTeams?.some((x) => x.goal === 'Dos ejecutores sin git' && x.members.length === 3))).snapshot._0;
+  const t = s0.hostTeams.find((x) => x.goal === 'Dos ejecutores sin git');
+  const [lead2, ex1, ex2] = t.members;
+  const codex = s0.accounts.find((a) => a.kind === 'codex');
+  const r = await request('updateTeam', { teamId: t.id, changes: {
+    goal: 'Dos ejecutores sin git, ahora con investigador',
+    members: [{ threadId: ex1.threadId, accountId: codex.id, model: 'default', notes: 'Solo traducciones' }],
+    remove: [ex2.threadId],
+    add: { researcher: { accountId: codex.id, model: 'default' } },
+  } });
+  assert.ok(r.ok, r.error);
+  const snap = (await next((m) => m.snapshot?._0.hostTeams?.find((x) => x.id === t.id)?.members.some((m) => m.role === 'researcher'))).snapshot._0;
+  const after = snap.hostTeams.find((x) => x.id === t.id);
+  assert.equal(after.goal, 'Dos ejecutores sin git, ahora con investigador');
+  assert.deepEqual(after.members.map((m) => m.role), ['orchestrator', 'executor', 'researcher']);
+  assert.equal(after.members[1].notes, 'Solo traducciones');
+  assert.equal(after.members[1].accountId, codex.id);
+  assert.ok(snap.threads.some((x) => x.id === ex2.threadId && !x.team), 'the removed executor stays as a normal thread');
+  const news = await next((m) => m.threadPatch?._0.id === lead2.threadId && m.threadPatch._0.upserts.some((i) => i.kind === 'user' && i.from?.label === 'cambios en el equipo'), 20_000);
+  const text = news.threadPatch._0.upserts.find((i) => i.from?.label === 'cambios en el equipo').text;
+  assert.match(text, /Nuevo objetivo:[\s\S]*Solo traducciones[\s\S]*pasa a Codex[\s\S]*ha salido del equipo[\s\S]*Se une el Investigador/);
+});

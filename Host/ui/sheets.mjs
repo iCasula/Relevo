@@ -862,6 +862,25 @@ export function openNewTeam(hostId, projectId, goal = '', { threadId = null } = 
     worktrees: true,
     mode: 'autoEdit',
   };
+  // What you entered stays if you close the sheet or creating fails: reopening it brings it back.
+  const draftKey = `relevo.teamDraft.${hostId}.${threadId ?? projectId}`;
+  try {
+    const d = JSON.parse(localStorage.getItem(draftKey) ?? 'null');
+    if (d) {
+      const ok = (r) => r && accountOf(hostId, r.accountId);
+      if (d.goal) goal = d.goal;
+      if (ok(d.lead)) st.lead = d.lead;
+      if (Array.isArray(d.executors)) st.executors = d.executors.filter(ok);
+      if (ok(d.researcher)) st.researcher = d.researcher;
+      for (const k of ['threadNotes', 'withResearcher', 'worktrees', 'mode']) if (d[k] !== undefined) st[k] = d[k];
+    }
+  } catch {}
+  const persist = () => {
+    try {
+      const { focused, ...rest } = st;
+      localStorage.setItem(draftKey, JSON.stringify({ ...rest, goal }));
+    } catch {}
+  };
   const joinedAcct = joining && accountOf(hostId, joining.accountId);
   const s = openSheet({ width: 680 });
   const row = (key, r, i = null) => {
@@ -893,16 +912,17 @@ export function openNewTeam(hostId, projectId, goal = '', { threadId = null } = 
       <div class="caption" style="margin-top:8px">El orquestador y el investigador leen y buscan sin pedir permiso, pero no modifican ficheros. Si los agentes se pasan muchos mensajes seguidos sin ti, el equipo se pone en pausa.</div>
       <div class="sheet-buttons"><button class="btn" data-no>Cancelar</button><span class="grow"></span><button class="btn primary" data-go>${joining ? 'Añadir coordinador' : 'Crear equipo'} (${1 + n + (st.withResearcher ? 1 : 0)} agentes)</button></div>`;
     const $ = (q) => s.el.querySelector(q);
-    const keep = () => { goal = $('[data-goal]').value; };
+    const keep = () => { goal = $('[data-goal]').value; persist(); };
     const target = (el) => { const k = el.dataset.acc ?? el.dataset.model ?? el.dataset.notes; return k === 'lead' ? st.lead : k === 'res' ? st.researcher : st.executors[Number(el.dataset.i)]; };
+    $('[data-goal]').oninput = keep;
     s.el.querySelectorAll('[data-acc]').forEach((el) => { el.onchange = () => { const r = target(el); r.accountId = el.value; r.model = visibleModels(accountOf(hostId, el.value))[0]?.id ?? 'default'; keep(); draw(); }; });
-    s.el.querySelectorAll('[data-model]').forEach((el) => { el.onchange = () => { target(el).model = el.value; }; });
-    s.el.querySelectorAll('[data-notes]').forEach((el) => { el.oninput = () => { if (el.dataset.notes === 'thread') st.threadNotes = el.value; else target(el).notes = el.value; }; });
+    s.el.querySelectorAll('[data-model]').forEach((el) => { el.onchange = () => { target(el).model = el.value; persist(); }; });
+    s.el.querySelectorAll('[data-notes]').forEach((el) => { el.oninput = () => { if (el.dataset.notes === 'thread') st.threadNotes = el.value; else target(el).notes = el.value; persist(); }; });
     s.el.querySelectorAll('[data-rm]').forEach((b) => { b.onclick = () => { st.executors.splice(Number(b.dataset.rm), 1); keep(); draw(); }; });
     $('[data-add]').onclick = () => { st.executors.push(st.executors.length ? { ...st.executors[st.executors.length - 1], notes: '' } : pick(claude, /sonnet/i)); keep(); draw(); };
     $('[data-res]').onchange = (e) => { st.withResearcher = e.target.checked; keep(); draw(); };
-    $('[data-mode]')?.addEventListener('change', (e) => { st.mode = e.target.value; });
-    $('[data-wt]')?.addEventListener('change', (e) => { st.worktrees = e.target.checked; });
+    $('[data-mode]')?.addEventListener('change', (e) => { st.mode = e.target.value; persist(); });
+    $('[data-wt]')?.addEventListener('change', (e) => { st.worktrees = e.target.checked; persist(); });
     $('[data-no]').onclick = s.close;
     $('[data-go]').onclick = async () => {
       keep();
@@ -915,10 +935,84 @@ export function openNewTeam(hostId, projectId, goal = '', { threadId = null } = 
         worktrees: st.worktrees && n > 1, mode: st.mode,
       } } });
       if (!r.ok) { toast(r.error); $('[data-go]').disabled = false; $('[data-go]').textContent = joining ? 'Añadir coordinador' : 'Crear equipo'; return; }
+      try { localStorage.removeItem(draftKey); } catch {}
       s.close();
       main.select(hostId, r.threadId);
     };
     if (!st.focused) { st.focused = true; setTimeout(() => $('[data-goal]')?.focus(), 0); }
+  };
+  draw();
+}
+
+/** Edits a team as it is: goal, each member's subscription, model and instructions; add or remove members. */
+export function openTeamEditor(hostId, teamId) {
+  const team = snap(hostId)?.hostTeams?.find((x) => x.id === teamId);
+  if (!team) { toast('Equipo desconocido'); return; }
+  const accounts = snap(hostId)?.accounts ?? [];
+  const usable = accounts.filter((a) => a.status?.loggedIn !== false);
+  const ROLE_UI = { orchestrator: ['crown.fill', 'r-orchestrator'], executor: ['wrench.and.screwdriver', 'r-executor'], researcher: ['globe', 'r-researcher'] };
+  const st = {
+    goal: team.goal,
+    members: team.members.map((m) => ({ ...m, accountId: m.accountId ?? usable[0]?.id, model: m.model ?? 'default', notes: m.notes ?? '', remove: false })),
+    adds: [], // { role, accountId, model, notes }
+    worktrees: true,
+  };
+  const original = JSON.stringify(st.members.map(({ threadId, accountId, model, notes }) => ({ threadId, accountId, model, notes })));
+  const hasResearcher = () => st.members.some((m) => m.role === 'researcher' && !m.remove) || st.adds.some((a) => a.role === 'researcher');
+  const s = openSheet({ width: 700 });
+  const selects = (key, r) => {
+    const a = accountOf(hostId, r.accountId) ?? usable[0];
+    const list = accounts.some((x) => x.id === r.accountId) ? usable.concat(usable.some((x) => x.id === r.accountId) ? [] : [accountOf(hostId, r.accountId)]) : usable;
+    return `<select class="field" style="width:190px" data-acc="${key}">${list.map((x) => `<option value="${esc(x.id)}"${x.id === r.accountId ? ' selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
+      <select class="field grow" data-model="${key}">${visibleModels(a).map((m) => `<option value="${esc(m.id)}"${m.id === r.model ? ' selected' : ''}>${esc(m.name)}</option>`).join('')}${visibleModels(a).some((m) => m.id === r.model) ? '' : `<option value="${esc(r.model)}" selected>${esc(r.model)}</option>`}</select>`;
+  };
+  const notesRow = (key, value) => `<div class="team-line"><span class="team-role"></span><input class="field-input grow team-notes" data-notes="${key}" placeholder="Indicaciones para este agente (opcional)" value="${esc(value ?? '')}"><span class="tb-spacer"></span></div>`;
+  const draw = () => {
+    const live = st.members.filter((m) => !m.remove);
+    const executors = live.filter((m) => m.role === 'executor').length + st.adds.filter((a) => a.role === 'executor').length;
+    s.el.innerHTML = `<div class="sheet-title">${icon('person.3.sequence', { size: 16 })} Editar el equipo</div>
+      <div class="sheet-sub">Los cambios se aplican sin perder nada: cada hilo conserva su historial y su sesión (cambiar de proveedor le pasa el contexto, como un relevo), y el orquestador recibe un aviso con lo que ha cambiado.</div>
+      <h3>Objetivo</h3><textarea class="field" data-goal style="min-height:70px;font-family:var(--font);font-size:13px">${esc(st.goal)}</textarea>
+      <div class="team-form">
+        ${st.members.map((m, i) => { const [ic, cls] = ROLE_UI[m.role] ?? ROLE_UI.executor; return m.remove
+          ? `<div class="team-line removed"><span class="team-role ${cls}">${icon(ic, { size: 12 })} ${esc(m.name)}</span><span class="caption grow">Sale del equipo (su hilo se conserva como uno normal)</span><button class="btn small" data-undo="${i}">Deshacer</button></div>`
+          : `<div class="team-line"><span class="team-role ${cls}">${icon(ic, { size: 12 })} ${esc(m.name)}</span>${selects(`m${i}`, m)}${m.role === 'orchestrator' ? '<span class="tb-spacer"></span>' : `<button class="tb-btn" data-rm="${i}" title="Sacar del equipo"${m.role === 'executor' && executors <= 1 ? ' disabled' : ''}>${icon('minus.circle', { size: 15 })}</button>`}</div>${notesRow(`m${i}`, m.notes)}`; }).join('')}
+        ${st.adds.map((a, i) => { const [ic, cls] = ROLE_UI[a.role]; return `<div class="team-line"><span class="team-role ${cls}">${icon(ic, { size: 12 })} ${a.role === 'executor' ? 'Ejecutor nuevo' : 'Investigador'}</span>${selects(`a${i}`, a)}<button class="tb-btn" data-rm-add="${i}" title="Quitar">${icon('minus.circle', { size: 15 })}</button></div>${notesRow(`a${i}`, a.notes)}`; }).join('')}
+        <div class="team-line"><span class="team-role"></span><button class="btn small" data-add-exec${executors >= 4 ? ' disabled' : ''}>${icon('plus', { size: 10 })} Añadir ejecutor</button>${hasResearcher() ? '' : `<button class="btn small" data-add-res>${icon('plus', { size: 10 })} Añadir investigador</button>`}</div>
+      </div>
+      ${st.adds.some((a) => a.role === 'executor') && has(hostId, 'worktrees') ? `<div class="form-group" style="margin-top:12px"><div class="form-row"><label style="display:flex;gap:8px;align-items:center"><input type="checkbox" class="check" data-wt${st.worktrees ? ' checked' : ''}> Los ejecutores nuevos, cada uno en su worktree (si el proyecto es un repositorio git)</label></div></div>` : ''}
+      <div class="sheet-buttons"><button class="btn" data-no>Cancelar</button><span class="grow"></span><button class="btn primary" data-go>Guardar cambios</button></div>`;
+    const $ = (q) => s.el.querySelector(q);
+    const target = (key) => (key[0] === 'm' ? st.members[Number(key.slice(1))] : st.adds[Number(key.slice(1))]);
+    const keep = () => { st.goal = $('[data-goal]').value; };
+    s.el.querySelectorAll('[data-acc]').forEach((el) => { el.onchange = () => { const r = target(el.dataset.acc); r.accountId = el.value; r.model = visibleModels(accountOf(hostId, el.value))[0]?.id ?? 'default'; keep(); draw(); }; });
+    s.el.querySelectorAll('[data-model]').forEach((el) => { el.onchange = () => { target(el.dataset.model).model = el.value; }; });
+    s.el.querySelectorAll('[data-notes]').forEach((el) => { el.oninput = () => { target(el.dataset.notes).notes = el.value; }; });
+    s.el.querySelectorAll('[data-rm]').forEach((b) => { b.onclick = () => { st.members[Number(b.dataset.rm)].remove = true; keep(); draw(); }; });
+    s.el.querySelectorAll('[data-undo]').forEach((b) => { b.onclick = () => { st.members[Number(b.dataset.undo)].remove = false; keep(); draw(); }; });
+    s.el.querySelectorAll('[data-rm-add]').forEach((b) => { b.onclick = () => { st.adds.splice(Number(b.dataset.rmAdd), 1); keep(); draw(); }; });
+    const fresh = (role) => { const a = usable[0]; return { role, accountId: a?.id, model: visibleModels(a)[0]?.id ?? 'default', notes: '' }; };
+    $('[data-add-exec]').onclick = () => { st.adds.push(fresh('executor')); keep(); draw(); };
+    $('[data-add-res]')?.addEventListener('click', () => { st.adds.push(fresh('researcher')); keep(); draw(); });
+    $('[data-wt]')?.addEventListener('change', (e) => { st.worktrees = e.target.checked; });
+    $('[data-no]').onclick = s.close;
+    $('[data-go]').onclick = async () => {
+      keep();
+      const before = JSON.parse(original);
+      const changes = {
+        goal: st.goal.trim() !== team.goal ? st.goal.trim() : undefined,
+        members: st.members.filter((m, i) => !m.remove && JSON.stringify({ threadId: m.threadId, accountId: m.accountId, model: m.model, notes: m.notes }) !== JSON.stringify(before[i])).map(({ threadId, accountId, model, notes }) => ({ threadId, accountId, model, notes })),
+        remove: st.members.filter((m) => m.remove).map((m) => m.threadId),
+        add: { executors: st.adds.filter((a) => a.role === 'executor'), researcher: st.adds.find((a) => a.role === 'researcher') ?? null },
+        worktrees: st.worktrees,
+      };
+      $('[data-go]').disabled = true;
+      $('[data-go]').innerHTML = '<span class="spinner"></span> Guardando…';
+      const r = await request(hostId, { updateTeam: { teamId, changes } });
+      if (!r.ok) { toast(r.error); $('[data-go]').disabled = false; $('[data-go]').textContent = 'Guardar cambios'; return; }
+      s.close();
+      toast('Equipo actualizado');
+    };
   };
   draw();
 }

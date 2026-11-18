@@ -435,6 +435,7 @@ function renderTeamBar() {
     html = `<span class="team-label" title="${esc(team.goal)}">${icon('person.3.sequence', { size: 13 })}Equipo</span>${chips}<span class="grow"></span>${status}`
       + (team.status === 'paused' ? `<button class="btn small" data-team-act="resume">${icon('play.rectangle', { size: 11 })} Reanudar</button>`
         : team.status === 'active' ? `<button class="btn small" data-team-act="pause" title="Los mensajes entre agentes esperan; tú puedes seguir escribiendo">${icon('pause.circle', { size: 11 })} Pausar</button>` : '')
+      + `<button class="tb-btn" data-team-edit title="Editar el equipo: modelos, indicaciones, miembros">${icon('pencil', { size: 12 })}</button>`
       + `<button class="tb-btn" data-team-menu title="Más">${icon('chevron.down', { size: 10 })}</button>`;
   }
   if (T.sig.team !== html) { T.team.innerHTML = html; T.team.classList.toggle('hidden', !html); T.sig.team = html; }
@@ -447,6 +448,7 @@ function teamMenu(anchor) {
   showMenu(anchor, [
     { info: team.goal.length > 80 ? `${team.goal.slice(0, 78)}…` : team.goal },
     '-',
+    { label: 'Editar equipo…', action: () => sheets.openTeamEditor(hostId, team.id) },
     { label: 'Ir al orquestador', action: () => { const m = team.members.find((x) => x.role === 'orchestrator'); if (m) select(hostId, m.threadId); } },
     { label: 'Disolver el equipo…', danger: true, action: async () => {
       const ok = await alertSheet({ title: '¿Disolver el equipo?', message: 'Los hilos se conservan como hilos normales; los agentes dejan de pasarse mensajes.', buttons: [{ label: 'Disolver', role: 'destructive' }, { label: 'Cancelar', role: 'cancel' }] });
@@ -1042,6 +1044,7 @@ document.addEventListener('click', (e) => {
     return;
   }
   if (d.teamMenu !== undefined) { teamMenu(el); return; }
+  if (d.teamEdit !== undefined) { const id = summaryOf(hostId, threadId)?.team?.id; if (id) sheets.openTeamEditor(hostId, id); return; }
   if (d.approve) { sendTo(hostId, Client.approve(threadId, d.approve, d.option)); return; }
   if (d.qOpt) {
     const it = thread?.items.find((i) => i.id === d.qOpt);

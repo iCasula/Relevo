@@ -548,3 +548,4 @@ input[type=checkbox].check { accent-color: var(--accent); width: 14px; height: 1
 .term-cmd { font-family: var(--mono); font-size: 13px; padding: 7px 10px; border-radius: 6px; background: var(--fill-tertiary); user-select: all; overflow-x: auto; white-space: nowrap; }
 .team-fixed { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; min-height: 26px; }
 .team-notes { font-size: 12px; }
+.team-line.removed { opacity: .6; }

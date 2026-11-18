@@ -71,6 +71,9 @@ function rosterLine(host, team, m) {
   return `- ${m.name} (${a ? `${a.name} · ${host._modelName(a, t.model)}` : 'agente'})${what}${where}`;
 }
 
+/** Instructions as stored: trimmed, at most 2000 characters, or undefined. */
+const noteOf = (x) => String(x ?? '').trim().slice(0, 2000) || undefined;
+
 /** What you wrote for this agent when creating the team, if anything. */
 const notesOf = (member) => (member.notes ? `\nIndicaciones del usuario para ti:\n${member.notes}\n` : '');
 
@@ -179,20 +182,7 @@ export class Teams {
     if (!executors.length && !existing) throw new Error('El equipo necesita al menos un ejecutor');
     if (!h.projects().some((p) => p.id === spec.projectId)) throw new Error('Proyecto desconocido');
     const team = { id: h._uuid(), projectId: spec.projectId, goal, createdAt: Date.now() / 1000, status: 'active', auto: 0, held: [], members: [] };
-    const title = clip(goal.split('\n')[0], 48);
-    const make = (role, name, pick, mode, worktree) => {
-      const t = worktree ? h.createWorktreeThread(spec.projectId) : h.createThread(spec.projectId);
-      const account = h.accountsById.get(pick?.accountId) ?? h.accountsById.get(t.accountId);
-      t.accountId = account?.id ?? t.accountId;
-      t.model = pick?.model || 'default';
-      t.mode = mode;
-      t.title = `${name} · ${title}`;
-      t.team = { id: team.id, role, name };
-      t.aiTitled = true; // the role and the goal are a better title than one guessed from the first message
-      team.members.push(clean({ threadId: t.id, role, name, notes: note(pick?.notes) }));
-      return t;
-    };
-    const note = (x) => String(x ?? '').trim().slice(0, 2000) || undefined;
+    const make = (role, name, pick, mode, worktree) => this._newMember(team, role, name, pick, mode, worktree);
     const lead = make('orchestrator', 'Orquestador', spec.orchestrator, 'ask', false);
     const mode = ['ask', 'autoEdit', 'full'].includes(spec.mode) ? spec.mode : 'autoEdit';
     const count = executors.length + (existing ? 1 : 0);
@@ -207,7 +197,7 @@ export class Teams {
       const name = execName(0);
       existing.team = { id: team.id, role: 'executor', name };
       existing.teamPrimed = false;
-      team.members.push(clean({ threadId: existing.id, role: 'executor', name, notes: note(spec.threadNotes) }));
+      team.members.push(clean({ threadId: existing.id, role: 'executor', name, notes: noteOf(spec.threadNotes) }));
       h._append(existing, { id: h._uuid(), kind: 'notice', text: `Este hilo es ahora ${name} de un equipo: el Orquestador le irá dando tareas. Puedes seguir escribiéndole tú.` });
       h._changed(existing);
     }
@@ -248,6 +238,106 @@ export class Teams {
     }
     h._startTurn(lead, goal, false, { prompt: start });
     return { teamId: team.id, threadId: lead.id };
+  }
+
+  /** A new thread for a member: its subscription, model and mode, titled with its role and the goal. */
+  _newMember(team, role, name, pick, mode, worktree) {
+    const h = this.host;
+    const t = worktree ? h.createWorktreeThread(team.projectId) : h.createThread(team.projectId);
+    const account = h.accountsById.get(pick?.accountId) ?? h.accountsById.get(t.accountId);
+    t.accountId = account?.id ?? t.accountId;
+    t.model = pick?.model || 'default';
+    t.mode = mode;
+    t.title = `${name} · ${clip(team.goal.split('\n')[0], 48)}`;
+    t.team = { id: team.id, role, name };
+    t.aiTitled = true; // the role and the goal are a better title than one guessed from the first message
+    team.members.push(clean({ threadId: t.id, role, name, notes: noteOf(pick?.notes) }));
+    return t;
+  }
+
+  /**
+   * Changes a team without starting over; what isn't sent stays as it was. The orchestrator is told what
+   * changed, and a member whose instructions changed gets them again with its next message.
+   * changes: { goal?, members?: [{ threadId, accountId?, model?, notes? }], remove?: [threadId],
+   *            add?: { executors?: [{ accountId, model, notes }], researcher?: { accountId, model, notes } },
+   *            worktrees?, mode? }
+   */
+  update(teamId, changes = {}) {
+    const h = this.host;
+    const team = this.byId(teamId);
+    if (!team) throw new Error('Equipo desconocido');
+    const leadMember = team.members.find((m) => m.role === 'orchestrator');
+    const news = [];
+    const goal = String(changes.goal ?? '').trim();
+    if (goal && goal !== team.goal) { team.goal = goal; news.push(`Nuevo objetivo:\n${goal}`); }
+
+    for (const c of changes.members ?? []) {
+      const m = team.members.find((x) => x.threadId === String(c.threadId).toUpperCase());
+      const t = m && h.threads.get(m.threadId);
+      if (!t) continue;
+      if (c.notes !== undefined && (noteOf(c.notes) ?? null) !== (m.notes ?? null)) {
+        if (noteOf(c.notes)) m.notes = noteOf(c.notes); else delete m.notes;
+        t.teamPrimed = false; // its next message carries the new instructions
+        if (m.role !== 'orchestrator') news.push(`${m.name} tiene indicaciones nuevas${m.notes ? `: ${clip(m.notes.replace(/\s+/g, ' '), 300)}` : ' (ninguna)'}`);
+        else news.push(`Tus indicaciones han cambiado${m.notes ? `:\n${m.notes}` : ': ya no hay ninguna'}`);
+      }
+      const account = c.accountId && h.accountsById.get(String(c.accountId).toUpperCase());
+      const model = c.model || 'default';
+      if (account && (account.id !== t.accountId || model !== (t.model || 'default'))) {
+        h.select(t, account.id, model, false);
+        if (m.role !== 'orchestrator') news.push(`${m.name} pasa a ${account.name} · ${h._modelName(account, model)}`);
+      }
+    }
+
+    for (const id of changes.remove ?? []) {
+      const i = team.members.findIndex((x) => x.threadId === String(id).toUpperCase());
+      if (i < 0) continue;
+      const m = team.members[i];
+      if (m.role === 'orchestrator') throw new Error('El orquestador no se puede quitar: disuelve el equipo');
+      if (m.role === 'executor' && team.members.filter((x) => x.role === 'executor').length === 1 && !(changes.add?.executors ?? []).length) {
+        throw new Error('El equipo necesita al menos un ejecutor');
+      }
+      team.members.splice(i, 1);
+      const t = h.threads.get(m.threadId);
+      if (t) {
+        delete t.team; delete t.teamPrimed;
+        h._append(t, { id: h._uuid(), kind: 'notice', text: 'Este hilo ha salido del equipo: sigue como un hilo normal' });
+        h._changed(t);
+      }
+      news.push(`${m.name} ha salido del equipo`);
+    }
+
+    const added = changes.add ?? {};
+    const newExecutors = (added.executors ?? []).slice(0, Math.max(0, 4 - team.members.filter((x) => x.role === 'executor').length));
+    if (newExecutors.length) {
+      const projectPath = h.projects().find((p) => p.id === team.projectId)?.path;
+      const worktrees = changes.worktrees !== false && gitops.hasCommits(projectPath);
+      const mode = ['ask', 'autoEdit', 'full'].includes(changes.mode) ? changes.mode : 'autoEdit';
+      const taken = new Set(team.members.map((m) => m.name));
+      let n = 1;
+      for (const e of newExecutors) {
+        while (taken.has(`Ejecutor ${n}`) || (n === 1 && taken.has('Ejecutor'))) n++;
+        const name = `Ejecutor ${n}`;
+        taken.add(name);
+        const t = this._newMember(team, 'executor', name, e, mode, worktrees);
+        const a = h.accountsById.get(t.accountId);
+        news.push(`Se une ${name} (${a?.name ?? 'agente'} · ${h._modelName(a, t.model)}${t.worktree ? `, en su worktree, rama ${t.worktree.branch}` : ', en la misma carpeta'})${noteOf(e.notes) ? ` con estas indicaciones: ${clip(e.notes.replace(/\s+/g, ' '), 300)}` : ''}`);
+      }
+    }
+    if (added.researcher && !team.members.some((m) => m.role === 'researcher')) {
+      const t = this._newMember(team, 'researcher', 'Investigador', added.researcher, 'ask', false);
+      const a = h.accountsById.get(t.accountId);
+      news.push(`Se une el Investigador (${a?.name ?? 'agente'} · ${h._modelName(a, t.model)}): ya puedes pedirle investigaciones`);
+    }
+
+    if (h.settings.maxAgents < team.members.length) h.state.settings = { ...h.state.settings, maxAgents: Math.min(8, team.members.length) };
+    for (const m of team.members) { const t = h.threads.get(m.threadId); if (t) h._saveThread(t); }
+    h._saveState();
+    h._broadcastSnapshot();
+    if (news.length && leadMember) {
+      this._deliver(team, leadMember, `${news.map((x) => `- ${x}`).join('\n')}\n\nTenlo en cuenta a partir de ahora.`, { name: 'Relevo', role: 'relevo', label: 'cambios en el equipo' });
+    }
+    return {};
   }
 
   action(teamId, action) {
