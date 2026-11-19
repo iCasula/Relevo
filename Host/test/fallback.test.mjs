@@ -191,5 +191,6 @@ test('the orchestrator gets the final report, plain and short, not the progress 
   const c = compactReport(fin);
   assert.match(c, /^ESTADO: hecho\nQué he hecho\nFichero · Cambio\na\.c · \+3\nTodo verificado\.$/);
   assert.equal(finalMessage(['primero', 'último sin estado']), 'último sin estado');
-  assert.match(compactReport('x'.repeat(5000), 1000), /Recortado: el informe completo está en su hilo/);
+  const long = `ESTADO: hecho\n${'hallazgo importante '.repeat(400)}`;
+  assert.equal(compactReport(long), long.trim(), 'nothing is cut');
 });

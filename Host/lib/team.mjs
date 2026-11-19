@@ -41,7 +41,6 @@ const MEMBER_REFRESH = { share: 0.7, context: 180_000, conversation: 2_000_000 }
 
 /** Automatic messages in a row (with no message from you) before the team pauses itself. */
 export const AUTO_LIMIT = 60;
-const REPORT_MAX = 2_400;
 
 // MARK: - Orders in the agents' replies
 
@@ -649,7 +648,7 @@ export class Teams {
     if (question) {
       member.awaitingAnswer = true;
       this._setTask(member, 'bloqueado');
-      this._toLead(team, member, 'pregunta', `${question.body}${body.trim() ? `\n\n(Contexto: ${clip(compactReport(body).replace(/\s+/g, ' '), 600)})` : ''}`);
+      this._toLead(team, member, 'pregunta', `${question.body}${body.trim() ? `\n\nSu informe:\n${compactReport(body)}` : ''}`);
       return;
     }
     // A turn that ended with nothing new (no text, no error): nothing to report.
@@ -666,7 +665,7 @@ export class Teams {
     }
     member.waitingFor = background.length ? background.map((b) => b.description).slice(0, 3) : null;
     const report = [];
-    report.push(compactReport(body, member.role === 'researcher' ? REPORT_MAX * 2 : REPORT_MAX));
+    report.push(compactReport(body));
     if (background.length) report.push(`(Sigue en segundo plano: ${background.map((b) => b.description).slice(0, 3).join(', ')}. Puedes escribirle igualmente.)`);
     if (changes?.files) report.push(`Cambios en disco: ${changes.files} fichero${changes.files === 1 ? '' : 's'} (+${changes.added} −${changes.removed})`);
     if (errors?.length) report.push(`Errores: ${errors.slice(-2).map((e) => clip(e, 300)).join(' · ')}`);
@@ -1400,9 +1399,9 @@ const READ_ONLY = new Set(['Read', 'Glob', 'Grep', 'LS', 'WebSearch', 'WebFetch'
 
 /**
  * A report as the orchestrator reads it: markdown made plain (no headings, bold or table borders; a table row
- * becomes «a · b · c»), code elided, and the middle cut if it is still long (the whole one stays in the thread).
+ * becomes «a · b · c»). Nothing is cut: brevity is asked of the agents, never imposed on what they found.
  */
-export function compactReport(text, max = REPORT_MAX) {
+export function compactReport(text) {
   let s = String(text ?? '')
     .replace(/^[ \t]*#{1,6}[ \t]+/gm, '')
     .replace(/\*\*([^*\n]+)\*\*/g, '$1')
@@ -1411,8 +1410,6 @@ export function compactReport(text, max = REPORT_MAX) {
     .replace(/[ \t]+$/gm, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
-  s = elideCode(s, 6);
-  if (s.length > max) s = `${headTail(s, max)}\n(Recortado: el informe completo está en su hilo.)`;
   return s;
 }
 
