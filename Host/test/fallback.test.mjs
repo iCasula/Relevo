@@ -290,3 +290,63 @@ test("an agent sent to the model you chose goes back to its own as soon as that 
   // And DeepSeek is no last resort by rule: the automatic choice goes by fit for the role, pay-per-use or not.
   assert.deepEqual(h._planTarget({ id: 'U', accountId: 'CX', model: 'gpt-6.1-terra' }, { mode: 'smart', tier: 'heavy' }), { accountId: 'DS', model: 'deepseek-v4-pro' });
 });
+
+test('the research list goes once with the instructions, not with every order', async () => {
+  const { preamble, researchReport } = await import('../lib/team.mjs');
+  const started = [];
+  const threads = new Map([['L', { id: 'L', queued: [], teamPrimed: true }], ['I', { id: 'I', queued: [], teamPrimed: true, projectPath: '/p' }]]);
+  const teams = Object.create(Teams.prototype);
+  teams.host = {
+    threads, _rt: () => ({ isRunning: false, approvals: new Map() }), _uuid: () => 'u', _append() {}, _changed() {}, _saveState() {}, _broadcastSnapshot() {},
+    _startTurn: (t, text) => started.push({ to: t.id, text }), accountsById: new Map(), projects: () => [], _modelName: () => 'm',
+  };
+  const lead = { threadId: 'L', role: 'orchestrator', name: 'Orquestador' };
+  const inv = { threadId: 'I', role: 'researcher', name: 'Investigador', findingsSeen: 2 };
+  const team = { status: 'active', auto: 0, held: [], goal: 'G', members: [lead, inv], nextFinding: 2,
+    findings: [{ id: 1, topic: 'Vulkan en Switch 2', summary: 'consoleInit retiene la GPU' }, { id: 2, topic: 'Mando con kaiHEN', summary: 'la API pad habitual' }] };
+
+  // It already has everything researched so far: the order arrives as the orchestrator wrote it.
+  teams._order(team, lead, { type: 'investigar', to: null, body: '¿Qué función llama a vsnwprintf_s?' });
+  assert.equal(started.pop().text, '¿Qué función llama a vsnwprintf_s?');
+
+  // Something it hasn't been given: only that, once.
+  team.findings.push({ id: 3, topic: 'Bink en el arranque', summary: 'es la película del logo' });
+  team.nextFinding = 3;
+  teams._order(team, lead, { type: 'investigar', to: null, body: 'Otra pregunta' });
+  const second = started.pop().text;
+  assert.match(second, /^Otra pregunta\n\n\(Investigado desde tu última consulta:\n#3 Bink en el arranque — es la película del logo\)$/);
+  assert.doesNotMatch(second, /Vulkan en Switch 2/);
+  teams._order(team, lead, { type: 'investigar', to: null, body: 'Y otra' });
+  assert.equal(started.pop().text, 'Y otra', 'not again');
+
+  // A session about to start gets the whole list with its instructions, so the order adds nothing.
+  threads.get('I').teamPrimed = false;
+  inv.findingsSeen = 0;
+  teams._order(team, lead, { type: 'investigar', to: null, body: 'Tras renovar' });
+  assert.equal(started.pop().text, 'Tras renovar');
+  const rules = preamble(teams.host, team, inv);
+  assert.match(rules, /Ya investigado en este equipo[\s\S]*#1 Vulkan en Switch 2[\s\S]*#3 Bink en el arranque/);
+  assert.match(rules, /primera línea es la conclusión[\s\S]*unos 2\.500 caracteres/);
+  assert.doesNotMatch(rules, /40 líneas/);
+
+  // Its report starts at the conclusion; what it said before is narration.
+  assert.equal(researchReport(['Voy a revisar el desensamblado.', '**Conclusión:** es `_fn_0x1624`.\nEvidencia: code_137.s:88']), '**Conclusión:** es `_fn_0x1624`.\nEvidencia: code_137.s:88');
+  assert.equal(researchReport(['Parte 1 del informe', 'Parte 2 del informe']), 'Parte 1 del informe\n\nParte 2 del informe', 'no conclusion line: all of it, as written');
+});
+
+test("the researcher's report reaches the orchestrator from its conclusion, and it isn't told what it just found", () => {
+  const sent = [];
+  const t = { id: 'I', queued: [], items: [] };
+  const teams = Object.create(Teams.prototype);
+  teams.host = { threads: new Map([['I', t]]), _rt: () => ({ isRunning: false, approvals: new Map() }), _saveState() {}, _broadcastSnapshot() {} };
+  const inv = { threadId: 'I', role: 'researcher', name: 'Investigador', inquiry: '¿Por qué Vulkan da 0 dispositivos?' };
+  const team = { status: 'active', members: [inv], findings: [], nextFinding: 0 };
+  teams.of = () => team; teams.memberOf = () => inv; teams._checkBudget = () => {}; teams._maybeRefreshMember = () => {};
+  teams._toLead = (tm, m, kind, text) => sent.push({ kind, text });
+  teams.onTurnFinished(t, { text: 'x', messages: ['He revisado probe.txt y vulkan.c.', 'Conclusión: `consoleInit` retiene la GPU.\nQuítalo antes de Vulkan (main.c:324).'] });
+  assert.equal(sent[0].kind, 'informe de investigación');
+  assert.match(sent[0].text, /^Conclusión: `consoleInit` retiene la GPU\./);
+  assert.doesNotMatch(sent[0].text, /He revisado/);
+  assert.equal(team.findings[0].topic, '¿Por qué Vulkan da 0 dispositivos?');
+  assert.equal(inv.findingsSeen, 1);
+});

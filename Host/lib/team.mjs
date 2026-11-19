@@ -25,7 +25,7 @@ export const ROLES = {
 };
 
 /** Bumped when the agents' instructions change: teams made before get them again. */
-const RULES_VERSION = 9;
+const RULES_VERSION = 10;
 /** The orchestrator gets a fresh session (with a brief of its own thread) past any of these. */
 /**
  * When an agent starts a fresh session: only once its context is really full (this share of the model's
@@ -149,7 +149,22 @@ export function milestonesBlock(team, forLead = false) {
 export function findingsBlock(team) {
   const list = (team.findings ?? []).slice(-FINDINGS_SHOWN);
   if (!list.length) return '';
-  return `\nYa investigado en este equipo (reutilízalo; investiga solo lo nuevo o para ampliar algo concreto):\n${list.map((f) => `#${f.id} ${clip(f.topic, 110)} — ${clip(f.summary.split('\n').find((l) => l.trim()) ?? '', 170)}`).join('\n')}\n`;
+  return `\nYa investigado en este equipo (reutilízalo; investiga solo lo nuevo o para ampliar algo concreto):\n${list.map(findingLine).join('\n')}\n`;
+}
+
+/** One research report in a line: what was asked and what came out. */
+function findingLine(f) {
+  return `#${f.id} ${clip(f.topic, 110)} — ${clip(f.summary.split('\n').find((l) => l.trim()) ?? '', 170)}`;
+}
+
+/**
+ * The researcher's report out of what it wrote in a turn: from its last message that carries the conclusion
+ * line. What came before is narration («voy a revisar…»). Without such a line, everything, as written.
+ */
+export function researchReport(messages) {
+  const list = (messages ?? []).map((m) => String(m ?? '')).filter((m) => m.trim());
+  for (let i = list.length - 1; i >= 0; i--) if (/^\s*[*_#>\- ]*conclusi[oó]n\b/im.test(list[i])) return list.slice(i).join('\n\n');
+  return list.join('\n\n');
 }
 
 /** Where the team stood when the orchestrator starts a fresh session: the board and each agent's last report. */
@@ -225,9 +240,10 @@ ${roster}
 
 Tu trabajo es averiguar, no implementar: no modifiques ficheros del proyecto.
 - Busca en internet (buscador, documentación, GitHub, issues, foros) y en el código del proyecto lo que acorte el camino: librerías, proyectos open source, ejemplos y soluciones a errores conocidos.
-- Responde con un informe accionable y corto (unas 40 líneas como mucho): las opciones que recomiendas con enlace, licencia y lo madura que parece cada una, por qué encaja aquí, cómo aplicarla en pasos concretos, y los riesgos. Nada de volcados de código largos.
+- Tu informe es para quien lo pidió (el orquestador o un ejecutor), no para el usuario. Su primera línea es la conclusión, tal cual: «Conclusión: …», sin ninguna frase delante («He revisado…», «Informe:»). Lo que escribas antes del mensaje que empieza así no se envía.
+- Después de la conclusión, solo lo que hace falta para actuar: la evidencia con fichero:línea o enlace, qué hacer en pasos concretos y los riesgos; si recomiendas algo externo, su licencia y lo maduro que está. Apunta a unos 2.500 caracteres y pásate solo si un hallazgo lo exige. Sin títulos, tablas ni volcados de código.
 - Si la petición no está clara, termina con <relevo:pregunta>tu duda</relevo:pregunta>.
-- Relevo guarda cada informe tuyo en la biblioteca del equipo: empieza con una línea de conclusión («Conclusión: …»).
+- Relevo guarda cada informe en la biblioteca del equipo con su línea de conclusión: no repitas lo ya investigado, amplíalo.
 ${notesOf(member)}${decisionsBlock(team)}${findingsBlock(team)}${taskLine}${carried}</relevo_equipo>
 
 `;
@@ -620,6 +636,7 @@ export class Teams {
     if (thread.teamPrimed && !freshSession) return notes;
     thread.teamPrimed = true;
     member.decisionsSeen = team.nextDecision ?? 0; // the preamble lists them all
+    member.findingsSeen = team.nextFinding ?? 0;
     return preamble(this.host, team, member, !!freshSession) + notes;
   }
 
@@ -679,7 +696,7 @@ export class Teams {
     const orders = parseOrders(text);
     const question = orders.find((o) => o.type === 'pregunta');
     // The report is its last message (with its status line); the researcher's findings can span several.
-    const body = withoutOrders(member.role === 'researcher' || !messages?.length ? text : finalMessage(messages));
+    const body = withoutOrders(!messages?.length ? text : member.role === 'researcher' ? researchReport(messages) : finalMessage(messages));
     const state = /^\s*\**ESTADO:?\**\s*(hecho|esperando|bloqueado)/im.exec(body)?.[1]?.toLowerCase() ?? null;
     if (question) {
       member.awaitingAnswer = true;
@@ -709,7 +726,8 @@ export class Teams {
       : state === 'esperando' ? 'espera (no necesita respuesta)' : 'informe';
     this._setTask(member, state === 'bloqueado' ? 'bloqueado' : state === 'esperando' ? 'esperando' : 'hecha');
     if (member.role === 'researcher' && body.trim()) {
-      this.addFinding(team, { topic: member.inquiry || clip(body.split('\n').find((l) => l.trim()) ?? '', 200), body, by: member.name });
+      const found = this.addFinding(team, { topic: member.inquiry || clip(body.split('\n').find((l) => l.trim()) ?? '', 200), body, by: member.name });
+      if (found) member.findingsSeen = found.id; // it wrote it: no need to tell it
       member.inquiry = null;
     }
     // Executors sharing one folder: uncommitted work piles up and gets mixed.
@@ -1159,7 +1177,13 @@ export class Teams {
         if (!researcher) { complain('Este equipo no tiene investigador: busca tú o pide al usuario que lo añada.'); return; }
         researcher.reportFor = o.to && findMember(team, o.to)?.name || null;
         researcher.inquiry = clip(o.body.replace(/\s+/g, ' '), 300);
-        this._deliver(team, researcher, `${o.body}${findingsBlock(team) ? `\n${findingsBlock(team)}` : ''}`, { ...from, label: researcher.reportFor ? `investigación para ${researcher.reportFor}` : 'investigación' });
+        // The list of what is already researched goes once, with its instructions when a session starts. An
+        // order only adds what this agent hasn't been given since (usually nothing: it wrote those reports).
+        const rt = h.threads.get(researcher.threadId);
+        const unseen = rt?.teamPrimed ? (team.findings ?? []).filter((f) => f.id > (researcher.findingsSeen ?? 0)) : [];
+        const extra = unseen.length ? `\n\n(Investigado desde tu última consulta:\n${unseen.map(findingLine).join('\n')})` : '';
+        const res = this._deliver(team, researcher, `${o.body}${extra}`, { ...from, label: researcher.reportFor ? `investigación para ${researcher.reportFor}` : 'investigación' });
+        if (res === 'sent' || res === 'queued') researcher.findingsSeen = team.nextFinding ?? 0;
         return;
       }
       case 'respuesta': {
