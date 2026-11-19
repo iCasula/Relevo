@@ -886,7 +886,7 @@ export function openCompare(hostId, threadId, draft = '') {
 function fallbackSelect(hostId, attrs, value) {
   const accounts = (snap(hostId)?.accounts ?? []).filter((a) => a.status?.loggedIn !== false);
   const opt = (v, label) => `<option value="${esc(v)}"${String(value ?? '') === v ? ' selected' : ''}>${esc(label)}</option>`;
-  return `<select class="field team-fb" ${attrs} title="Qué hace este agente cuando se le acaba la cuota. Automático: el mejor modelo con cuota para su papel (el más potente para un ejecutor, uno ligero para el orquestador y el investigador), y vuelve al suyo cuando recupere la cuota">${has(hostId, 'smartFallback') ? opt('auto', 'Sin cuota: automático') : ''}${opt('', 'Sin cuota: como en Ajustes')}${opt('wait', 'Sin cuota: esperar al reinicio')}`
+  return `<select class="field team-fb" ${attrs} title="Qué hace este agente cuando se le acaba la cuota. Automático: el mejor modelo con cuota para su papel (el más potente para un ejecutor, uno ligero para el orquestador y el investigador), y vuelve al suyo cuando recupere la cuota">${has(hostId, 'smartFallback') ? opt('auto', 'Sin cuota: automático') : ''}${opt('', 'Sin cuota: como en Ajustes')}${opt('wait', 'Sin cuota: esperar y seguir aquí')}`
     + accounts.map((a) => `<optgroup label="Sin cuota → ${esc(a.name)}">${visibleModels(a).map((m) => opt(`${a.id}|${m.id}`, `→ ${a.name} · ${m.name}`)).join('')}</optgroup>`).join('') + '</select>';
 }
 
@@ -1233,7 +1233,7 @@ export function openLimitPlanEditor(hostId, threadId) {
   const plan = { mode: base?.mode ?? 'ask', targets: [...(base?.targets ?? [])], tier: base?.tier ?? 'heavy' };
   const s = openSheet({ width: 520 });
   const draw = () => {
-    const modes = [['ask', 'Avisarme y decidir yo'], ...(has(hostId, 'smartFallback') ? [['smart', 'Automático: el mejor modelo con cuota (y volver cuando haya)']] : []), ['mostQuota', 'Pasar a la suscripción con más cuota'], ['chain', 'Pasar a las que elija, en orden'], ['wait', 'Esperar a que se reinicie y seguir']];
+    const modes = [['ask', 'Avisarme y decidir yo'], ...(has(hostId, 'smartFallback') ? [['smart', 'Automático: el mejor modelo con cuota (y volver cuando haya)']] : []), ['mostQuota', 'Pasar a la suscripción con más cuota'], ['chain', 'Pasar a las que elija, en orden'], ['wait', 'Esperar a que vuelva a haber cuota o saldo y seguir con el mismo modelo']];
     s.el.innerHTML = `<div class="sheet-title">${threadId ? 'Si se acaba la cuota en este hilo' : 'Si se acaba la cuota (por defecto)'}</div>
       <div style="display:flex;flex-direction:column;gap:6px">${modes.map(([m, l]) => `<label><input type="radio" name="pm" value="${m}"${plan.mode === m ? ' checked' : ''}> ${l}</label>`).join('')}</div>
       ${plan.mode === 'chain' ? `<div class="caption">Se prueban en este orden; las que también estén sin cuota se saltan. Si no queda ninguna, el hilo espera a que se reinicie la cuota y sigue.</div>

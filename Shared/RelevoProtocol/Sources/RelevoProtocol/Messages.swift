@@ -47,6 +47,8 @@ public enum ClientMessage: Codable, Sendable {
 
 public enum LimitAction: String, Codable, Sendable {
     case relayNow, cancelRelay, resumeNow, cancelResume
+    /// Stay on this model: wait until it has quota (or balance) again and carry on there (Relevo hosts).
+    case wait
 }
 
 public enum SuggestionAction: String, Codable, Sendable {

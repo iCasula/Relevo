@@ -37,6 +37,8 @@ const PLAN_MODES = new Set(['ask', 'mostQuota', 'chain', 'wait', 'smart']);
 const RESUMABLE = (a) => a && (a.kind === 'claude' || a.kind.startsWith('api:') || a.kind === 'codex');
 /** Going back to a provider resumes its own session if it left it less than this ago (seconds). */
 const RESUME_WITHIN = 12 * 3600;
+/** A thread waiting for quota with no reset time looks again this often (seconds). */
+const QUOTA_POLL = 300;
 
 /**
  * How well a model fits a role, from its name: «heavy» (executors: the strongest) or «light» (orchestrator,
@@ -51,7 +53,7 @@ export function modelScore(m, tier) {
 }
 /** What this host does beyond the shared protocol; clients show those controls only when listed. */
 export const HOST_FEATURES = ['teams', 'projects', 'threads', 'git', 'images', 'usage', 'login', 'settings', 'limitPlans', 'history', 'titles', 'accounts',
-  'turns', 'worktrees', 'pullRequests', 'suggest', 'quickActions', 'attachments', 'teamRename', 'teamDecisions', 'teamMemory', 'smartFallback', 'teamBudget', 'teamHeld', 'guard', 'push'];
+  'turns', 'worktrees', 'pullRequests', 'suggest', 'quickActions', 'attachments', 'teamRename', 'teamDecisions', 'teamMemory', 'smartFallback', 'teamBudget', 'teamHeld', 'guard', 'push', 'waitHere'];
 const IMAGE_UPLOAD = /\.(png|jpe?g|gif|webp)$/i;
 
 /** Providers this host can run. Each account is one provider with its own CLI login on this machine. */
@@ -1199,8 +1201,8 @@ export class Host {
   select(t, accountId, model, carryOn, auto = false) {
     const target = this.accountsById.get(accountId) ?? this._account(t);
     const r = this._rt(t);
-    // You chose: no going back to the earlier model by itself.
-    if (!auto) t.home = null;
+    // You chose: no going back to the earlier model by itself, and no more waiting for the old one.
+    if (!auto) { t.home = null; r.waitChosen = false; if (r.resumeAt) this._clearLimitTimers(t); }
     if (target.id === t.accountId) {
       const before = t.model;
       t.model = model || 'default';
@@ -1624,6 +1626,7 @@ export class Host {
     r.relayTimer = null;
     r.pendingRelay = null;
     r.resumeAt = null;
+    r.resumeUnknown = false;
   }
 
   // MARK: - Out of quota: where to go
@@ -1690,21 +1693,57 @@ export class Host {
     const plan = t.limitPlan ?? this.settings.limitPlan;
     const current = this._account(t);
     this._clearLimitTimers(t);
+    // You chose to wait here the last time this thread ran out: it keeps waiting until you say otherwise.
+    if (r.waitChosen) { this._waitForQuota(t); return; }
     if (plan.mode === 'ask') return;
     const target = plan.mode === 'wait' ? null : this._planTarget(t, plan);
     if (!target) {
       // Waiting by choice, or nowhere else with quota: the same agent carries on when its quota comes back.
-      const resets = [r.limit?.resetsAt, this._limitedUntil(current?.id, t.model) || null, ...(current?.status?.windows ?? []).filter((w) => w.percent >= 99).map((w) => w.resetsAt)].filter(Boolean);
-      const at = resets.length ? Math.max(...resets) + 30 : now() + 3600;
-      if (plan.mode !== 'wait') this._append(t, { id: uuid(), kind: 'notice', text: `Ningún otro modelo del plan tiene cuota: sigue el mismo agente ${resets.length ? 'cuando se reinicie' : 'dentro de una hora (no se sabe cuándo se reinicia)'}` });
-      r.resumeAt = at;
-      r.relayTimer = setTimeout(() => this._resumeAfterLimit(t), Math.min(2 ** 31 - 1, Math.max(5, at - now()) * 1000));
-      this._changed(t);
+      if (plan.mode !== 'wait') this._append(t, { id: uuid(), kind: 'notice', text: 'Ningún otro modelo del plan tiene cuota: sigue el mismo agente cuando vuelva a tenerla' });
+      this._waitForQuota(t);
       return;
     }
     const delay = this.settings.relayDelay;
     r.pendingRelay = { ...target, at: now() + delay };
     r.relayTimer = setTimeout(() => this._relayNow(t), delay * 1000);
+    this._changed(t);
+  }
+
+  /**
+   * The thread waits for its own model to have quota again and then carries on there, same provider, same
+   * session. With a known reset time it resumes then; without one (a pay-per-use balance, a limit that
+   * doesn't say) the account is checked every few minutes.
+   */
+  _waitForQuota(t) {
+    const r = this._rt(t);
+    const account = this._account(t);
+    clearTimeout(r.relayTimer);
+    r.pendingRelay = null;
+    const resets = [r.limit?.resetsAt, ...(account?.status?.windows ?? []).filter((w) => w.percent >= 99).map((w) => w.resetsAt)].filter((x) => x && x > now());
+    const known = resets.length ? Math.max(...resets) + 30 : null;
+    r.resumeUnknown = !known;
+    r.resumeAt = known ?? now() + QUOTA_POLL;
+    r.relayTimer = setTimeout(() => this._checkQuotaBack(t), Math.min(2 ** 31 - 1, Math.max(5, r.resumeAt - now()) * 1000));
+    this._changed(t);
+  }
+
+  /** Time to look: carry on if the quota (or the balance) is back, else look again in a few minutes. */
+  async _checkQuotaBack(t) {
+    const r = this._rt(t);
+    const account = this._account(t);
+    if (!account || r.isRunning) return;
+    try { await this._refreshAccount(account); } catch {}
+    const s = account.status ?? {};
+    // A balance says it plainly; otherwise the windows (and, with a reset time, the time itself).
+    const back = typeof s.balance === 'number' ? s.balance > 0.01 : !this._exhausted(account) && s.loggedIn !== false;
+    if (back || !r.resumeUnknown) {
+      this.modelLimits?.delete(`${account.id}|${t.model || 'default'}`);
+      this.modelLimits?.delete(`${account.id}|*`);
+      this._resumeAfterLimit(t);
+      return;
+    }
+    r.resumeAt = now() + QUOTA_POLL;
+    r.relayTimer = setTimeout(() => this._checkQuotaBack(t), QUOTA_POLL * 1000);
     this._changed(t);
   }
 
@@ -1764,7 +1803,8 @@ export class Host {
     const r = this._rt(t);
     if (action === 'relayNow') this._relayNow(t);
     else if (action === 'resumeNow') this._resumeAfterLimit(t);
-    else if (action === 'cancelRelay' || action === 'cancelResume') { this._clearLimitTimers(t); this._changed(t); }
+    else if (action === 'wait') { r.waitChosen = true; this._waitForQuota(t); }
+    else if (action === 'cancelRelay' || action === 'cancelResume') { r.waitChosen = false; this._clearLimitTimers(t); this._changed(t); }
     else if (r) this._changed(t);
   }
 
@@ -1941,7 +1981,7 @@ export class Host {
       usage: (account?.status?.windows ?? []).map(remoteWindow), backgroundTasks: (r.backgroundTasks ?? []).map((b) => ({ id: b.id, description: b.description, startedAt: b.startedAt })),
       limitPlan: t.limitPlan ? { ...t.limitPlan, summary: this._planSummary(t.limitPlan) } : null,
       defaultLimitPlan: { ...this.settings.limitPlan, summary: this._planSummary(this.settings.limitPlan) },
-      pendingRelay: r.pendingRelay ?? null, resumeAt: r.resumeAt ?? null,
+      pendingRelay: r.pendingRelay ?? null, resumeAt: r.resumeAt ?? null, resumeUnknown: r.resumeUnknown || undefined, canWait: true,
       suggestion: r.suggestionDismissed ? null : r.suggestion ?? null,
     });
   }

@@ -279,6 +279,7 @@ final class CompanionPeer {
             case .cancelRelay: rt.cancelPendingRelay()
             case .resumeNow: Task { await rt.resumeAfterReset(force: true) }
             case .cancelResume: rt.cancelResume()
+            case .wait: break // Relevo hosts only
             }
         case .teamAction, .teamDecisions, .teamMemory, .teamHeld:
             break // teams live on Relevo hosts

@@ -114,7 +114,7 @@ async function apiProbe(def, preset) {
       const r = await fetch(`${preset.apiRoot}/user/balance`, { headers: { Authorization: `Bearer ${def.apiKey}` }, signal: AbortSignal.timeout(15_000) });
       if (r.status === 401) return { loggedIn: false, windows: [], error: 'La API key no es válida' };
       const b = (await r.json()).balance_infos?.[0];
-      if (b) status.note = `Saldo: ${Number(b.total_balance).toFixed(2)} ${b.currency}`;
+      if (b) { status.note = `Saldo: ${Number(b.total_balance).toFixed(2)} ${b.currency}`; status.balance = Number(b.total_balance); }
     }
   } catch (e) {
     status.error = `No he podido consultar el saldo: ${e.message}`;

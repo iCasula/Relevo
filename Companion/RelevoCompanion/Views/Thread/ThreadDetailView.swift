@@ -140,28 +140,50 @@ struct ThreadDetailView: View {
             .accessibilityHint("Muestra cada comando del agente por separado, o los agrupa en una línea por tanda")
         }
         ToolbarItem(placement: .topBarTrailing) {
-            Menu {
-                let candidates = viewModel.runtime?.relayCandidates ?? []
-                Section("Continuar con otro agente") {
-                    if candidates.isEmpty {
-                        Text("No hay otras suscripciones con cuota")
-                    }
-                    ForEach(candidates, id: \.self) { candidate in
-                        if let account = viewModel.account(candidate.accountId) {
-                            Button {
-                                viewModel.relay(to: candidate)
-                            } label: {
-                                Text("\(account.name) · \(account.modelName(candidate.model))")
-                                if let note = account.availabilityNote { Text(note) }
-                            }
-                        }
+            // Values only, so the menu isn't rebuilt (and closed) each time the agent's output redraws the screen.
+            RelayMenu(viewModel: viewModel,
+                      items: (viewModel.runtime?.relayCandidates ?? []).compactMap { candidate in
+                          viewModel.account(candidate.accountId).map {
+                              RelayMenu.Item(candidate: candidate, title: "\($0.name) · \($0.modelName(candidate.model))", note: $0.availabilityNote)
+                          }
+                      },
+                      enabled: viewModel.isConnected && !viewModel.items.isEmpty)
+                .equatable()
+        }
+    }
+}
+
+private struct RelayMenu: View, Equatable {
+    nonisolated struct Item: Equatable, Sendable {
+        let candidate: RemoteCandidate
+        let title: String
+        let note: String?
+    }
+    let viewModel: ThreadViewModel
+    let items: [Item]
+    let enabled: Bool
+
+    nonisolated static func == (a: RelayMenu, b: RelayMenu) -> Bool { a.items == b.items && a.enabled == b.enabled }
+
+    var body: some View {
+        Menu {
+            Section("Continuar con otro agente") {
+                if items.isEmpty {
+                    Text("No hay otras suscripciones con cuota")
+                }
+                ForEach(items, id: \.candidate) { item in
+                    Button {
+                        viewModel.relay(to: item.candidate)
+                    } label: {
+                        Text(item.title)
+                        if let note = item.note { Text(note) }
                     }
                 }
-            } label: {
-                Label("Relevar", systemImage: "arrow.triangle.2.circlepath")
             }
-            .disabled(!viewModel.isConnected || viewModel.items.isEmpty)
+        } label: {
+            Label("Relevar", systemImage: "arrow.triangle.2.circlepath")
         }
+        .disabled(!enabled)
     }
 }
 

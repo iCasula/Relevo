@@ -724,7 +724,9 @@ function limitHTML(hostId, rt) {
     const secs = Math.max(0, Math.ceil(rt.pendingRelay.at - Date.now() / 1000));
     html += `<div class="line">${icon('arrow.triangle.2.circlepath', { size: 13, cls: 'muted' })}<span class="grow">Pasa a <b>${esc(to?.name ?? '?')} · ${esc(modelName(to, rt.pendingRelay.model))}</b> en ${secs} s, con todo el contexto</span><button class="btn primary small" data-limit-action="relayNow">Ahora</button><button class="btn small" data-limit-action="cancelRelay">No relevar</button></div>`;
   } else if (rt.resumeAt) {
-    html += `<div class="line">${icon('clock', { size: 13, cls: 'muted' })}<span class="grow">Seguirá ${esc(reset(rt.resumeAt) ?? 'cuando se reinicie la cuota')} con el mismo agente, donde lo dejó</span><button class="btn small" data-limit-action="resumeNow">Retomar ahora</button><button class="btn small" data-limit-action="cancelResume">No esperar</button></div>`;
+    html += `<div class="line">${icon('clock', { size: 13, cls: 'muted' })}<span class="grow">${rt.resumeUnknown ? 'Esperando a que vuelva a haber cuota o saldo: seguirá con este mismo modelo, donde lo dejó (lo compruebo cada 5 min)' : `Seguirá ${esc(reset(rt.resumeAt) ?? 'cuando se reinicie la cuota')} con el mismo agente, donde lo dejó`}</span><button class="btn small" data-limit-action="resumeNow">Retomar ahora</button><button class="btn small" data-limit-action="cancelResume">No esperar</button></div>`;
+  } else if (rt.canWait && !l.isNoPlan) {
+    html += `<div class="line">${icon('clock', { size: 13, cls: 'muted' })}<span class="grow">O quédate en este modelo: Relevo espera a que vuelva a haber cuota o saldo y sigue donde lo dejó</span><button class="btn small" data-limit-action="wait">Esperar aquí</button></div>`;
   }
   const cands = (rt.relayCandidates ?? []).map((c) => ({ c, a: accountOf(hostId, c.accountId) })).filter((x) => x.a).sort((x, y) => maxPercent(x.a) - maxPercent(y.a));
   html += cands.length

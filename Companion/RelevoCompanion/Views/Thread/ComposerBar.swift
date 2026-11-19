@@ -21,9 +21,16 @@ struct ComposerBar: View {
                 .frame(maxWidth: .infinity, minHeight: 56, alignment: .topLeading)
                 .background { Color.clear.contentShape(.rect).onTapGesture { focused = true } }
             HStack(spacing: 0) {
-                ModelMenu(viewModel: viewModel)
-                if !viewModel.efforts.isEmpty { EffortMenu(viewModel: viewModel) }
-                ModeMenu(viewModel: viewModel)
+                ModelButton(viewModel: viewModel)
+                // These menus only take values: an agent streaming output redraws the bar several times a second,
+                // and a menu whose content is rebuilt closes under your finger.
+                if !viewModel.efforts.isEmpty {
+                    EffortMenu(viewModel: viewModel, efforts: viewModel.efforts, selected: viewModel.runtime?.selectedEffort,
+                               defaultEffort: viewModel.selectedModel?.defaultEffort, title: viewModel.effortTitle)
+                        .equatable()
+                }
+                ModeMenu(viewModel: viewModel, current: viewModel.runtime?.mode ?? .ask)
+                    .equatable()
                 // The free space between the controls also focuses the field.
                 Color.clear
                     .frame(minWidth: 4, maxWidth: .infinity)
@@ -105,38 +112,14 @@ private struct RoundIconButtonStyle: ButtonStyle {
 }
 
 /// Subscription and model, with what's left of its quota: one control instead of a picker plus a ring.
-/// The menu lists every quota window (and when it resets) above the subscriptions and their models.
-private struct ModelMenu: View {
+/// It opens a sheet (not a menu): it stays open while the agent works and the screen keeps updating.
+private struct ModelButton: View {
     let viewModel: ThreadViewModel
+    @State private var showing = false
 
     var body: some View {
-        Menu {
-            if !viewModel.usage.isEmpty {
-                Section(viewModel.selectedAccount.map { "Cuota de \($0.name)" } ?? "Cuota") {
-                    ForEach(viewModel.usage) { w in
-                        Text("\(w.label): \(Int(max(0, 100 - w.percent).rounded())) % libre"
-                             + (ResetFormatter.string(w.resetsAt).map { " · se reinicia \($0)" } ?? ""))
-                    }
-                }
-            } else if let note = viewModel.usageNote {
-                Section("Cuota") { Text(note) }
-            }
-            LimitPlanMenu(viewModel: viewModel)
-            ForEach(viewModel.accounts) { account in
-                Section(sectionTitle(account)) {
-                    ForEach(account.models.filter { $0.hidden != true }) { model in
-                        Button {
-                            viewModel.select(account, model: model)
-                        } label: {
-                            if account.id == viewModel.selectedAccount?.id && model.id == viewModel.selectedModel?.id {
-                                Label(model.name, systemImage: "checkmark")
-                            } else {
-                                Text(model.name)
-                            }
-                        }
-                    }
-                }
-            }
+        Button {
+            showing = true
         } label: {
             HStack(spacing: 8) {
                 QuotaBadge(account: viewModel.selectedAccount, window: viewModel.tightestWindow)
@@ -158,9 +141,12 @@ private struct ModelMenu: View {
             .frame(height: 44)
             .contentShape(.rect)
         }
-        .menuStyle(.button)
         .buttonStyle(.plain)
         .accessibilityLabel("Suscripción y modelo: \(viewModel.subtitle). \(caption)")
+        .sheet(isPresented: $showing) {
+            ModelPickerSheet(viewModel: viewModel)
+                .presentationDetents([.medium, .large])
+        }
     }
 
     /// "66 % · Semana": what's left of the window that runs out first.
@@ -173,6 +159,72 @@ private struct ModelMenu: View {
         guard let w = viewModel.tightestWindow, w.percent >= 70 else { return .secondary }
         return w.tint
     }
+}
+
+/// Every subscription and its models, the quota left and what to do when it runs out.
+private struct ModelPickerSheet: View {
+    let viewModel: ThreadViewModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if !viewModel.usage.isEmpty {
+                    Section(viewModel.selectedAccount.map { "Cuota de \($0.name)" } ?? "Cuota") {
+                        ForEach(viewModel.usage) { w in
+                            LabeledContent(w.label) {
+                                Text("\(Int(max(0, 100 - w.percent).rounded())) % libre"
+                                     + (ResetFormatter.string(w.resetsAt).map { " · se reinicia \($0)" } ?? ""))
+                            }
+                            .font(.footnote)
+                        }
+                    }
+                } else if let note = viewModel.usageNote {
+                    Section("Cuota") { Text(note).font(.footnote) }
+                }
+                if viewModel.runtime?.defaultLimitPlan != nil {   // older Macs don't support it
+                    Section {
+                        NavigationLink {
+                            LimitPlanPage(viewModel: viewModel)
+                        } label: {
+                            LabeledContent("Si se acaba la cuota") {
+                                Text((viewModel.runtime?.limitPlan ?? viewModel.runtime?.defaultLimitPlan)?.summary ?? "")
+                                    .lineLimit(2)
+                            }
+                        }
+                    }
+                }
+                ForEach(viewModel.accounts) { account in
+                    Section {
+                        ForEach(account.models.filter { $0.hidden != true }) { model in
+                            Button {
+                                viewModel.select(account, model: model)
+                                dismiss()
+                            } label: {
+                                HStack {
+                                    Text(model.name).foregroundStyle(.primary)
+                                    Spacer()
+                                    if account.id == viewModel.selectedAccount?.id && model.id == viewModel.selectedModel?.id {
+                                        Image(systemName: "checkmark").foregroundStyle(.tint)
+                                    }
+                                }
+                                .contentShape(.rect)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    } header: {
+                        HStack(spacing: 6) {
+                            ProviderBadge(account: account, size: 16)
+                            Text(sectionTitle(account)).textCase(nil)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Modelo")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Listo") { dismiss() } } }
+        }
+    }
 
     private func sectionTitle(_ account: RemoteAccount) -> String {
         let who = account.status?.email ?? account.agentName
@@ -180,49 +232,62 @@ private struct ModelMenu: View {
     }
 }
 
-/// "Si se acaba la cuota" in the model menu: the Mac's default, the subscription with most quota, one
-/// subscription·model, waiting for the reset, or asking. Lists of several are edited on the Mac.
-private struct LimitPlanMenu: View {
+/// "Si se acaba la cuota": the host's default, the subscription with most quota, one subscription·model,
+/// waiting here for the quota (or balance) to come back, or asking. Lists of several are edited on the computer.
+private struct LimitPlanPage: View {
     let viewModel: ThreadViewModel
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         let own = viewModel.runtime?.limitPlan
-        let effective = own ?? viewModel.runtime?.defaultLimitPlan
-        if viewModel.runtime?.defaultLimitPlan != nil {   // older Macs don't support it
-            Menu {
-                pick("Como en el Mac (\(viewModel.runtime?.defaultLimitPlan?.summary ?? ""))", own == nil) { viewModel.setLimitPlan(nil) }
-                pick("Pasar a la de más cuota", own?.mode == "mostQuota") { viewModel.setLimitPlan(RemoteLimitPlan(mode: "mostQuota")) }
-                Menu("Pasar a…") {
-                    ForEach(viewModel.accounts) { account in
-                        Section(account.name) {
-                            ForEach(account.models.filter { $0.hidden != true }) { model in
-                                let target = RemoteCandidate(accountId: account.id, model: model.id)
-                                pick(model.name, own?.mode == "chain" && own?.targets == [target]) {
-                                    viewModel.setLimitPlan(RemoteLimitPlan(mode: "chain", targets: [target]))
-                                }
-                            }
-                        }
+        List {
+            Section {
+                pick("Como en el host (\(viewModel.runtime?.defaultLimitPlan?.summary ?? ""))", own == nil) { viewModel.setLimitPlan(nil) }
+                pick("Esperar aquí: seguir con este mismo modelo cuando vuelva a haber cuota o saldo", own?.mode == "wait") {
+                    viewModel.setLimitPlan(RemoteLimitPlan(mode: "wait"))
+                }
+                if viewModel.runtime?.canWait == true {   // Relevo hosts
+                    pick("Automático: el mejor modelo con cuota, y volver a este cuando la recupere", own?.mode == "smart") {
+                        viewModel.setLimitPlan(RemoteLimitPlan(mode: "smart"))
                     }
                 }
+                pick("Pasar a la suscripción con más cuota", own?.mode == "mostQuota") { viewModel.setLimitPlan(RemoteLimitPlan(mode: "mostQuota")) }
+                pick("Avisarme y decidir yo", own?.mode == "ask") { viewModel.setLimitPlan(RemoteLimitPlan(mode: "ask")) }
                 if let own, own.mode == "chain", own.targets.count > 1 {
                     pick("En orden: \(own.summary ?? "")", true) {}
                 }
-                pick("Esperar a que se reinicie y seguir", own?.mode == "wait") { viewModel.setLimitPlan(RemoteLimitPlan(mode: "wait")) }
-                pick("Avisarme y decidir yo", own?.mode == "ask") { viewModel.setLimitPlan(RemoteLimitPlan(mode: "ask")) }
-            } label: {
-                Label("Si se acaba la cuota: \(effective?.summary ?? "")", systemImage: "arrow.triangle.2.circlepath")
+            }
+            ForEach(viewModel.accounts) { account in
+                Section("Pasar a \(account.name)") {
+                    ForEach(account.models.filter { $0.hidden != true }) { model in
+                        let target = RemoteCandidate(accountId: account.id, model: model.id)
+                        pick(model.name, own?.mode == "chain" && own?.targets == [target]) {
+                            viewModel.setLimitPlan(RemoteLimitPlan(mode: "chain", targets: [target]))
+                        }
+                    }
+                }
             }
         }
+        .navigationTitle("Si se acaba la cuota")
+        .navigationBarTitleDisplayMode(.inline)
     }
 
     private func pick(_ title: String, _ selected: Bool, _ action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            if selected { Label(title, systemImage: "checkmark") } else { Text(title) }
+        Button {
+            action()
+            dismiss()
+        } label: {
+            HStack {
+                Text(title).foregroundStyle(.primary)
+                Spacer()
+                if selected { Image(systemName: "checkmark").foregroundStyle(.tint) }
+            }
+            .contentShape(.rect)
         }
+        .buttonStyle(.plain)
     }
 }
 
-/// The subscription's badge with its remaining quota as a ring around it.
 private struct QuotaBadge: View {
     let account: RemoteAccount?
     let window: RemoteWindow?
@@ -244,8 +309,17 @@ private struct QuotaBadge: View {
     }
 }
 
-private struct EffortMenu: View {
+/// Takes values, not the view model's live state: redrawn only when one of them changes (see ComposerBar).
+private struct EffortMenu: View, Equatable {
     let viewModel: ThreadViewModel
+    let efforts: [String]
+    let selected: String?
+    let defaultEffort: String?
+    let title: String
+
+    nonisolated static func == (a: EffortMenu, b: EffortMenu) -> Bool {
+        a.efforts == b.efforts && a.selected == b.selected && a.defaultEffort == b.defaultEffort && a.title == b.title
+    }
 
     var body: some View {
         Menu {
@@ -253,14 +327,14 @@ private struct EffortMenu: View {
                 Button {
                     viewModel.setEffort(nil)
                 } label: {
-                    let text = "Predeterminado" + (viewModel.selectedModel?.defaultEffort.map { " (\(EffortLabel.name($0)))" } ?? "")
-                    if viewModel.runtime?.selectedEffort == nil { Label(text, systemImage: "checkmark") } else { Text(text) }
+                    let text = "Predeterminado" + (defaultEffort.map { " (\(EffortLabel.name($0)))" } ?? "")
+                    if selected == nil { Label(text, systemImage: "checkmark") } else { Text(text) }
                 }
-                ForEach(viewModel.efforts, id: \.self) { effort in
+                ForEach(efforts, id: \.self) { effort in
                     Button {
                         viewModel.setEffort(effort)
                     } label: {
-                        if viewModel.runtime?.selectedEffort == effort {
+                        if selected == effort {
                             Label(EffortLabel.name(effort), systemImage: "checkmark")
                         } else {
                             Text(EffortLabel.name(effort))
@@ -271,21 +345,23 @@ private struct EffortMenu: View {
         } label: {
             Image(systemName: "brain")
                 .font(.system(size: 17))
-                .foregroundStyle(viewModel.runtime?.selectedEffort == nil ? .secondary : .primary)
+                .foregroundStyle(selected == nil ? .secondary : .primary)
                 .frame(width: 44, height: 44)
                 .contentShape(.rect)
         }
         .menuStyle(.button)
         .buttonStyle(.plain)
-        .accessibilityLabel("Nivel de razonamiento: \(viewModel.effortTitle)")
+        .accessibilityLabel("Nivel de razonamiento: \(title)")
     }
 }
 
-private struct ModeMenu: View {
+private struct ModeMenu: View, Equatable {
     let viewModel: ThreadViewModel
+    let current: RemoteMode
+
+    nonisolated static func == (a: ModeMenu, b: ModeMenu) -> Bool { a.current == b.current }
 
     var body: some View {
-        let current = viewModel.runtime?.mode ?? .ask
         Menu {
             ForEach(RemoteMode.allCases) { mode in
                 Button {

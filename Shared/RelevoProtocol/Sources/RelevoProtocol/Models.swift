@@ -501,6 +501,10 @@ public struct RemoteQueuedMessage: Codable, Hashable, Identifiable, Sendable {
 
 /// Live state of a thread on the Mac: the agent, the banner, the suggestion and the composer selection.
 public struct RemoteRuntime: Codable, Hashable, Sendable {
+    /// The host can wait for this model's quota and carry on there (the «Esperar aquí» option).
+    public var canWait: Bool?
+    /// Waiting with no known reset time: the host checks every few minutes.
+    public var resumeUnknown: Bool?
     public var isRunning: Bool
     public var statusLine: String?
     public var limit: RemoteLimit?
@@ -534,7 +538,9 @@ public struct RemoteRuntime: Codable, Hashable, Sendable {
                 selectedAccountId: UUID?, selectedModel: String?, selectedEffort: String?, relayCandidates: [RemoteCandidate],
                 queued: [RemoteQueuedMessage]? = nil, queuePaused: Bool? = nil, usage: [RemoteWindow]? = nil, usageNote: String? = nil,
                 backgroundTasks: [RemoteBackgroundTask]? = nil, limitPlan: RemoteLimitPlan? = nil, defaultLimitPlan: RemoteLimitPlan? = nil,
-                pendingRelay: RemotePendingRelay? = nil, resumeAt: Date? = nil) {
+                pendingRelay: RemotePendingRelay? = nil, resumeAt: Date? = nil, canWait: Bool? = nil, resumeUnknown: Bool? = nil) {
+        self.canWait = canWait
+        self.resumeUnknown = resumeUnknown
         self.backgroundTasks = backgroundTasks
         self.limitPlan = limitPlan
         self.defaultLimitPlan = defaultLimitPlan

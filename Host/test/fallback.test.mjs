@@ -21,7 +21,7 @@ function stand(accounts, extra = {}) {
     select(t, accountId, model, carryOn, auto) { selects.push({ accountId, model, auto }); t.accountId = accountId; t.model = model; },
     _clearLimitTimers() {}, ...extra,
   };
-  for (const k of ['_account', '_exhausted', '_used', '_usableTarget', '_limitedUntil', '_noteLimit', '_smartTarget', '_planTarget', '_onLimit', '_preTurnSwitch', '_relayNow']) h[k] = P[k];
+  for (const k of ['_account', '_exhausted', '_used', '_usableTarget', '_limitedUntil', '_noteLimit', '_smartTarget', '_planTarget', '_onLimit', '_preTurnSwitch', '_relayNow', '_waitForQuota', '_checkQuotaBack', '_limitAction']) h[k] = P[k];
   return { h, notices, selects };
 }
 const acct = (id, kind, models, percent = 10) => ({ id, kind, name: id, models: models.map((m) => ({ id: m, name: m })), defaultModel: models[0], status: { loggedIn: true, windows: [{ percent }] } });
@@ -234,4 +234,32 @@ test('a session is renewed only when its context is really full, after the agent
   assert.match(fresh, /Tu nota de traspaso[\s\S]*Vulkan enumera 1 dispositivo/);
   assert.match(fresh, /Lo último que te ha dicho el usuario[\s\S]*El probe ya enumera Vulkan/);
   assert.doesNotMatch(preamble(teams.host, team, lead, false), /nota de traspaso \(/);
+});
+
+test("waiting here: the thread stays on its model and carries on when the balance is back", async () => {
+  const ds = acct('DS', 'api:deepseek', ['deepseek-v4-pro']);
+  ds.status = { loggedIn: true, windows: [], balance: 0 };
+  const resumed = [];
+  const { h } = stand([ds, acct('CL', 'claude', ['opus'])], { _refreshAccount: async () => {}, _resumeAfterLimit: (t) => resumed.push(t.id) });
+  h._clearLimitTimers = P._clearLimitTimers;
+  const t = { id: 'T', accountId: 'DS', model: 'deepseek-v4-pro' };
+  const r = h._rt(t);
+  r.limit = { message: 'Insufficient Balance', resetsAt: null };
+  h._limitAction(t, 'wait');
+  assert.equal(r.waitChosen, true);
+  assert.equal(r.resumeUnknown, true, 'no reset time: it will keep checking');
+  assert.ok(r.resumeAt > nowS() + 200);
+  clearTimeout(r.relayTimer);
+  await h._checkQuotaBack(t);
+  assert.equal(resumed.length, 0, 'still no balance: checks again later');
+  clearTimeout(r.relayTimer);
+  ds.status.balance = 12.5;
+  await h._checkQuotaBack(t);
+  assert.deepEqual(resumed, ['T'], 'balance back: carries on with the same model');
+  // The next time it runs out it waits again without asking, until you say otherwise.
+  h._onLimit(t);
+  assert.ok(r.resumeAt, 'waits again');
+  clearTimeout(r.relayTimer);
+  h._limitAction(t, 'cancelResume');
+  assert.equal(r.waitChosen, false);
 });

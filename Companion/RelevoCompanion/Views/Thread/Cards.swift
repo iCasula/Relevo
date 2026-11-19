@@ -25,7 +25,9 @@ private struct LimitPlanStatus: View {
             }
         } else if let at = viewModel.runtime?.resumeAt {
             VStack(alignment: .leading, spacing: 8) {
-                Label("Seguirá " + (ResetFormatter.string(at) ?? "cuando se reinicie la cuota") + " con el mismo agente, donde lo dejó",
+                Label(viewModel.runtime?.resumeUnknown == true
+                      ? "Esperando a que vuelva a haber cuota o saldo: seguirá con este mismo modelo, donde lo dejó"
+                      : "Seguirá " + (ResetFormatter.string(at) ?? "cuando se reinicie la cuota") + " con el mismo agente, donde lo dejó",
                       systemImage: "clock")
                     .font(.footnote)
                 HStack {
@@ -36,6 +38,12 @@ private struct LimitPlanStatus: View {
                 }
                 .font(.footnote)
             }
+        } else if viewModel.runtime?.canWait == true, viewModel.runtime?.limit?.isNoPlan != true {
+            // Stay on this model: the host waits for its quota (or balance) and carries on there.
+            Button("Esperar aquí y seguir con este modelo", systemImage: "clock") { viewModel.limitAction(.wait) }
+                .buttonStyle(.glass)
+                .font(.footnote)
+                .disabled(!viewModel.isConnected)
         }
     }
 }
