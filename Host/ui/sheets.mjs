@@ -1062,6 +1062,38 @@ export function openTeamEditor(hostId, teamId) {
   draw();
 }
 
+// MARK: - Held messages
+
+/** What the team held while paused: send or drop each message (much of it goes stale), or all at once. */
+export function openHeldMessages(hostId, teamId) {
+  const s = openSheet({ width: 680 });
+  let busy = false;
+  const draw = () => {
+    const team = snap(hostId)?.hostTeams?.find((x) => x.id === teamId);
+    if (!team) { s.close(); return; }
+    const list = team.heldList ?? [];
+    const when = (at) => (at ? new Date(at * 1000).toLocaleString('es-ES', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '');
+    s.el.innerHTML = `<div class="sheet-title">${icon('pause.circle', { size: 16 })} Mensajes retenidos</div>
+      <div class="sheet-sub">Mensajes entre agentes que no se entregaron porque el equipo estaba en pausa. Revísalos: muchos pueden estar ya desactualizados. Si descartas una orden, el orquestador se entera y no la da por hecha.</div>
+      <div class="decisions">${list.length ? list.map((m) => `<div class="decision"><div class="grow"><div class="caption"><b>${esc(m.from)}${m.label ? ` · ${esc(m.label)}` : ''}</b> → <b>${esc(m.to)}</b> · ${esc(when(m.at))}</div><div class="f-sum selectable" style="color:var(--text);max-height:160px">${esc(m.text)}</div></div><div style="display:flex;flex-direction:column;gap:4px"><button class="btn small primary" data-send="${esc(m.id)}">Enviar</button><button class="btn small" data-drop="${esc(m.id)}">Descartar</button></div></div>`).join('')
+        : '<div class="caption" style="padding:10px 2px">No queda ningún mensaje retenido.</div>'}</div>
+      <div class="sheet-buttons">${list.length > 1 ? '<button class="btn" data-drop-all>Descartar todos</button>' : ''}<span class="grow"></span><button class="btn" data-close>Listo</button></div>`;
+    const send = async (id, action) => {
+      if (busy) return;
+      busy = true;
+      const r = await request(hostId, { teamHeld: { teamId, id, action } });
+      busy = false;
+      if (!r.ok) { toast(r.error); return; }
+      setTimeout(draw, 200); setTimeout(draw, 800);
+    };
+    s.el.querySelectorAll('[data-send]').forEach((b) => { b.onclick = () => send(b.dataset.send, 'send'); });
+    s.el.querySelectorAll('[data-drop]').forEach((b) => { b.onclick = () => send(b.dataset.drop, 'discard'); });
+    s.el.querySelector('[data-drop-all]')?.addEventListener('click', () => send('*', 'discard'));
+    s.el.querySelector('[data-close]').onclick = s.close;
+  };
+  draw();
+}
+
 // MARK: - Team memory (milestones, decisions, research)
 
 /** Tokens and cost, short: "120k tokens · $0,40". */

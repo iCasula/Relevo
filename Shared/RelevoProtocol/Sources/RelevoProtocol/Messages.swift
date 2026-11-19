@@ -41,6 +41,8 @@ public enum ClientMessage: Codable, Sendable {
     case teamDecisions(teamId: String, add: String?, remove: String?)
     /// The team's memory: kind "milestone", "decision" or "finding"; add, remove or toggle (by number).
     case teamMemory(teamId: String, kind: String, add: String?, remove: String?, toggle: String?)
+    /// A message held while the team was paused: action "send" or "discard" (id "*" for all).
+    case teamHeld(teamId: String, id: String, action: String)
 }
 
 public enum LimitAction: String, Codable, Sendable {

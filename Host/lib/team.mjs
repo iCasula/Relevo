@@ -231,6 +231,13 @@ export class Teams {
     host.state.teams ??= [];
     this._dropOrphans();
     this._upgrade();
+    // Teams paused by an older version: why, from the notice it left (the loop guard's pause ends when you write).
+    for (const team of this.list) {
+      if (team.status !== 'paused' || team.pausedBy !== undefined) continue;
+      const lead = this._lead(team);
+      const last = [...(lead?.items ?? [])].reverse().find((i) => i.kind === 'notice' && /^Equipo (en pausa|reanudado)/.test(i.text ?? ''));
+      team.pausedBy = /mensajes automáticos/.test(last?.text ?? '') ? 'limit' : /presupuesto/.test(last?.text ?? '') ? 'budget' : 'user';
+    }
     this._watch = setInterval(() => {
       try { this.watchBackground(); this._maybeSummary(); } catch (e) { host.log?.(`team watch: ${e.message}`); }
     }, Math.min(60, BG_CHECK / 2) * 1000);
@@ -522,13 +529,11 @@ export class Teams {
     const lead = this._lead(team);
     if (action === 'pause') {
       team.status = 'paused';
-      if (lead) h._append(lead, { id: h._uuid(), kind: 'notice', text: 'Equipo en pausa: los mensajes entre agentes esperan hasta que lo reanudes' });
+      team.pausedBy = 'user';
+      if (lead) h._append(lead, { id: h._uuid(), kind: 'notice', text: 'Equipo en pausa: los mensajes entre agentes se retienen hasta que los revises o lo reanudes' });
     } else if (action === 'resume') {
-      team.status = 'active';
-      team.auto = 0;
-      if (lead) h._append(lead, { id: h._uuid(), kind: 'notice', text: 'Equipo reanudado' });
-      const held = team.held.splice(0);
-      for (const d of held) this._deliver(team, d.to, d.text, d.from, true);
+      // What was held stays for you to review one by one: much of it may be stale by now.
+      this._reactivate(team, 'Equipo reanudado');
     } else if (action === 'dissolve') {
       for (const m of team.members) {
         const t = h.threads.get(m.threadId);
@@ -552,10 +557,23 @@ export class Teams {
     }
   }
 
-  /** You wrote in one of the team's threads: the loop guard starts over. */
+  _reactivate(team, why) {
+    const h = this.host;
+    const lead = this._lead(team);
+    team.status = 'active';
+    team.pausedBy = null;
+    team.auto = 0;
+    const n = team.held.length;
+    if (lead) h._append(lead, { id: h._uuid(), kind: 'notice', text: `${why}${n ? `: ${n} mensaje${n === 1 ? '' : 's'} retenido${n === 1 ? '' : 's'} esperan tu revisión (Retenidos, en la barra del equipo)` : ''}` });
+    if (n) team.notes = [...(team.notes ?? []), `El equipo vuelve a estar activo. ${n} mensaje${n === 1 ? '' : 's'} de cuando estaba en pausa siguen retenidos sin entregar hasta que el usuario los revise: no des por hecho que llegaron; si algo sigue haciendo falta, vuelve a pedirlo.`];
+    if (lead) h._changed(lead);
+  }
+
+  /** You wrote in one of the team's threads: the loop guard starts over, and a pause it caused ends. */
   userSpoke(thread) {
     const team = this.of(thread);
     if (!team) return;
+    if (team.status === 'paused' && team.pausedBy === 'limit') this._reactivate(team, 'Equipo reactivado por tu mensaje');
     team.auto = 0;
     if (team.status === 'done') team.status = 'active'; // you asked for more
   }
@@ -570,6 +588,9 @@ export class Teams {
     if (member.role === 'orchestrator' && team.notes?.length) {
       notes = `${team.notes.map((n) => `(${n})`).join('\n')}\n\n`;
       team.notes = [];
+    }
+    if (member.role === 'orchestrator' && team.status === 'paused') {
+      notes += `(El equipo está EN PAUSA: las órdenes que des se retienen sin entregar hasta que el usuario las revise o lo reanude; hay ${team.held.length} retenidas. No digas que las has enviado.)\n\n`;
     }
     if (thread.teamPrimed && !freshSession) return notes;
     thread.teamPrimed = true;
@@ -846,6 +867,7 @@ export class Teams {
       }
     } else {
       team.status = 'paused';
+      team.pausedBy = 'budget';
       if (lead) {
         h._append(lead, { id: h._uuid(), kind: 'notice', text: `Equipo en pausa: presupuesto de hoy superado (${spent}). Reanúdalo cuando quieras.` });
         this._attention(lead, 'presupuesto', `Equipo en pausa: presupuesto de hoy superado (${spent})`);
@@ -1049,10 +1071,9 @@ export class Teams {
         if (!o.body) return;
         // Answers saved because it hadn't asked anything go with its next task.
         const notes = to.stash?.length ? `(Notas anteriores del ${lead.name}: ${to.stash.join(' · ')})\n\n` : '';
-        const tt = h.threads.get(to.threadId);
-        const delivered = !tt || !this._busy(tt) || o.type === 'urgente';
-        this._deliver(team, to, `${notes}${o.body}`, { ...from, label: o.type === 'urgente' ? 'urgente' : 'tarea' }, false, o.type === 'urgente');
-        if (delivered) { to.stash = []; this._setTask(to, 'en curso', clip(o.body.replace(/\s+/g, ' '), 140)); }
+        const res = this._deliver(team, to, `${notes}${o.body}`, { ...from, label: o.type === 'urgente' ? 'urgente' : 'tarea' }, false, o.type === 'urgente');
+        // On the board only what really went out (not what bounced off someone busy or is held in a pause).
+        if (res === 'sent' || res === 'queued') { to.stash = []; this._setTask(to, 'en curso', clip(o.body.replace(/\s+/g, ' '), 140)); }
         return;
       }
       case 'investigar': {
@@ -1151,24 +1172,25 @@ export class Teams {
     const busy = target && this._busy(target);
     if (busy && !urgent && member.role !== 'orchestrator' && (from.role === 'orchestrator' || from.role === 'researcher')) {
       this._bounce(team, member, text, from);
-      return;
+      return 'bounced';
     }
-    if (team.status === 'paused' && !resumed) { team.held.push({ to: member, text, from }); return; }
+    if (team.status === 'paused' && !resumed) { this._hold(team, member, text, from); return 'held'; }
     team.auto += 1;
     if (team.auto > AUTO_LIMIT && team.status === 'active') {
       team.status = 'paused';
-      team.held.push({ to: member, text, from });
+      team.pausedBy = 'limit';
       const lead = this._lead(team);
       if (lead) {
-        h._append(lead, { id: h._uuid(), kind: 'notice', text: `Equipo en pausa tras ${AUTO_LIMIT} mensajes automáticos seguidos sin ti. Reanúdalo cuando quieras.` });
+        h._append(lead, { id: h._uuid(), kind: 'notice', text: `Equipo en pausa tras ${AUTO_LIMIT} mensajes automáticos seguidos sin ti. Tu próximo mensaje lo reactiva; lo retenido queda para que lo revises uno a uno.` });
         this._attention(lead, 'pausa', `Equipo en pausa tras ${AUTO_LIMIT} mensajes automáticos seguidos sin ti`);
         h._changed(lead);
       }
+      this._hold(team, member, text, from);
       h._broadcastSnapshot();
-      return;
+      return 'held';
     }
     const t = h.threads.get(member.threadId);
-    if (!t) return;
+    if (!t) return 'gone';
     if (member.role === 'orchestrator' && team.notes?.length) {
       text = `${team.notes.map((n) => `(${n})`).join('\n')}\n\n${text}`;
       team.notes = [];
@@ -1189,7 +1211,7 @@ export class Teams {
     const r = h._rt(t);
     if (urgent && r.isRunning && member.role !== 'orchestrator') {
       h.sendNow(t, text, { ...meta, prompt: `${prompt}\n\n(Esto interrumpe lo que estabas haciendo: atiéndelo primero.)` });
-      return;
+      return 'sent';
     }
     if (r.isRunning || r.approvals.size) {
       // Whatever arrives for someone busy goes as one message when its turn ends, not one turn per message.
@@ -1207,9 +1229,59 @@ export class Teams {
         h.agents.get(t.id)?.interrupt();
       }
       h._changed(t);
-      return;
+      return 'queued';
     }
     h._startTurn(t, text, false, { ...meta, prompt });
+    return 'sent';
+  }
+
+  /**
+   * While the team is paused a message is kept, not lost: you review each one (send it or drop it), and the
+   * orchestrator is told its order is waiting, so it doesn't believe it went out.
+   */
+  _hold(team, member, text, from) {
+    const h = this.host;
+    team.held.push({ id: h._uuid(), toThread: member.threadId, text, from, at: Date.now() / 1000 });
+    const lead = this._lead(team);
+    if (lead && from.role === 'orchestrator') {
+      h._append(lead, { id: h._uuid(), kind: 'notice', text: `Retenido (equipo en pausa): tu mensaje para ${member.name}. El usuario decide si se envía.` });
+      h._changed(lead);
+    }
+    h._saveState();
+    h._broadcastSnapshot();
+  }
+
+  /** The held messages as the apps show them (older entries get an id the first time). */
+  heldList(team) {
+    const h = this.host;
+    return team.held.map((d) => {
+      d.id ??= h._uuid();
+      const to = team.members.find((m) => m.threadId === (d.toThread ?? d.to?.threadId));
+      return { id: d.id, to: to?.name ?? d.to?.name ?? '?', toThread: to?.threadId ?? null, from: d.from?.name ?? '?', label: d.from?.label ?? null, text: clip(String(d.text ?? ''), 1500), at: d.at ?? null };
+    });
+  }
+
+  /** You send or drop one held message (or all of them). The orchestrator hears what was dropped. */
+  reviewHeld(teamId, id, action) {
+    const h = this.host;
+    const team = this.byId(teamId);
+    if (!team) throw new Error('Equipo desconocido');
+    const picked = id === '*' ? [...team.held] : team.held.filter((d) => (d.id ?? '') === id);
+    if (!picked.length) throw new Error('Ese mensaje ya no está retenido');
+    team.held = team.held.filter((d) => !picked.includes(d));
+    const dropped = [];
+    for (const d of picked) {
+      const to = team.members.find((m) => m.threadId === (d.toThread ?? d.to?.threadId));
+      if (!to) continue;
+      if (action === 'send') {
+        const res = this._deliver(team, to, d.text, d.from, true, d.from?.label === 'urgente');
+        if (['sent', 'queued'].includes(res) && to.role !== 'orchestrator' && ['tarea', 'urgente'].includes(d.from?.label)) this._setTask(to, 'en curso', clip(String(d.text).replace(/\s+/g, ' '), 140));
+      } else if (d.from?.role === 'orchestrator') dropped.push(`para ${to.name}: «${clip(String(d.text).replace(/\s+/g, ' '), 100)}»`);
+    }
+    if (dropped.length) team.notes = [...(team.notes ?? []), `El usuario ha descartado ${dropped.length === 1 ? 'tu mensaje retenido' : `${dropped.length} mensajes tuyos retenidos`} ${dropped.join('; ')}. No se entregó: vuelve a darlo solo si sigue valiendo.`];
+    h._saveState();
+    h._broadcastSnapshot();
+    return {};
   }
 
   /**
@@ -1253,7 +1325,8 @@ export class Teams {
       const task = m.task?.text ? ` · tarea «${clip(m.task.text, 90)}» (${m.task.state} desde las ${new Date(m.task.since * 1000).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })})` : '';
       return `${m.name} ${state}${waiting ? `, con ${waiting} mensaje${waiting === 1 ? '' : 's'} sin entregar` : ''}${task}`;
     }).filter(Boolean);
-    return `Estado del equipo: ${parts.join(' | ')}`;
+    const paused = team.status === 'paused' ? `EQUIPO EN PAUSA: tus órdenes se retienen sin entregar hasta que el usuario las revise (${team.held.length} retenidas). ` : '';
+    return `${paused}Estado del equipo: ${parts.join(' | ')}`;
   }
 }
 

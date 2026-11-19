@@ -280,7 +280,7 @@ final class CompanionPeer {
             case .resumeNow: Task { await rt.resumeAfterReset(force: true) }
             case .cancelResume: rt.cancelResume()
             }
-        case .teamAction, .teamDecisions, .teamMemory:
+        case .teamAction, .teamDecisions, .teamMemory, .teamHeld:
             break // teams live on Relevo hosts
         case .newThread(let projectId, let requestId):
             guard let project = store.project(projectId), let t = store.newThread(in: project, select: false) else {

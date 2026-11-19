@@ -111,6 +111,10 @@ struct TeamStrip: View {
                 Button(action: showTeam) {
                     HStack(spacing: 5) {
                         Label(team.isPaused ? "En pausa" : "Equipo", systemImage: team.isPaused ? "pause.circle.fill" : "person.3.sequence")
+                        if let held = team.heldList?.count, held > 0 {
+                            Text("· \(held) retenidos")
+                                .foregroundStyle(.orange)
+                        }
                         if let count = team.milestones?.count, count > 0 {
                             Text("\(team.milestonesDone)/\(count)")
                                 .monospacedDigit()
@@ -189,6 +193,9 @@ struct TeamSheet: View {
                         }
                     } footer: {
                         Text("Cambia nombres, modelos o el plan si se acaba la cuota desde Relevo en el ordenador.")
+                    }
+                    if let held = team.heldList, !held.isEmpty {
+                        HeldSection(team: team, held: held, client: client)
                     }
                     MilestonesSection(team: team, client: client)
                     DecisionsSection(team: team, client: client)
@@ -299,6 +306,47 @@ private struct MilestonesSection: View {
         guard !text.isEmpty else { return }
         client.send(.teamMemory(teamId: team.id, kind: "milestone", add: text, remove: nil, toggle: nil))
         draft = ""
+    }
+}
+
+/// Messages held while the team was paused: send or drop each one (many go stale).
+private struct HeldSection: View {
+    let team: RemoteTeam
+    let held: [RemoteHeldMessage]
+    let client: CompanionClient
+
+    var body: some View {
+        Section {
+            ForEach(held) { message in
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 4) {
+                        Text("\(message.from) → \(message.to)").fontWeight(.semibold)
+                        if let label = message.label { Text("· \(label)") }
+                        Spacer()
+                        if let at = message.at { Text(at, format: .dateTime.hour().minute()).monospacedDigit() }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    Text(message.text)
+                        .font(.callout)
+                        .lineLimit(6)
+                    HStack {
+                        Button("Enviar", systemImage: "paperplane") { client.send(.teamHeld(teamId: team.id, id: message.id, action: "send")) }
+                            .buttonStyle(.borderedProminent)
+                        Button("Descartar", systemImage: "trash", role: .destructive) { client.send(.teamHeld(teamId: team.id, id: message.id, action: "discard")) }
+                            .buttonStyle(.bordered)
+                    }
+                    .controlSize(.small)
+                    .disabled(!client.isConnected)
+                }
+                .padding(.vertical, 2)
+            }
+        } header: {
+            Label("Retenidos (\(held.count))", systemImage: "pause.circle")
+                .foregroundStyle(.orange)
+        } footer: {
+            Text("No se entregaron porque el equipo estaba en pausa. Si descartas una orden, el orquestador se entera.")
+        }
     }
 }
 

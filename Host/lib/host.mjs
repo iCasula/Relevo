@@ -49,7 +49,7 @@ export function modelScore(m, tier) {
 }
 /** What this host does beyond the shared protocol; clients show those controls only when listed. */
 export const HOST_FEATURES = ['teams', 'projects', 'threads', 'git', 'images', 'usage', 'login', 'settings', 'limitPlans', 'history', 'titles', 'accounts',
-  'turns', 'worktrees', 'pullRequests', 'suggest', 'quickActions', 'attachments', 'teamRename', 'teamDecisions', 'teamMemory', 'smartFallback', 'teamBudget'];
+  'turns', 'worktrees', 'pullRequests', 'suggest', 'quickActions', 'attachments', 'teamRename', 'teamDecisions', 'teamMemory', 'smartFallback', 'teamBudget', 'teamHeld'];
 const IMAGE_UPLOAD = /\.(png|jpe?g|gif|webp)$/i;
 
 /** Providers this host can run. Each account is one provider with its own CLI login on this machine. */
@@ -477,6 +477,7 @@ export class Host {
       case 'teamAction': run(() => this.teams.action(a.teamId, a.action)); break;
       case 'updateTeam': run(() => this.teams.update(String(a.teamId).toUpperCase(), a.changes ?? {})); break;
       case 'teamDecisions': run(() => this.teams.editDecisions(String(a.teamId).toUpperCase(), { add: a.add, remove: a.remove })); break;
+      case 'teamHeld': run(() => this.teams.reviewHeld(String(a.teamId).toUpperCase(), String(a.id ?? ''), a.action === 'send' ? 'send' : 'discard')); break;
       case 'teamMemory': run(() => this.teams.editMemory(String(a.teamId).toUpperCase(), { kind: a.kind, add: a.add, remove: a.remove, toggle: a.toggle })); break;
       case 'pullRequest': if (t) run(async () => ({ pr: await gitops.pullRequest(t.projectPath) })); break;
       case 'createPullRequest': if (t) run(async () => {
@@ -1758,6 +1759,7 @@ export class Host {
         milestones: (x.milestones ?? []).map((m) => clean({ id: m.id, text: m.text, done: m.done, at: m.at, doneAt: m.doneAt })),
         findings: (x.findings ?? []).map((f) => ({ id: f.id, topic: f.topic, summary: f.summary, links: f.links ?? [], by: f.by, at: f.at })),
         budget: x.budget ?? undefined,
+        heldList: this.teams.heldList(x), pausedBy: x.pausedBy ?? undefined,
         members: x.members.map((m) => { const t = this.threads.get(m.threadId); return clean({ threadId: m.threadId, role: m.role, name: m.name, notes: m.notes, accountId: t?.accountId, model: t?.model ?? 'default', task: m.task ?? undefined, stash: m.stash?.length || undefined, fallback: t ? fallbackOf(t.limitPlan) : undefined, today: t ? this._spendToday(t) : undefined }); }) })),
       hostSettings: { ...settings, limitPlanSummary: this._planSummary(settings.limitPlan), accounts: this._accountDefs() },
       hostProviders: {

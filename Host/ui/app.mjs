@@ -453,8 +453,11 @@ function renderTeamBar() {
     }).join('');
     const total = team.members.reduce((acc, m) => ({ tokens: acc.tokens + (m.today?.tokens ?? 0), cost: acc.cost + (m.today?.cost ?? 0), estimated: acc.estimated || !!m.today?.estimated }), { tokens: 0, cost: 0, estimated: false });
     const spent = total.cost ? `${total.estimated ? '≈ ' : ''}${usd(total.cost)} hoy` : total.tokens ? `${shortTokens(total.tokens)} hoy` : '';
-    const status = team.status === 'paused' ? `<span class="team-status orange">En pausa${team.held ? ` · ${team.held} mensaje${team.held === 1 ? '' : 's'} esperando` : ''}</span>`
-      : team.status === 'done' ? `<span class="team-status green">${icon('checkmark.circle.fill', { size: 11 })} Objetivo cumplido</span>` : '';
+    const why = { limit: 'tras muchos mensajes automáticos', budget: 'por el presupuesto', user: '' }[team.pausedBy] ?? '';
+    const status = (team.status === 'paused' ? `<span class="team-status orange" title="${esc(why ? `En pausa ${why}` : 'En pausa')}">En pausa</span>` : '')
+      + (team.held && has(hostId, 'teamHeld') ? `<button class="btn small held-btn" data-team-held title="Mensajes entre agentes retenidos durante la pausa: revísalos uno a uno">${icon('pause.circle', { size: 11 })} Retenidos · ${team.held}</button>`
+        : team.held ? `<span class="team-status orange">${team.held} mensaje${team.held === 1 ? '' : 's'} esperando</span>` : '')
+      + (team.status === 'done' ? `<span class="team-status green">${icon('checkmark.circle.fill', { size: 11 })} Objetivo cumplido</span>` : '');
     html = `<span class="team-label" title="${esc(team.goal)}">${icon('person.3.sequence', { size: 13 })}Equipo</span>${chips}<span class="grow"></span>${status}`
       + (team.status === 'paused' ? `<button class="btn small" data-team-act="resume">${icon('play.rectangle', { size: 11 })} Reanudar</button>`
         : team.status === 'active' ? `<button class="btn small" data-team-act="pause" title="Los mensajes entre agentes esperan; tú puedes seguir escribiendo">${icon('pause.circle', { size: 11 })} Pausar</button>` : '')
@@ -782,11 +785,22 @@ function switchHTML(hostId, threadId) {
   return `<div class="card switch-card">${icon('arrow.triangle.2.circlepath', { size: 13, cls: 'muted' })}<span class="grow">Cambio a ${badge(a, 14)}<b>${esc(a?.name ?? '?')} · ${esc(modelName(a, p.model))}</b> en <span data-secs="${esc(`${hostId}/${threadId}`)}">${secs}</span> s${relay ? ' <span class="caption">(con todo el contexto)</span>' : ''}</span><button class="btn small" data-switch="undo" title="No cambiar de modelo">Deshacer</button><button class="btn small primary" data-switch="now">Ya</button></div>`;
 }
 
+/** Messages for this thread held while its team is paused: each one sent or dropped by you. */
+function heldHTML(hostId, threadId) {
+  const summary = summaryOf(hostId, threadId);
+  const team = summary?.team && teamOf(hostId, summary.team.id);
+  const list = (team?.heldList ?? []).filter((x) => x.toThread === threadId);
+  if (!list.length) return '';
+  const when = (at) => (at ? clock(at) : '');
+  return `<div class="card queue-card held-card"><div class="qh paused">${icon('pause.circle', { size: 11 })}<span class="grow">Retenidos ${team.status === 'paused' ? 'por la pausa del equipo' : 'mientras el equipo estaba en pausa'}: no le han llegado</span></div>`
+    + list.map((m) => `<div class="qr"><span class="n" title="${esc(fullDate(m.at))}">${esc(when(m.at))}</span><span class="tx" title="${esc(m.text)}"><b>${esc(m.from)}${m.label ? ` · ${esc(m.label)}` : ''}:</b> ${esc(m.text)}</span><button class="btn small" data-held-send="${esc(m.id)}" title="Entregarlo ahora">Enviar</button><button class="icon-plain tert" data-held-drop="${esc(m.id)}" title="Descartarlo (el orquestador se entera)">${icon('xmark.circle.fill', { size: 13 })}</button></div>`).join('') + '</div>';
+}
+
 function renderQueue() {
   const { hostId, threadId, thread } = current();
   const rt = thread?.runtime;
   const q = rt?.queued ?? [];
-  let html = switchHTML(hostId, threadId);
+  let html = switchHTML(hostId, threadId) + heldHTML(hostId, threadId);
   if (q.length) {
     html += `<div class="card queue-card"><div class="qh${rt.queuePaused ? ' paused' : ''}">${icon(rt.queuePaused ? 'pause.circle' : 'text.append', { size: 11 })}<span class="grow">${rt.queuePaused ? 'Cola en pausa' : 'En cola · se envían al terminar cada turno'}</span>${rt.queuePaused ? `<button class="btn small" data-cmd="resumeQueue"${rt.isRunning ? ' disabled' : ''} title="Enviar el siguiente mensaje de la cola">Reanudar</button>` : ''}</div>`
       + q.map((m, i) => `<div class="qr"><span class="n">${i + 1}</span><span class="tx">${esc(m.text)}</span><button class="icon-plain orange" data-queued-now="${esc(m.id)}" title="Enviar ya: interrumpe al agente y le manda este mensaje ahora">${icon('bolt.fill', { size: 12 })}</button><button class="icon-plain tert" data-dequeue="${esc(m.id)}" title="Quitar de la cola">${icon('xmark.circle.fill', { size: 13 })}</button></div>`).join('')
@@ -1128,6 +1142,12 @@ document.addEventListener('click', (e) => {
     return;
   }
   if (d.teamMenu !== undefined) { teamMenu(el); return; }
+  if (d.teamHeld !== undefined) { const id = summaryOf(hostId, threadId)?.team?.id; if (id) sheets.openHeldMessages(hostId, id); return; }
+  if (d.heldSend || d.heldDrop) {
+    const id = summaryOf(hostId, threadId)?.team?.id;
+    if (id) request(hostId, { teamHeld: { teamId: id, id: d.heldSend ?? d.heldDrop, action: d.heldSend ? 'send' : 'discard' } }).then((r) => { if (!r.ok) toast(r.error); });
+    return;
+  }
   if (d.teamMemory !== undefined) { const id = summaryOf(hostId, threadId)?.team?.id; if (id) sheets.openTeamMemory(hostId, id, d.teamMemory || undefined); return; }
   if (d.teamEdit !== undefined) { const id = summaryOf(hostId, threadId)?.team?.id; if (id) sheets.openTeamEditor(hostId, id); return; }
   if (d.approve) { sendTo(hostId, Client.approve(threadId, d.approve, d.option)); return; }

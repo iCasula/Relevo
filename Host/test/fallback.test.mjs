@@ -119,3 +119,23 @@ test("the day's summary: milestones, decisions, research and spend, without an A
   assert.match(text, /Orquestador 120k tokens \(≈ 1\.50 USD\)/);
   assert.match(text, /Ejecutor: shaders \(en curso\)/);
 });
+
+test("a pause the loop guard caused ends when you write, without sending what it held", async () => {
+  const appended = [];
+  const lead = { items: [] };
+  const team = { status: 'paused', pausedBy: 'limit', auto: 61, held: [{ id: 'x', text: 'vieja', from: { role: 'orchestrator' } }], members: [] };
+  const ctx = {
+    host: { _append: (t, it) => appended.push(it.text), _changed() {}, _uuid: () => 'u' },
+    of: () => team, _lead: () => lead, _reactivate: Teams.prototype._reactivate,
+  };
+  Teams.prototype.userSpoke.call(ctx, {});
+  assert.equal(team.status, 'active');
+  assert.equal(team.auto, 0);
+  assert.equal(team.held.length, 1, 'held stays for review');
+  assert.match(appended[0], /reactivado por tu mensaje: 1 mensaje retenido/);
+  assert.match(team.notes[0], /no des por hecho que llegaron/);
+  // Paused by you: it stays paused.
+  team.status = 'paused'; team.pausedBy = 'user';
+  Teams.prototype.userSpoke.call(ctx, {});
+  assert.equal(team.status, 'paused');
+});

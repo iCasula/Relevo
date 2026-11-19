@@ -133,10 +133,35 @@ test('pausing holds the messages between agents until the team is resumed', asyn
   await next(idle, 20_000);
   assert.ok((await request('teamAction', { teamId: team.id, action: 'pause' })).ok);
   peer.send(Client.send(lead, '<relevo:tarea para="Ejecutor">haz algo</relevo:tarea>'));
-  const held = await next((m) => m.snapshot?._0.hostTeams?.[0]?.held === 1);
+  const held = await next((m) => m.snapshot?._0.hostTeams?.[0]?.heldList?.some((x) => /haz algo/.test(x.text)));
   assert.equal(held.snapshot._0.hostTeams[0].status, 'paused');
+  const item = held.snapshot._0.hostTeams[0].heldList.find((x) => /haz algo/.test(x.text));
+  assert.equal(item.to, 'Ejecutor');
+  assert.match(item.text, /haz algo/);
+  // Resuming doesn't send what was held: you review it, one by one.
   assert.ok((await request('teamAction', { teamId: team.id, action: 'resume' })).ok);
-  await next(fromMember('Ejecutor', 'informe'));
+  // (Snapshots from before the pause may still be waiting in the inbox: this one is active *and* still holds it.)
+  await next((m) => { const x = m.snapshot?._0.hostTeams?.[0]; return x?.status === 'active' && x.heldList.some((y) => y.id === item.id); });
+  assert.ok((await request('teamHeld', { teamId: team.id, id: item.id, action: 'send' })).ok);
+  await next((m) => m.snapshot?._0.hostTeams?.[0] && !m.snapshot._0.hostTeams[0].heldList.some((x) => x.id === item.id));
+  await next(fromMember('Ejecutor', 'informe'), 20_000);
+  // Whatever else was held (a report that arrived during the pause) is dropped here, to start the next test clean.
+  if ((await request('teamHeld', { teamId: team.id, id: '*', action: 'discard' })).ok) await next((m) => m.snapshot?._0.hostTeams?.[0]?.held === 0);
+});
+
+test("a held order you drop never goes out, and the orchestrator is told; a pause shows in what it's told", async () => {
+  await next(idle, 20_000);
+  assert.ok((await request('teamAction', { teamId: team.id, action: 'pause' })).ok);
+  peer.send(Client.send(lead, '<relevo:tarea para="Ejecutor">tarea vieja</relevo:tarea>'));
+  const snap = (await next((m) => m.snapshot?._0.hostTeams?.[0]?.heldList?.some((x) => /tarea vieja/.test(x.text)))).snapshot._0;
+  const item = snap.hostTeams[0].heldList.find((x) => /tarea vieja/.test(x.text));
+  assert.ok((await request('teamHeld', { teamId: team.id, id: item.id, action: 'discard' })).ok);
+  await next(idle, 20_000);
+  // Its next message carries the pause and what you dropped (the echo agent repeats its prompt).
+  peer.send(Client.send(lead, 'hola'));
+  const reply = await next((m) => m.threadPatch?._0.id === lead && m.threadPatch._0.upserts.some((i) => i.kind === 'assistant' && /EN PAUSA/.test(i.text ?? '') && /hola/.test(i.text ?? '')), 20_000);
+  assert.match(reply.threadPatch._0.upserts.find((i) => i.kind === 'assistant').text, /descartado tu mensaje retenido para Ejecutor: «tarea vieja/);
+  assert.ok((await request('teamAction', { teamId: team.id, action: 'resume' })).ok);
 });
 
 test('a coordinator joins a thread that already did work: the thread becomes the executor', async () => {

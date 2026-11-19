@@ -253,6 +253,15 @@ public struct RemoteTeamFinding: Codable, Hashable, Identifiable, Sendable {
     public var at: Date?
 }
 
+public struct RemoteHeldMessage: Codable, Hashable, Identifiable, Sendable {
+    public var id: String
+    public var to: String
+    public var from: String
+    public var label: String?
+    public var text: String
+    public var at: Date?
+}
+
 /// Tokens and cost of an agent's turns today.
 public struct RemoteSpend: Codable, Hashable, Sendable {
     public var tokens: Int
@@ -275,6 +284,8 @@ public struct RemoteTeam: Codable, Hashable, Identifiable, Sendable {
     public var milestones: [RemoteTeamMilestone]?
     /// The researcher's reports, kept.
     public var findings: [RemoteTeamFinding]?
+    /// Messages between agents held while the team was paused, for you to send or drop.
+    public var heldList: [RemoteHeldMessage]?
 
     public var milestonesDone: Int { milestones?.filter(\.done).count ?? 0 }
     public var currentMilestone: RemoteTeamMilestone? { milestones?.first { !$0.done } }
