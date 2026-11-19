@@ -162,3 +162,23 @@ test('an agent only waiting on background work gets messages; one mid-turn still
   assert.equal(teams._deliver(team, ex, 'respuesta', { ...from, label: 'respuesta' }), 'queued');
   void lead;
 });
+
+test("the safety net: a finished turn whose words never reached the team is sent, once", () => {
+  const sent = [], notices = [];
+  const t = { id: 'E', title: 'Ejecutor 2', queued: [], items: [{ kind: 'user', text: 'tarea', done: true, date: 1 }] };
+  const teams = Object.create(Teams.prototype);
+  teams.host = { threads: new Map([['E', t]]), _rt: () => ({ isRunning: false, approvals: new Map() }), _append: (th, it) => { th.items.push({ ...it, date: 2 }); notices.push(it.text); }, _changed() {}, _uuid: () => 'u', log() {} };
+  teams.onTurnFinished = (th, a) => sent.push(a.text);
+  Object.defineProperty(teams, 'list', { value: [{ status: 'active', members: [{ threadId: 'E', role: 'executor', name: 'Ejecutor 2' }] }] });
+  teams.sweepUnreported(1e12);
+  assert.equal(t.teamReportedUpTo, 1, 'older threads: what is there counts as told');
+  t.items.push({ kind: 'assistant', text: 'ESTADO: hecho <relevo:pregunta>¿restauro el volcado?</relevo:pregunta>', date: 3 });
+  teams.sweepUnreported(3 * 1000 + 5_000);
+  assert.equal(sent.length, 0, 'too soon: it may still be on its way');
+  teams.sweepUnreported(3 * 1000 + 30_000);
+  assert.equal(sent.length, 1);
+  assert.match(sent[0], /restauro el volcado/);
+  assert.match(notices[0], /no había llegado/);
+  teams.sweepUnreported(1e12);
+  assert.equal(sent.length, 1, 'not twice');
+});

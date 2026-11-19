@@ -240,7 +240,7 @@ export class Teams {
       team.pausedBy = /mensajes automáticos/.test(last?.text ?? '') ? 'limit' : /presupuesto/.test(last?.text ?? '') ? 'budget' : 'user';
     }
     this._watch = setInterval(() => {
-      try { this.watchBackground(); this._maybeSummary(); } catch (e) { host.log?.(`team watch: ${e.message}`); }
+      try { this.watchBackground(); this._maybeSummary(); this.sweepUnreported(); } catch (e) { host.log?.(`team watch: ${e.message}`); }
     }, Math.min(60, BG_CHECK / 2) * 1000);
     this._watch.unref?.();
   }
@@ -986,6 +986,40 @@ export class Teams {
     r.context = null;
     h._append(t, { id: h._uuid(), kind: 'notice', text: 'Sesión renovada para no arrastrar todo el contexto: el siguiente mensaje lleva un resumen, su tarea y las decisiones del equipo' });
     h._changed(t);
+  }
+
+  /**
+   * The safety net: an agent that finished a turn whose words never reached the team (whatever went wrong on
+   * the way) gets them sent now, once its thread has been quiet for a moment. Each turn at most twice.
+   */
+  sweepUnreported(nowMs = Date.now()) {
+    const h = this.host;
+    for (const team of this.list) {
+      if (team.status === 'done') continue;
+      for (const member of team.members) {
+        const t = h.threads.get(member.threadId);
+        if (!t) continue;
+        // Threads from before this existed: everything so far counts as told.
+        if (t.teamReportedUpTo === undefined) { t.teamReportedUpTo = t.items.length; continue; }
+        const r = h._rt(t);
+        if (r.isRunning || r.approvals.size || r.sendNow || r.pendingSwitch || t.queued.length) continue;
+        const items = t.items.slice(t.teamReportedUpTo);
+        const lastUser = [...t.items].reverse().find((i) => i.kind === 'user');
+        const said = items.filter((i) => i.kind === 'assistant' && i.text?.trim());
+        const last = t.items[t.items.length - 1];
+        if (!said.length || !lastUser?.done || (last?.date ?? 0) * 1000 > nowMs - 20_000) continue;
+        if ((t.teamSweeps ?? 0) >= 2 && t.teamSweptAt === t.items.length) continue;
+        t.teamSweeps = t.teamSweptAt === t.items.length ? (t.teamSweeps ?? 0) + 1 : 1;
+        t.teamSweptAt = t.items.length;
+        h.log?.(`equipo: «${t.title}» terminó un turno que no llegó al equipo; se envía ahora`);
+        h._append(t, { id: h._uuid(), kind: 'notice', text: 'Relevo envía ahora al equipo lo último que dijo este agente: no había llegado' });
+        h._changed(t);
+        try {
+          this.onTurnFinished(t, { text: said.map((i) => i.text).join('\n\n'), changes: null, errors: items.filter((i) => i.kind === 'error').map((i) => i.text), background: [] });
+          t.teamReportedUpTo = t.items.length;
+        } catch (e) { h.log?.(`equipo: no se pudo enviar lo de «${t.title}»: ${e?.stack ?? e}`); }
+      }
+    }
   }
 
   /**

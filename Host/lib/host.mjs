@@ -1534,19 +1534,29 @@ export class Host {
       r.keys.clear();
       t.updatedAt = now();
       this._changed(t);
-      if (t.team && !r.limitHit && !r.sendNow && !r.stopRequested && !r.pendingSwitch) {
+      const skip = !t.team ? null : r.limitHit ? 'límite de cuota' : r.sendNow ? 'mensaje urgente' : r.stopRequested ? 'detenido' : r.pendingSwitch ? 'cambio de modelo' : null;
+      if (t.team && skip) {
+        this.log(`equipo: el turno de «${t.title}» no se informa (${skip})`);
+        // Stopped by you or out of quota: deliberately not reported. The others carry on and report next.
+        if (r.stopRequested || r.limitHit) t.teamReportedUpTo = t.items.length;
+      } else if (t.team) {
         // Only what's new since the last report (a turn the agent resumed by itself continues the same request).
         const start = Math.max(userItem ? t.items.indexOf(userItem) + 1 : 0, r.reportedUpTo?.get(userItem?.id) ?? 0);
         const turn = t.items.slice(start);
         r.reportedUpTo = new Map([[userItem?.id, t.items.length]]);
-        this.teams.onTurnFinished(t, {
-          text: turn.filter((i) => i.kind === 'assistant' && i.text).map((i) => i.text).join('\n\n'),
-          changes: userItem?.turnChanges ?? null,
-          errors: turn.filter((i) => i.kind === 'error').map((i) => i.text),
-          // Only what this turn left running means «it's waiting»: a job from before (maybe the very one whose end
-          // woke it up, still listed for a moment) doesn't hold back what it says now.
-          background: (r.backgroundTasks ?? []).filter((b) => (b.startedAt ?? 0) >= (r.turnStartedAt ?? 0) - 2),
-        });
+        try {
+          this.teams.onTurnFinished(t, {
+            text: turn.filter((i) => i.kind === 'assistant' && i.text).map((i) => i.text).join('\n\n'),
+            changes: userItem?.turnChanges ?? null,
+            errors: turn.filter((i) => i.kind === 'error').map((i) => i.text),
+            // Only what this turn left running means «it's waiting»: a job from before (maybe the very one whose end
+            // woke it up, still listed for a moment) doesn't hold back what it says now.
+            background: (r.backgroundTasks ?? []).filter((b) => (b.startedAt ?? 0) >= (r.turnStartedAt ?? 0) - 2),
+          });
+          t.teamReportedUpTo = t.items.length;
+        } catch (e) {
+          this.log(`equipo: fallo al informar del turno de «${t.title}»: ${e?.stack ?? e}`);
+        }
       }
       if (r.pendingSwitch) {
         const { accountId, model, carryOn, auto } = r.pendingSwitch;

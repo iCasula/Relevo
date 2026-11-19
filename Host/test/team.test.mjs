@@ -484,3 +484,13 @@ test("what an agent says reaches the orchestrator even with an older job still l
   peer.send(Client.send(boss, '<relevo:tarea para="Ejecutor">fondo antiguo</relevo:tarea>'));
   await next((m) => m.threadPatch?._0.id === boss && m.threadPatch._0.upserts.some((i) => i.kind === 'user' && /Sin cambios respecto a mi informe/.test(i.text ?? '')), 20_000);
 });
+
+test('a report that ends with a question reaches the orchestrator as a question', async () => {
+  const claude = snapshot.accounts.find((a) => a.kind === 'claude');
+  const r = await request('createTeam', { team: { projectId: demo(), goal: 'Informe con pregunta', orchestrator: { accountId: claude.id }, executors: [{ accountId: claude.id }], researcher: null } });
+  const boss = r.threadId;
+  peer.send(Client.subscribe(boss));
+  await next(firstDone(boss));
+  peer.send(Client.send(boss, '<relevo:tarea para="Ejecutor">ESTADO: hecho\nRama lista.\n<relevo:pregunta>¿De dónde restauro el volcado?</relevo:pregunta></relevo:tarea>'));
+  await next((m) => m.threadPatch?._0.id === boss && m.threadPatch._0.upserts.some((i) => i.kind === 'user' && /De dónde restauro el volcado/.test(i.text ?? '')), 20_000);
+});
