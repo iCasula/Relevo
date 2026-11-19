@@ -341,6 +341,54 @@ function drawIPhone(body) {
     const link = body.querySelector('[data-link]').value.trim();
     if (link) { post({ type: 'pair', link }); setTimeout(() => settingsOpen?.redraw(), 800); }
   };
+  drawPush(body);
+}
+
+/**
+ * Push notifications on the iPhone, per host: with your APNs key (.p8) the host itself tells your iPhone when an
+ * agent asks you something, needs a permission or the guard holds a command, even with the app closed.
+ */
+function drawPush(body) {
+  const hosts = [...app.hosts.keys()].filter((id) => has(id, 'push'));
+  if (!hosts.length) return;
+  const section = document.createElement('div');
+  section.innerHTML = `<div class="form-section">Notificaciones en el iPhone</div>
+    <div class="form-group"><div class="form-row"><div class="caption">Con tu clave de APNs, cada host avisa a tu iPhone cuando un agente te pregunta algo, necesita tu permiso, el guardarraíl detiene un comando o se consigue un hito, aunque la app esté cerrada. La clave se crea en developer.apple.com › Certificates, IDs &amp; Profiles › Keys › «+» con «Apple Push Notifications service (APNs)». Se descarga una sola vez (un fichero .p8). El iPhone se registra solo al abrir la app conectada al host.</div></div></div>
+    ${hosts.map((id) => {
+      const p = snap(id)?.hostPush ?? {};
+      return `<div class="form-group" data-push-host="${esc(id)}">
+        <div class="form-row"><div class="l"><b>${esc(nameOf(host(id)))}</b><span class="cap">${p.configured ? `Clave configurada · Team ID ${esc(p.teamId)} · Key ID ${esc(p.keyId)}` : 'Sin clave de APNs'}</span></div>${p.configured ? '<button class="btn small" data-push-test>Enviar prueba</button><button class="btn small destructive" data-push-clear>Quitar clave</button>' : ''}</div>
+        ${(p.devices ?? []).map((d) => `<div class="form-row"><span class="dot" style="background:var(--green)"></span><div class="l">${esc(d.name)}<span class="cap">${d.environment === 'production' ? 'App Store / TestFlight' : 'Instalada desde Xcode'} · registrado ${esc(relative(d.at))}</span></div><button class="btn small" data-push-forget="${esc(d.id)}">Olvidar</button></div>`).join('') || '<div class="form-row"><div class="caption">Ningún iPhone registrado todavía: abre la app en el iPhone, conectada a este host, y acepta las notificaciones.</div></div>'}
+        <div class="form-row"><input class="field-input mono" data-push-team placeholder="Team ID" maxlength="10" style="width:120px" value="${esc(p.teamId ?? '')}"><input class="field-input mono" data-push-key-id placeholder="Key ID" maxlength="10" style="width:120px" value="${esc(p.keyId ?? '')}"><label class="btn small">${p.configured ? 'Cambiar .p8…' : 'Elegir .p8…'}<input type="file" accept=".p8" data-push-file hidden></label><span class="caption grow" data-push-file-name></span><button class="btn primary small" data-push-save>Guardar</button></div>
+      </div>`;
+    }).join('')}`;
+  body.appendChild(section);
+  section.querySelectorAll('[data-push-host]').forEach((g) => {
+    const id = g.dataset.pushHost;
+    let key = null;
+    g.querySelector('[data-push-file]').onchange = async (e) => {
+      const f = e.target.files?.[0];
+      if (!f) return;
+      key = await f.text();
+      g.querySelector('[data-push-file-name]').textContent = /BEGIN PRIVATE KEY/.test(key) ? f.name : 'Ese fichero no parece una clave .p8';
+    };
+    g.querySelector('[data-push-save]').onclick = async () => {
+      const r = await request(id, { setPushKey: { teamId: g.querySelector('[data-push-team]').value, keyId: g.querySelector('[data-push-key-id]').value, key } });
+      key = null;
+      if (!r.ok) { toast(r.error); return; }
+      toast('Clave de APNs guardada en el host');
+      setTimeout(() => settingsOpen?.redraw(), 400);
+    };
+    g.querySelector('[data-push-test]')?.addEventListener('click', async () => {
+      const r = await request(id, { testPush: {} });
+      toast(r.ok ? r.results.join(' · ') : r.error);
+    });
+    g.querySelector('[data-push-clear]')?.addEventListener('click', async () => {
+      const r = await request(id, { setPushKey: { clear: true } });
+      if (!r.ok) toast(r.error); else setTimeout(() => settingsOpen?.redraw(), 400);
+    });
+    g.querySelectorAll('[data-push-forget]').forEach((b) => { b.onclick = async () => { await request(id, { forgetPushDevice: { deviceId: b.dataset.pushForget } }); setTimeout(() => settingsOpen?.redraw(), 400); }; });
+  });
 }
 
 /** Installs the new version now; the service restarts once no agent is working. */

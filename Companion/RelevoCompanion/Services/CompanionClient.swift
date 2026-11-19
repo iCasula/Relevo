@@ -55,6 +55,12 @@ final class CompanionClient {
 
     var isConnected: Bool { state == .connected }
 
+    /// Tells the connected host how to reach this iPhone (Live Activity and notification tokens).
+    func sendRegistration() {
+        guard isConnected else { return }
+        channel?.send(ClientMessage.registerLiveActivity(liveActivities.registration))
+    }
+
     // MARK: - Pairing
 
     /// Adds a host (or updates one paired again) and switches to it.

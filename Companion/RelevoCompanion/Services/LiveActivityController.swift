@@ -55,7 +55,8 @@ final class LiveActivityController {
         LiveActivityRegistration(deviceId: deviceId, deviceName: UIDevice.current.name,
                                  activityToken: isEnabled ? activityToken : nil,
                                  pushToStartToken: isEnabled ? pushToStartToken : nil,
-                                 environment: Self.environment, bundleId: Bundle.main.bundleIdentifier)
+                                 environment: Self.environment, bundleId: Bundle.main.bundleIdentifier,
+                                 alertToken: PushNotifications.shared.token)
     }
 
     // MARK: - State from the Mac

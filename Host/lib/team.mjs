@@ -735,6 +735,8 @@ export class Teams {
     t.attention = { kind, text: clip(text.replace(/\s+/g, ' '), 240), at: Date.now() / 1000 };
     this.host._changed(t);
     this.host._broadcastSnapshot();
+    const title = { orquestador: 'El orquestador te escribe', fin: 'Objetivo cumplido', pausa: 'Equipo en pausa', presupuesto: 'Presupuesto del equipo superado', resumen: 'Resumen del día del equipo' }[kind] ?? 'El equipo te necesita';
+    this.host._push?.(t, title, t.attention.text, kind);
   }
 
   /** Working, waiting for an answer, or waiting for something it left running in the background. */
@@ -1136,6 +1138,7 @@ export class Teams {
       case 'hecho': {
         const done = this.setMilestones(team, o.body || o.to, true);
         for (const m of done) h._append(leadThread, { id: h._uuid(), kind: 'notice', text: `Hito conseguido: #${m.id} ${clip(m.text, 200)} (${team.milestones.filter((x) => x.done).length}/${team.milestones.length})` });
+        for (const m of done) h._push?.(leadThread, `Hito conseguido (${team.milestones.filter((x) => x.done).length}/${team.milestones.length})`, m.text, `hito${m.id}`);
         if (done.length) h._changed(leadThread);
         return;
       }

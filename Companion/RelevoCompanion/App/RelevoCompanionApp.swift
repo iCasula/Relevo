@@ -3,6 +3,7 @@ import RelevoProtocol
 
 @main
 struct RelevoCompanionApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var client: CompanionClient
     @State private var router = AppRouter()
 
@@ -28,6 +29,18 @@ struct RelevoCompanionApp: App {
                     } else if let thread = DeepLink.threadId(from: url) {
                         router.open(thread: thread)
                     }
+                }
+                .task {
+                    // Notifications when an agent needs you and the app is closed: the token goes to the host.
+                    let push = PushNotifications.shared
+                    push.onToken = { [client] in client.sendRegistration() }
+                    push.onOpen = { [client, router] server, thread in
+                        if let server, server != client.pairing?.serverId, client.hosts.contains(where: { $0.serverId == server }) {
+                            client.switchHost(to: server)
+                        }
+                        router.open(thread: thread)
+                    }
+                    push.start()
                 }
                 #if DEBUG
                 .task {

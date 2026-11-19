@@ -84,9 +84,12 @@ public struct LiveActivityRegistration: Codable, Hashable, Sendable {
     public var environment: String
     /// Bundle id of the companion app (the APNs topic is `<bundleId>.push-type.liveactivity`).
     public var bundleId: String?
+    /// The device's token for ordinary notifications (an agent asks you something, a guard holds a command…).
+    public var alertToken: String?
 
     public init(deviceId: String, deviceName: String, activityToken: String?, pushToStartToken: String?, environment: String,
-                bundleId: String?) {
+                bundleId: String?, alertToken: String? = nil) {
+        self.alertToken = alertToken
         self.deviceId = deviceId
         self.deviceName = deviceName
         self.activityToken = activityToken

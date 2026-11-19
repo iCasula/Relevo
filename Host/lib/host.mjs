@@ -21,6 +21,7 @@ import { quickCompletion, cleanTitle } from './quick.mjs';
 import { buildAccount, API_PRESETS, ACP_PRESETS, TYPES } from './accounts.mjs';
 import { Teams, fallbackOf } from './team.mjs';
 import { checkRequest, guardRoots } from './guard.mjs';
+import { APNs, validKey } from './apns.mjs';
 
 const PROTOCOL_VERSION = 1;
 const MAX_STORED_ITEMS = 1500;
@@ -50,7 +51,7 @@ export function modelScore(m, tier) {
 }
 /** What this host does beyond the shared protocol; clients show those controls only when listed. */
 export const HOST_FEATURES = ['teams', 'projects', 'threads', 'git', 'images', 'usage', 'login', 'settings', 'limitPlans', 'history', 'titles', 'accounts',
-  'turns', 'worktrees', 'pullRequests', 'suggest', 'quickActions', 'attachments', 'teamRename', 'teamDecisions', 'teamMemory', 'smartFallback', 'teamBudget', 'teamHeld', 'guard'];
+  'turns', 'worktrees', 'pullRequests', 'suggest', 'quickActions', 'attachments', 'teamRename', 'teamDecisions', 'teamMemory', 'smartFallback', 'teamBudget', 'teamHeld', 'guard', 'push'];
 const IMAGE_UPLOAD = /\.(png|jpe?g|gif|webp)$/i;
 
 /** Providers this host can run. Each account is one provider with its own CLI login on this machine. */
@@ -120,6 +121,9 @@ export class Host {
   constructor(config) {
     this.config = config;
     this.peers = new Set();
+    // Push notifications to paired iPhones through APNs (with the user's own key), when an agent needs them.
+    this.apns = new APNs(() => this._apnsConfig(), (m) => this.log(m));
+    this.pushSent = new Map(); // "thread|kind" → when, so one event doesn't notify twice
     this.threads = new Map();
     this.agents = new Map(); // threadId -> session
     this.runtime = new Map(); // threadId -> live state
@@ -506,7 +510,11 @@ export class Host {
       case 'loginCancel': this.logins?.get(a.requestId)?.cancel(); break;
       case 'setDraft': if (t) this._suggestSoon(t, a.text ?? ''); break;
       case 'suggestion': if (t) this._suggestionAction(t, a.action); break;
-      default: break; // registerLiveActivity: Mac only
+      case 'registerLiveActivity': this._registerDevice(peer, a?._0 ?? a); break; // Swift sends it as { _0: registration }
+      case 'setPushKey': run(() => this.setPushKey(a)); break;
+      case 'testPush': run(() => this.testPush()); break;
+      case 'forgetPushDevice': run(() => { delete this.state.push?.devices?.[a.deviceId]; this._saveState(); this._broadcastSnapshot(); return {}; }); break;
+      default: break;
     }
   }
 
@@ -991,6 +999,79 @@ export class Host {
     return list;
   }
 
+  // MARK: - Push notifications (APNs)
+
+  _apnsConfig() {
+    const p = this.state.push?.apns;
+    return p?.teamId && p?.keyId && p?.key ? p : null;
+  }
+
+  /** An iPhone says how to reach it; while connected (app open) it isn't pushed to. */
+  _registerDevice(peer, reg) {
+    if (!reg?.deviceId) return;
+    peer.deviceId = reg.deviceId;
+    if (!reg.alertToken || !reg.bundleId) return;
+    this.state.push ??= { devices: {} };
+    this.state.push.devices ??= {};
+    const old = this.state.push.devices[reg.deviceId];
+    const next = { name: reg.deviceName ?? 'iPhone', token: reg.alertToken, environment: reg.environment === 'production' ? 'production' : 'development', bundleId: reg.bundleId, at: now() };
+    if (old && old.token === next.token && old.bundleId === next.bundleId && old.environment === next.environment) return;
+    this.state.push.devices[reg.deviceId] = next;
+    this._saveState();
+    this._broadcastSnapshot();
+  }
+
+  /** Your APNs key (.p8), its Key ID and your Team ID; the key itself never leaves the host again. */
+  setPushKey({ teamId, keyId, key, clear }) {
+    this.state.push ??= { devices: {} };
+    if (clear) { delete this.state.push.apns; this._saveState(); this._broadcastSnapshot(); return {}; }
+    const team = String(teamId ?? '').trim().toUpperCase(), kid = String(keyId ?? '').trim().toUpperCase();
+    if (!/^[A-Z0-9]{10}$/.test(team)) throw new Error('El Team ID tiene 10 letras y números (developer.apple.com › Membership)');
+    if (!/^[A-Z0-9]{10}$/.test(kid)) throw new Error('El Key ID tiene 10 letras y números (lo ves junto a la clave en Certificates › Keys)');
+    const pem = key ? String(key).trim() : this.state.push.apns?.key;
+    if (!pem || !validKey(pem)) throw new Error('La clave no es un .p8 de APNs válido');
+    this.state.push.apns = { teamId: team, keyId: kid, key: pem };
+    this.apns.jwt = null;
+    this._saveState();
+    this._broadcastSnapshot();
+    return {};
+  }
+
+  async testPush() {
+    const devices = Object.entries(this.state.push?.devices ?? {});
+    if (!this._apnsConfig()) throw new Error('Configura antes la clave APNs');
+    if (!devices.length) throw new Error('Ningún iPhone ha registrado todavía sus notificaciones: abre la app en el iPhone conectada a este host');
+    const results = [];
+    for (const [id, d] of devices) {
+      const r = await this.apns.send(d, { title: `Relevo · ${this.config.name}`, body: 'Notificación de prueba: así te avisaré cuando un agente te necesite.', kind: 'prueba', serverId: this.state.serverId });
+      if (r.gone) delete this.state.push.devices[id];
+      results.push(`${d.name}: ${r.ok ? 'enviada' : `APNs dice ${r.status || ''} ${r.reason ?? ''}`.trim()}`);
+    }
+    this._saveState();
+    return { results };
+  }
+
+  /**
+   * Something in a thread needs you: a push to every iPhone that isn't looking at this host right now.
+   * The same thread and kind notify at most once a minute.
+   */
+  _push(t, title, body, kind) {
+    const config = this._apnsConfig();
+    const devices = Object.entries(this.state.push?.devices ?? {});
+    if (!config || !devices.length) return;
+    const key = `${t?.id ?? '-'}|${kind}`;
+    if (Date.now() - (this.pushSent.get(key) ?? 0) < 60_000) return;
+    this.pushSent.set(key, Date.now());
+    const open = new Set([...this.peers].map((p) => p.deviceId).filter(Boolean));
+    for (const [id, d] of devices) {
+      if (open.has(id)) continue;
+      this.apns.send(d, { title, body, threadId: t?.id ?? null, serverId: this.state.serverId, kind }).then((r) => {
+        if (r.gone) { delete this.state.push.devices[id]; this._saveState(); }
+        else if (!r.ok) this.log(`push a ${d.name}: ${r.status ?? ''} ${r.reason ?? ''}`);
+      });
+    }
+  }
+
   /** Whether the guard watches this thread: its own choice, else the host's (on unless turned off). */
   _guarded(t) { return (t.guard ?? this.settings.guard) !== false; }
 
@@ -1356,11 +1437,17 @@ export class Host {
       r.statusLine = it.questions?.length ? 'Esperando tu respuesta…' : held ? 'Relevo ha detenido una acción: espera tu permiso' : 'Esperando tu aprobación…';
       if (held) {
         t.attention = { kind: 'guard', text: `${held.reason}: ${String(req.command ?? req.title ?? '').slice(0, 160)}`, at: now() };
+        this._push(t, `Relevo ha detenido una acción · ${t.team?.name ?? t.title}`, `${held.reason}. Decide tú si se hace.`, 'guard');
         this._changed(t);
         this._broadcastSnapshot();
         return;
       }
       if (this.teams.onApproval(t, it, req)) return;
+      // You have to answer it (a member's question goes to the orchestrator first; a permission needs you).
+      if (!(t.team && t.team.role !== 'orchestrator' && it.questions?.length)) {
+        const who = t.team?.name ?? t.title;
+        this._push(t, it.questions?.length ? `${who} te pregunta` : `${who} necesita tu permiso`, String(it.questions?.[0]?.question ?? it.title ?? '').slice(0, 300), 'approval');
+      }
       this._changed(t);
     });
     s.on('notice', (text) => { this._append(t, { id: uuid(), kind: 'notice', text }); this._changed(t); });
@@ -1800,6 +1887,8 @@ export class Host {
         heldList: this.teams.heldList(x), pausedBy: x.pausedBy ?? undefined,
         members: x.members.map((m) => { const t = this.threads.get(m.threadId); return clean({ threadId: m.threadId, role: m.role, name: m.name, notes: m.notes, accountId: t?.accountId, model: t?.model ?? 'default', task: m.task ?? undefined, stash: m.stash?.length || undefined, fallback: t ? fallbackOf(t.limitPlan) : undefined, today: t ? this._spendToday(t) : undefined }); }) })),
       hostSettings: { ...settings, limitPlanSummary: this._planSummary(settings.limitPlan), accounts: this._accountDefs() },
+      hostPush: { configured: !!this._apnsConfig(), teamId: this.state.push?.apns?.teamId ?? null, keyId: this.state.push?.apns?.keyId ?? null,
+        devices: Object.entries(this.state.push?.devices ?? {}).map(([id, d]) => ({ id, name: d.name, environment: d.environment, at: d.at })) },
       hostProviders: {
         api: Object.entries(API_PRESETS).map(([id, p]) => ({ id, name: p.name, keyURL: p.keyURL ?? null })),
         acp: Object.entries(ACP_PRESETS).map(([id, p]) => ({ id, name: p.name, login: !!p.login })),
