@@ -985,6 +985,7 @@ export function openTeamEditor(hostId, teamId) {
     allFallback: null, // the "for everyone" picker, until a member's own differs
     adds: [], // { role, accountId, model, notes }
     budget: { usd: team.budget?.usd ?? '', action: team.budget?.action ?? 'pause' },
+    guard: team.guard !== false,
     worktrees: true,
   };
   const original = JSON.stringify(st.members.map(({ threadId, accountId, model, notes, fallback, name }) => ({ threadId, accountId, model, notes, fallback, name })));
@@ -1016,12 +1017,13 @@ export function openTeamEditor(hostId, teamId) {
         <div class="team-line"><span class="team-role"></span><button class="btn small" data-add-exec${executors >= 4 ? ' disabled' : ''}>${icon('plus', { size: 10 })} Añadir ejecutor</button>${hasResearcher() ? '' : `<button class="btn small" data-add-res>${icon('plus', { size: 10 })} Añadir investigador</button>`}</div>
         ${allFallbackRow(hostId, sharedFallback())}
       </div>
+      ${has(hostId, 'guard') ? `<div class="form-group" style="margin-top:12px"><div class="form-row"><label style="display:flex;gap:8px;align-items:center"><input type="checkbox" class="check" data-guard${st.guard ? ' checked' : ''}> Guardarraíl: Relevo detiene y te pregunta antes de borrados recursivos, descartes de git o escrituras fuera de la carpeta del proyecto (recomendado, también con acceso total)</label></div></div>` : ''}
       ${has(hostId, 'teamBudget') ? `<div class="form-group" style="margin-top:12px"><div class="form-row"><span class="grow">Presupuesto diario <span class="caption">(${team.members.some((m) => m.today?.cost) ? `hoy van ${usd(team.members.reduce((n, m) => n + (m.today?.cost ?? 0), 0))}` : 'coste equivalente a la API'})</span></span><input class="field-input" data-budget type="number" min="0" step="1" placeholder="sin límite" style="width:110px" value="${st.budget.usd || ''}"> USD <select class="field" data-budget-action>${[['pause', 'y entonces pausar'], ['light', 'y entonces abaratar']].map(([v, l]) => `<option value="${v}"${st.budget.action === v ? ' selected' : ''}>${l}</option>`).join('')}</select></div><div class="caption" style="padding:0 10px 8px">Abaratar: el orquestador y el investigador pasan a modelos ligeros; los ejecutores siguen igual.</div></div>` : ''}
       ${st.adds.some((a) => a.role === 'executor') && has(hostId, 'worktrees') ? `<div class="form-group" style="margin-top:12px"><div class="form-row"><label style="display:flex;gap:8px;align-items:center"><input type="checkbox" class="check" data-wt${st.worktrees ? ' checked' : ''}> Los ejecutores nuevos, cada uno en su worktree (si el proyecto es un repositorio git)</label></div></div>` : ''}
       <div class="sheet-buttons"><button class="btn" data-no>Cancelar</button><span class="grow"></span><button class="btn primary" data-go>Guardar cambios</button></div>`;
     const $ = (q) => s.el.querySelector(q);
     const target = (key) => (key[0] === 'm' ? st.members[Number(key.slice(1))] : st.adds[Number(key.slice(1))]);
-    const keep = () => { st.goal = $('[data-goal]').value; const b = $('[data-budget]'); if (b) { st.budget.usd = b.value; st.budget.action = $('[data-budget-action]').value; } };
+    const keep = () => { st.goal = $('[data-goal]').value; const g = $('[data-guard]'); if (g) st.guard = g.checked; const b = $('[data-budget]'); if (b) { st.budget.usd = b.value; st.budget.action = $('[data-budget-action]').value; } };
     s.el.querySelectorAll('[data-acc]').forEach((el) => { el.onchange = () => { const r = target(el.dataset.acc); r.accountId = el.value; r.model = visibleModels(accountOf(hostId, el.value))[0]?.id ?? 'default'; keep(); draw(); }; });
     s.el.querySelectorAll('[data-model]').forEach((el) => { el.onchange = () => { target(el.dataset.model).model = el.value; }; });
     s.el.querySelectorAll('[data-notes]').forEach((el) => { el.oninput = () => { target(el.dataset.notes).notes = el.value; }; });
@@ -1053,6 +1055,7 @@ export function openTeamEditor(hostId, teamId) {
       };
       $('[data-go]').disabled = true;
       $('[data-go]').innerHTML = '<span class="spinner"></span> Guardando…';
+      if (has(hostId, 'guard') && st.guard !== (team.guard !== false)) { const g = await request(hostId, { setGuard: { teamId, on: st.guard } }); if (!g.ok) toast(g.error); }
       const r = await request(hostId, { updateTeam: { teamId, changes } });
       if (!r.ok) { toast(r.error); $('[data-go]').disabled = false; $('[data-go]').textContent = 'Guardar cambios'; return; }
       s.close();

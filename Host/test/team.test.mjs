@@ -454,3 +454,23 @@ test('a long background job gets its agent asked to check it, once per period', 
   Teams.prototype.watchBackground.call(ctx, 2 * BG_CHECK + 2);
   assert.equal(sent.length, 2, 'again after another period');
 });
+
+test('the guard: in full access a safe step goes on by itself, a recursive deletion waits for you', async () => {
+  const claude = snapshot.accounts.find((a) => a.kind === 'claude');
+  const made = await request('createTeam', { team: { projectId: demo(), goal: 'Guardarraíl', orchestrator: { accountId: claude.id }, executors: [{ accountId: claude.id }], researcher: null, mode: 'full' } });
+  assert.ok(made.ok, made.error);
+  const t = (await next((m) => m.snapshot?._0.hostTeams?.some((x) => x.goal === 'Guardarraíl'))).snapshot._0.hostTeams.find((x) => x.goal === 'Guardarraíl');
+  assert.equal(t.guard, true, 'on by default');
+  const exec = t.members[1].threadId;
+  peer.send(Client.subscribe(exec));
+  await next((m) => m.thread?._0.id === exec);
+  peer.send(Client.setMode(exec, 'full'));
+  // «permiso» asks to run «echo hola»: under the guard, full access answers it at once, no card.
+  peer.send(Client.send(exec, 'permiso para echo'));
+  await next((m) => m.threadPatch?._0.id === exec && m.threadPatch._0.upserts.some((i) => i.kind === 'tool' && i.toolState === 'done'), 20_000);
+  // «borra todo» asks for rm -rf: it waits for you, with the reason.
+  peer.send(Client.send(exec, 'borra todo'));
+  const card = await next((m) => m.threadPatch?._0.id === exec && m.threadPatch._0.upserts.some((i) => i.kind === 'approval' && /Relevo lo ha detenido: borrado recursivo/.test(i.title ?? '')), 20_000);
+  const item = card.threadPatch._0.upserts.find((i) => i.kind === 'approval');
+  peer.send(Client.approve(exec, item.id, 'deny'));
+});

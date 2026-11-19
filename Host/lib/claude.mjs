@@ -104,9 +104,9 @@ const cap = (s, n = 4000) => (s.length > n ? s.slice(0, n) + '\n…' : s);
  * failure({kind, message, resetsAt}) usage({windows, plan}) tokens(usage) context(used) turnStarted turnFinished exit
  */
 export class ClaudeSession extends EventEmitter {
-  constructor({ bin, cwd, env, model, effort, mode, resumeId }) {
+  constructor({ bin, cwd, env, model, effort, mode, resumeId, guarded = false }) {
     super();
-    Object.assign(this, { bin, cwd, env, model, effort, mode, resumeId });
+    Object.assign(this, { bin, cwd, env, model, effort, mode, resumeId, guarded });
     this.proc = null;
     this.turnActive = false;
     this.streamed = new Set();
@@ -124,7 +124,7 @@ export class ClaudeSession extends EventEmitter {
 
   start() {
     const args = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose',
-      '--include-partial-messages', '--permission-prompt-tool', 'stdio', '--permission-mode', CLI_MODE[this.mode] ?? 'manual',
+      '--include-partial-messages', '--permission-prompt-tool', 'stdio', '--permission-mode', CLI_MODE[this._cliMode()] ?? 'manual',
       '--allow-dangerously-skip-permissions'];
     if (this.model && this.model !== 'default') args.push('--model', this.model);
     if (this.effort) args.push('--effort', this.effort);
@@ -153,8 +153,11 @@ export class ClaudeSession extends EventEmitter {
 
   setMode(mode) {
     this.mode = mode;
-    if (this.alive) this._control({ subtype: 'set_permission_mode', mode: CLI_MODE[mode] ?? 'manual' });
+    if (this.alive) this._control({ subtype: 'set_permission_mode', mode: CLI_MODE[this._cliMode()] ?? 'manual' });
   }
+
+  /** Full access under the guard: Claude asks for everything and Relevo answers at once, except what it holds for you. */
+  _cliMode() { return this.mode === 'full' && this.guarded ? 'ask' : this.mode; }
 
   setModel(model) {
     this.model = model;
@@ -328,7 +331,7 @@ export class ClaudeSession extends EventEmitter {
     if (suggestions.length) options.push({ id: 'session', label: 'Permitir en esta sesión', isAllow: true });
     options.push({ id: 'deny', label: 'Denegar', isAllow: false });
     this.emit('approval', {
-      key, title: `${req.display_name ?? req.tool_name}: ${toolTitle(req.tool_name, input)}`, detail, options, questions: null, toolName: req.tool_name,
+      key, title: `${req.display_name ?? req.tool_name}: ${toolTitle(req.tool_name, input)}`, detail, options, questions: null, toolName: req.tool_name, input,
       respond: (choice) => {
         if (choice === 'allow') this._respond(rid, { behavior: 'allow', updatedInput: input });
         else if (choice === 'session') this._respond(rid, { behavior: 'allow', updatedInput: input, updatedPermissions: suggestions.map((s) => ({ ...s, destination: 'session' })) });
@@ -497,10 +500,20 @@ export class FakeSession extends EventEmitter {
       });
       return;
     }
+    // «borra todo»: a destructive command the guard must hold for you.
+    if (/^borra todo/i.test(text)) {
+      this.emit('toolStarted', `tool${turn}`, 'Bash', 'rm -rf build', { command: 'rm -rf build' });
+      this.emit('approval', {
+        key: `tool${turn}`, title: 'Bash: rm -rf build', detail: null, questions: null, toolName: 'Bash', input: { command: 'rm -rf build' },
+        options: [{ id: 'allow', label: 'Permitir', isAllow: true }, { id: 'deny', label: 'Denegar', isAllow: false }],
+        respond: (choice) => { this.emit('toolFinished', `tool${turn}`, choice === 'allow', choice === 'allow' ? 'borrado' : 'Denegado'); finish(); },
+      });
+      return;
+    }
     if (/permiso/i.test(text) && !text.includes('<relevo_handoff>')) {
       this.emit('toolStarted', `tool${turn}`, 'Bash', 'echo hola', { command: 'echo hola' });
       this.emit('approval', {
-        key: `tool${turn}`, title: 'Bash: echo hola', detail: 'Prueba de permiso', questions: null,
+        key: `tool${turn}`, title: 'Bash: echo hola', detail: 'Prueba de permiso', questions: null, toolName: 'Bash', input: { command: 'echo hola' },
         options: [{ id: 'allow', label: 'Permitir', isAllow: true }, { id: 'deny', label: 'Denegar', isAllow: false }],
         respond: (choice) => { this.emit('toolFinished', `tool${turn}`, choice === 'allow', choice === 'allow' ? 'hola' : 'Denegado'); finish(); },
       });

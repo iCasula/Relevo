@@ -6,9 +6,11 @@ import { EventEmitter } from 'node:events';
 import readline from 'node:readline';
 import { classify } from './claude.mjs';
 
-const APPROVAL = { ask: 'untrusted', autoEdit: 'on-request', plan: 'on-request', full: 'never' };
-const SANDBOX = { ask: 'workspace-write', autoEdit: 'workspace-write', plan: 'read-only', full: 'danger-full-access' };
-const SANDBOX_POLICY = { ask: { type: 'workspaceWrite' }, autoEdit: { type: 'workspaceWrite' }, plan: { type: 'readOnly' }, full: { type: 'dangerFullAccess' } };
+// «guarded»: full access under Relevo's guard. Codex asks for every command and Relevo answers at once,
+// except what the guard holds for you.
+const APPROVAL = { ask: 'untrusted', autoEdit: 'on-request', plan: 'on-request', full: 'never', guarded: 'untrusted' };
+const SANDBOX = { ask: 'workspace-write', autoEdit: 'workspace-write', plan: 'read-only', full: 'danger-full-access', guarded: 'danger-full-access' };
+const SANDBOX_POLICY = { ask: { type: 'workspaceWrite' }, autoEdit: { type: 'workspaceWrite' }, plan: { type: 'readOnly' }, full: { type: 'dangerFullAccess' }, guarded: { type: 'dangerFullAccess' } };
 const CLIENT_INFO = { clientInfo: { name: 'relevo', title: 'Relevo', version: '1.0' } };
 
 const cap = (s, n = 4000) => (s.length > n ? s.slice(0, n) + '\n…' : s);
@@ -136,9 +138,9 @@ class RPC extends EventEmitter {
 }
 
 export class CodexSession extends EventEmitter {
-  constructor({ bin, cwd, env, model, effort, mode, resumeId }) {
+  constructor({ bin, cwd, env, model, effort, mode, resumeId, guarded = false }) {
     super();
-    Object.assign(this, { bin, cwd, env, model: model === 'default' ? '' : model, effort, mode, resumeId });
+    Object.assign(this, { bin, cwd, env, model: model === 'default' ? '' : model, effort, mode, resumeId, guarded });
     this.rpc = null;
     this.threadId = null;
     this.turnId = null;
@@ -165,7 +167,7 @@ export class CodexSession extends EventEmitter {
     const init = await rpc.request('initialize', CLIENT_INFO);
     if (init.error) { this._fail(`Codex no arrancó: ${init.error.message}`); return; }
     rpc.notify('initialized');
-    const params = { cwd: this.cwd, approvalPolicy: APPROVAL[this.mode], sandbox: SANDBOX[this.mode] };
+    const params = { cwd: this.cwd, approvalPolicy: APPROVAL[this._policy()], sandbox: SANDBOX[this._policy()] };
     if (this.model) params.model = this.model;
     const resuming = !!this.resumeId;
     const r = await rpc.request(resuming ? 'thread/resume' : 'thread/start', resuming ? { ...params, threadId: this.resumeId } : params);
@@ -204,7 +206,7 @@ export class CodexSession extends EventEmitter {
     this.baseline = this.latestTotal;
     const params = {
       threadId: this.threadId, input: [{ type: 'text', text, text_elements: [] }],
-      approvalPolicy: APPROVAL[this.mode], sandboxPolicy: SANDBOX_POLICY[this.mode],
+      approvalPolicy: APPROVAL[this._policy()], sandboxPolicy: SANDBOX_POLICY[this._policy()],
     };
     if (this.model) params.model = this.model;
     if (this.effort) params.effort = this.effort;
@@ -217,6 +219,7 @@ export class CodexSession extends EventEmitter {
     if (this.threadId && this.turnId) this.rpc?.request('turn/interrupt', { threadId: this.threadId, turnId: this.turnId });
   }
   setMode(mode) { this.mode = mode; }
+  _policy() { return this.mode === 'full' && this.guarded ? 'guarded' : this.mode; }
   setModel(model) { this.model = model === 'default' ? '' : model; }
   setEffort(effort) { this.effort = effort; }
 
@@ -347,14 +350,14 @@ export class CodexSession extends EventEmitter {
     const respond = (choice) => this.rpc?.respond(id, { decision: choice });
     // Codex fixes the approval policy when a turn starts: a mode chosen since (full access, or auto-edit for
     // file changes) applies right away to what the running turn asks.
-    if (this.mode === 'full' && /requestApproval$/.test(method)) { respond('accept'); return; }
+    if (this.mode === 'full' && !this.guarded && /requestApproval$/.test(method)) { respond('accept'); return; }
     if (this.mode === 'autoEdit' && method === 'item/fileChange/requestApproval') { respond('accept'); return; }
     if (method === 'item/commandExecution/requestApproval') {
       const detail = [p.reason, p.cwd && `En ${p.cwd}`].filter(Boolean).join('\n');
-      this.emit('approval', { key: p.approvalId ?? p.itemId ?? String(id), title: `Ejecutar: ${shellCommand(p.command) ?? 'comando'}`, detail, options, questions: null, respond, toolName: 'commandExecution', command: shellCommand(p.command) ?? '' });
+      this.emit('approval', { key: p.approvalId ?? p.itemId ?? String(id), title: `Ejecutar: ${shellCommand(p.command) ?? 'comando'}`, detail, options, questions: null, respond, toolName: 'commandExecution', command: shellCommand(p.command) ?? '', cwd: p.cwd ?? null });
     } else if (method === 'item/fileChange/requestApproval') {
       const detail = [p.reason, p.grantRoot && `Permitir escritura en ${p.grantRoot}`].filter(Boolean).join('\n');
-      this.emit('approval', { key: p.itemId ?? String(id), title: 'Aplicar cambios en ficheros', detail, options, questions: null, respond, toolName: 'fileChange' });
+      this.emit('approval', { key: p.itemId ?? String(id), title: 'Aplicar cambios en ficheros', detail, options, questions: null, respond, toolName: 'fileChange', grantRoot: p.grantRoot ?? null });
     } else if (method === 'execCommandApproval' || method === 'applyPatchApproval') {
       this.rpc?.respond(id, { decision: 'denied' });
     } else {

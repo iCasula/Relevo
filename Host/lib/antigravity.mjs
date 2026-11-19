@@ -114,9 +114,9 @@ export async function antigravityProbe({ bin, env, cwd, home }) {
 }
 
 export class AntigravitySession extends EventEmitter {
-  constructor({ bin, cwd, env, model, effort, mode, resumeId }) {
+  constructor({ bin, cwd, env, model, effort, mode, resumeId, guarded = false }) {
     super();
-    Object.assign(this, { bin, cwd, env, model: model === 'default' ? '' : model, effort, mode, conversationId: resumeId });
+    Object.assign(this, { bin, cwd, env, model: model === 'default' ? '' : model, effort, mode, conversationId: resumeId, guarded });
     this.resumed = !!resumeId;
     this.proc = null;
     this.turn = 0;
@@ -128,7 +128,8 @@ export class AntigravitySession extends EventEmitter {
 
   get alive() { return !this.closed; }
 
-  send(prompt, skipPermissions = this.mode === 'full') {
+  // Under the guard it doesn't skip permissions: what agy denies comes to Relevo, which lets the safe steps through.
+  send(prompt, skipPermissions = this.mode === 'full' && !this.guarded) {
     this.turn++;
     this.turnActive = true;
     this.failed = false;
@@ -240,7 +241,7 @@ export class AntigravitySession extends EventEmitter {
     this.emit('approval', {
       key: `retry-${this.nonce}-${this.turn}`, title: `Gemini necesita permiso para: ${names}`,
       detail: 'Antigravity no puede preguntar en modo headless y denegó la acción. Puedes permitirla y reintentar este paso.',
-      questions: null,
+      questions: null, toolName: 'agy', text: denied.map((d) => [d.display_name, d.action, d.command, d.path, d.args && JSON.stringify(d.args), d.input && JSON.stringify(d.input)].filter(Boolean).join(' ')).join('\n'),
       options: [{ id: 'retry', label: 'Permitir y reintentar', isAllow: true }, { id: 'deny', label: 'Ignorar', isAllow: false }],
       respond: (choice) => {
         if (choice === 'retry') { this.emit('turnStarted'); this.send(`Te concedo el permiso para la acción que se denegó (${names}). Hazla ahora y continúa con la tarea.`, true); }

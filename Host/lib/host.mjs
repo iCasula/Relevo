@@ -20,6 +20,7 @@ import { LoginSession } from './login.mjs';
 import { quickCompletion, cleanTitle } from './quick.mjs';
 import { buildAccount, API_PRESETS, ACP_PRESETS, TYPES } from './accounts.mjs';
 import { Teams, fallbackOf } from './team.mjs';
+import { checkRequest, guardRoots } from './guard.mjs';
 
 const PROTOCOL_VERSION = 1;
 const MAX_STORED_ITEMS = 1500;
@@ -49,7 +50,7 @@ export function modelScore(m, tier) {
 }
 /** What this host does beyond the shared protocol; clients show those controls only when listed. */
 export const HOST_FEATURES = ['teams', 'projects', 'threads', 'git', 'images', 'usage', 'login', 'settings', 'limitPlans', 'history', 'titles', 'accounts',
-  'turns', 'worktrees', 'pullRequests', 'suggest', 'quickActions', 'attachments', 'teamRename', 'teamDecisions', 'teamMemory', 'smartFallback', 'teamBudget', 'teamHeld'];
+  'turns', 'worktrees', 'pullRequests', 'suggest', 'quickActions', 'attachments', 'teamRename', 'teamDecisions', 'teamMemory', 'smartFallback', 'teamBudget', 'teamHeld', 'guard'];
 const IMAGE_UPLOAD = /\.(png|jpe?g|gif|webp)$/i;
 
 /** Providers this host can run. Each account is one provider with its own CLI login on this machine. */
@@ -217,7 +218,7 @@ export class Host {
   get settings() {
     return {
       projectsRoot: this.config.projectsRoot, maxAgents: this.config.maxAgents, defaultMode: 'autoEdit', defaultAccountId: null,
-      limitPlan: { mode: 'ask', targets: [] }, relayDelay: 10, aiTitles: true, suggest: true, suggestMode: 'suggest', probeMinutes: 10, ...this.state.settings,
+      limitPlan: { mode: 'ask', targets: [] }, guard: true, relayDelay: 10, aiTitles: true, suggest: true, suggestMode: 'suggest', probeMinutes: 10, ...this.state.settings,
     };
   }
 
@@ -477,6 +478,7 @@ export class Host {
       case 'teamAction': run(() => this.teams.action(a.teamId, a.action)); break;
       case 'updateTeam': run(() => this.teams.update(String(a.teamId).toUpperCase(), a.changes ?? {})); break;
       case 'teamDecisions': run(() => this.teams.editDecisions(String(a.teamId).toUpperCase(), { add: a.add, remove: a.remove })); break;
+      case 'setGuard': if (t) run(() => { this.setGuard(t, a.on); return {}; }); else if (a.teamId) run(() => this.teams.setGuard(String(a.teamId).toUpperCase(), a.on)); break;
       case 'teamHeld': run(() => this.teams.reviewHeld(String(a.teamId).toUpperCase(), String(a.id ?? ''), a.action === 'send' ? 'send' : 'discard')); break;
       case 'teamMemory': run(() => this.teams.editMemory(String(a.teamId).toUpperCase(), { kind: a.kind, add: a.add, remove: a.remove, toggle: a.toggle })); break;
       case 'pullRequest': if (t) run(async () => ({ pr: await gitops.pullRequest(t.projectPath) })); break;
@@ -989,6 +991,23 @@ export class Host {
     return list;
   }
 
+  /** Whether the guard watches this thread: its own choice, else the host's (on unless turned off). */
+  _guarded(t) { return (t.guard ?? this.settings.guard) !== false; }
+
+  _guardRoots(t) {
+    const main = t.worktree ? this.projects().find((p) => p.id === t.projectId)?.path : null;
+    return guardRoots({ projectPath: t.projectPath, worktreePath: t.worktree?.path, extra: [main, this.config.dataDir].filter(Boolean) });
+  }
+
+  /** Turns the guard on or off for a thread (null: as in the host's settings). */
+  setGuard(t, on) {
+    t.guard = on === null || on === undefined ? null : !!on;
+    const s = this.agents.get(t.id);
+    if (s) { s.guarded = this._guarded(t); s.setMode(t.mode); }
+    this._changed(t);
+    this._saveThread(t);
+  }
+
   _account(t) { return this.accountsById.get(t.accountId) ?? this.accounts[0]; }
 
   _modelName(account, id) {
@@ -1270,7 +1289,7 @@ export class Host {
     r0.backgroundTasks = []; // a new process: nothing of the old one is still running
     s = new Session({
       bin: account.bin, args: account.args, cwd: t.projectPath, env: account.env, model: t.model, effort: t.effort, mode: t.mode,
-      resumeId: t.sessionId, agentName: account.agentName, loginHint: account.loginHint,
+      resumeId: t.sessionId, agentName: account.agentName, loginHint: account.loginHint, guarded: this._guarded(t),
     });
     this.agents.set(t.id, s);
     const r = this._rt(t);
@@ -1320,12 +1339,26 @@ export class Host {
       this._touch(t, it); this._changed(t, false);
     });
     s.on('approval', (req) => {
+      // The guard: in full access the agent goes on by itself unless what it asks can't be undone or leaves the
+      // project folder; then it waits for you, in any mode, with the reason.
+      const held = !req.questions?.length && this._guarded(t) ? checkRequest(req, { roots: this._guardRoots(t), cwd: req.cwd ?? t.worktree?.path ?? t.projectPath }) : null;
+      if (!held && t.mode === 'full' && this._guarded(t) && !req.questions?.length) {
+        const allow = (req.options ?? []).find((o) => o.isAllow && !/always|siempre/i.test(`${o.id} ${o.label}`)) ?? (req.options ?? []).find((o) => o.isAllow);
+        if (allow) { req.respond(allow.id); return; }
+      }
       const it = this._append(t, {
-        id: uuid(), kind: 'approval', text: req.title, title: req.title, output: req.detail || null,
-        options: req.options, questions: req.questions || null,
+        id: uuid(), kind: 'approval', text: req.title, title: held ? `Relevo lo ha detenido: ${held.reason}` : req.title,
+        output: held ? [req.title, req.command && req.command !== req.title ? req.command : null, req.detail].filter(Boolean).join('\n') : req.detail || null,
+        options: req.options, questions: req.questions || null, guard: held ? held.reason : undefined,
       });
       r.approvals.set(it.id, req.respond);
-      r.statusLine = it.questions?.length ? 'Esperando tu respuesta…' : 'Esperando tu aprobación…';
+      r.statusLine = it.questions?.length ? 'Esperando tu respuesta…' : held ? 'Relevo ha detenido una acción: espera tu permiso' : 'Esperando tu aprobación…';
+      if (held) {
+        t.attention = { kind: 'guard', text: `${held.reason}: ${String(req.command ?? req.title ?? '').slice(0, 160)}`, at: now() };
+        this._changed(t);
+        this._broadcastSnapshot();
+        return;
+      }
       if (this.teams.onApproval(t, it, req)) return;
       this._changed(t);
     });
@@ -1759,6 +1792,7 @@ export class Host {
         milestones: (x.milestones ?? []).map((m) => clean({ id: m.id, text: m.text, done: m.done, at: m.at, doneAt: m.doneAt })),
         findings: (x.findings ?? []).map((f) => ({ id: f.id, topic: f.topic, summary: f.summary, links: f.links ?? [], by: f.by, at: f.at })),
         budget: x.budget ?? undefined,
+        guard: x.members.every((m) => { const t = this.threads.get(m.threadId); return !t || this._guarded(t); }),
         heldList: this.teams.heldList(x), pausedBy: x.pausedBy ?? undefined,
         members: x.members.map((m) => { const t = this.threads.get(m.threadId); return clean({ threadId: m.threadId, role: m.role, name: m.name, notes: m.notes, accountId: t?.accountId, model: t?.model ?? 'default', task: m.task ?? undefined, stash: m.stash?.length || undefined, fallback: t ? fallbackOf(t.limitPlan) : undefined, today: t ? this._spendToday(t) : undefined }); }) })),
       hostSettings: { ...settings, limitPlanSummary: this._planSummary(settings.limitPlan), accounts: this._accountDefs() },
@@ -1796,7 +1830,7 @@ export class Host {
       .filter((a) => a !== account && a.status?.loggedIn !== false && !this._exhausted(a))
       .map((a) => ({ accountId: a.id, model: a.defaultModel }));
     return clean({
-      isRunning: r.isRunning, statusLine: r.statusLine, limit: r.limit ? clean(r.limit) : null, mode: t.mode,
+      isRunning: r.isRunning, statusLine: r.statusLine, limit: r.limit ? clean(r.limit) : null, mode: t.mode, guard: this._guarded(t),
       selectedAccountId: account?.id, selectedModel: t.model, selectedEffort: t.effort, relayCandidates: candidates,
       queued: t.queued.map((q) => ({ id: q.id, text: q.text })), queuePaused: t.queuePaused,
       usage: (account?.status?.windows ?? []).map(remoteWindow), backgroundTasks: (r.backgroundTasks ?? []).map((b) => ({ id: b.id, description: b.description, startedAt: b.startedAt })),

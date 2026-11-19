@@ -391,6 +391,7 @@ export class Teams {
     t.aiTitled = true; // the role and the goal are a better title than one guessed from the first message
     const plan = planFromFallback(h, pick?.fallback, role);
     if (plan !== undefined) t.limitPlan = plan;
+    if (team.guard !== undefined && team.guard !== null) t.guard = team.guard;
     team.members.push(clean({ threadId: t.id, role, name, notes: noteOf(pick?.notes) }));
     return t;
   }
@@ -1259,6 +1260,17 @@ export class Teams {
       const to = team.members.find((m) => m.threadId === (d.toThread ?? d.to?.threadId));
       return { id: d.id, to: to?.name ?? d.to?.name ?? '?', toThread: to?.threadId ?? null, from: d.from?.name ?? '?', label: d.from?.label ?? null, text: clip(String(d.text ?? ''), 1500), at: d.at ?? null };
     });
+  }
+
+  /** The guard for every agent of the team (on, off, or null: as in the host's settings). */
+  setGuard(teamId, on) {
+    const team = this.byId(teamId);
+    if (!team) throw new Error('Equipo desconocido');
+    for (const m of team.members) { const t = this.host.threads.get(m.threadId); if (t) this.host.setGuard(t, on); }
+    team.guard = on === null || on === undefined ? null : !!on;
+    this.host._saveState();
+    this.host._broadcastSnapshot();
+    return {};
   }
 
   /** You send or drop one held message (or all of them). The orchestrator hears what was dropped. */

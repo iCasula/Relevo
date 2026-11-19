@@ -61,9 +61,9 @@ class RPC extends EventEmitter {
 }
 
 export class ACPSession extends EventEmitter {
-  constructor({ bin, args = [], cwd, env, model, mode, resumeId, agentName = 'El agente', loginHint }) {
+  constructor({ bin, args = [], cwd, env, model, mode, resumeId, agentName = 'El agente', loginHint, guarded = false }) {
     super();
-    Object.assign(this, { bin, args, cwd, env, model: model === 'default' ? '' : model, mode, resumeId, agentName, loginHint });
+    Object.assign(this, { bin, args, cwd, env, model: model === 'default' ? '' : model, mode, resumeId, agentName, loginHint, guarded });
     this.rpc = null;
     this.sessionId = null;
     this.ready = false;
@@ -149,7 +149,8 @@ export class ACPSession extends EventEmitter {
 
   _applyMode() {
     if (!this.sessionId || !this.modes.length) return;
-    for (const k of MODE_KEYWORDS[this.mode] ?? []) {
+    // Under the guard, full access asks (and Relevo answers at once, except what it holds for you).
+    for (const k of MODE_KEYWORDS[this.mode === 'full' && this.guarded ? 'autoEdit' : this.mode] ?? []) {
       const m = this.modes.find((x) => x.id.toLowerCase().includes(k) || x.name.includes(k));
       if (m) { this.rpc?.request('session/set_mode', { sessionId: this.sessionId, modeId: m.id }); return; }
     }
@@ -260,7 +261,7 @@ export class ACPSession extends EventEmitter {
       key: tool.toolCallId ? this._key(tool.toolCallId) : `${Date.now()}`,
       title: tool.title ?? `${this.agentName} quiere usar una herramienta`,
       detail: tool.rawInput != null ? text(tool.rawInput).slice(0, 1500) : '',
-      questions: null,
+      questions: null, toolName: tool.kind ?? 'acp', input: tool.rawInput && typeof tool.rawInput === 'object' ? tool.rawInput : null, text: [tool.title, typeof tool.rawInput === 'string' ? tool.rawInput : ''].filter(Boolean).join(' '),
       options: options.length ? options : [{ id: 'cancel', label: 'Cancelar', isAllow: false }],
       respond: (choice) => {
         const outcome = choice === 'cancel' || choice === 'deny' ? { outcome: 'cancelled' } : { outcome: 'selected', optionId: choice };

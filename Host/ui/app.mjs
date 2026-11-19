@@ -838,7 +838,7 @@ function renderControls() {
   }
   const html = `<button class="pick model" data-cmd="modelMenu" title="${esc(pickTip)}"${rt ? '' : ' disabled'}>${acc ? `${badge(acc, 15)}<span class="acc">${esc(acc.name)}</span><span class="mdl">${esc(modelName(acc, rt?.selectedModel))}</span>` : '<span>Elige una suscripción</span>'}${icon('chevron.up.chevron.down', { size: 9, cls: 'ud' })}</button>`
     + (efforts.length ? `<button class="pick${rt?.selectedEffort ? ' set' : ''}" data-cmd="effortMenu" title="Nivel de razonamiento: cuánto «piensa» el modelo antes de responder (más alto = mejor en tareas difíciles, más lento y gasta más cuota)">${icon('brain', { size: 13 })}${esc(effortLabel)}</button>` : '')
-    + `<button class="pick${mode[0] === 'full' ? ' danger' : ''}" data-cmd="modeMenu" title="${esc(mode[3])}">${icon(mode[2], { size: 13 })}${esc(mode[1])}</button>`
+    + `<button class="pick${mode[0] === 'full' && !rt?.guard ? ' danger' : ''}" data-cmd="modeMenu" title="${esc(mode[0] === 'full' && rt?.guard ? 'Acceso total protegido: Relevo detiene borrados y escrituras fuera del proyecto' : mode[3])}">${icon(mode[0] === 'full' && rt?.guard ? 'checkmark.shield' : mode[2], { size: 13 })}${esc(mode[1])}${mode[0] === 'full' && rt?.guard ? ' · protegido' : ''}</button>`
     + `<span class="grow"></span>${hint}${buttons}`;
   if (T.sig.controls !== html) { T.controls.innerHTML = html; T.sig.controls = html; }
 }
@@ -943,7 +943,14 @@ function effortMenu(anchor) {
 function modeMenu(anchor) {
   const { hostId, threadId, thread } = current();
   const cur = thread?.runtime?.mode;
-  showMenu(anchor, MODES.map(([id, label, ic, help]) => ({ label, icon: cur === id ? null : ic, checked: cur === id, help, action: () => sendTo(hostId, Client.setMode(threadId, id)) })));
+  const guard = thread?.runtime?.guard;
+  const items = MODES.map(([id, label, ic, help]) => ({
+    label: id === 'full' && guard ? 'Acceso total (protegido)' : label, icon: cur === id ? null : ic, checked: cur === id,
+    help: id === 'full' && guard ? 'Sin confirmaciones para el trabajo normal. Relevo detiene y te pregunta antes de borrados recursivos, descartes de git o escrituras fuera de la carpeta del proyecto.' : help,
+    action: () => sendTo(hostId, Client.setMode(threadId, id)),
+  }));
+  if (has(hostId, 'guard')) items.push('-', { label: 'Guardarraíl de borrados y carpetas', checked: !!guard, help: 'Relevo detiene borrados recursivos o masivos, git clean/reset --hard y cualquier escritura fuera de la carpeta del proyecto, en cualquier modo, y te pide permiso.', action: () => request(hostId, { setGuard: { threadId, on: !guard } }).then((r) => { if (!r.ok) toast(r.error); else toast(guard ? 'Guardarraíl desactivado en este hilo' : 'Guardarraíl activado'); }) });
+  showMenu(anchor, items);
 }
 
 function relayMenu(anchor) {
