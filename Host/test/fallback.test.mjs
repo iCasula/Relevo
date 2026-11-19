@@ -182,3 +182,14 @@ test("the safety net: a finished turn whose words never reached the team is sent
   teams.sweepUnreported(1e12);
   assert.equal(sent.length, 1, 'not twice');
 });
+
+test('the orchestrator gets the final report, plain and short, not the progress chatter', async () => {
+  const { finalMessage, compactReport } = await import('../lib/team.mjs');
+  const msgs = ['Voy a revisar el árbol.', 'Ahora compilo.', '**ESTADO: hecho**\n## Qué he hecho\n| Fichero | Cambio |\n|---|---|\n| a.c | +3 |\nTodo **verificado**.'];
+  const fin = finalMessage(msgs);
+  assert.doesNotMatch(fin, /Voy a revisar/);
+  const c = compactReport(fin);
+  assert.match(c, /^ESTADO: hecho\nQué he hecho\nFichero · Cambio\na\.c · \+3\nTodo verificado\.$/);
+  assert.equal(finalMessage(['primero', 'último sin estado']), 'último sin estado');
+  assert.match(compactReport('x'.repeat(5000), 1000), /Recortado: el informe completo está en su hilo/);
+});

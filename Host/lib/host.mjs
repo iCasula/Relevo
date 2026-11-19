@@ -1548,6 +1548,7 @@ export class Host {
         try {
           this.teams.onTurnFinished(t, {
             text: turn.filter((i) => i.kind === 'assistant' && i.text).map((i) => i.text).join('\n\n'),
+            messages: turn.filter((i) => i.kind === 'assistant' && i.text).map((i) => i.text),
             changes: userItem?.turnChanges ?? null,
             errors: turn.filter((i) => i.kind === 'error').map((i) => i.text),
             // Only what this turn left running means «it's waiting»: a job from before (maybe the very one whose end

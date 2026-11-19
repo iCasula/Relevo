@@ -25,7 +25,7 @@ export const ROLES = {
 };
 
 /** Bumped when the agents' instructions change: teams made before get them again. */
-const RULES_VERSION = 7;
+const RULES_VERSION = 8;
 /** The orchestrator gets a fresh session (with a brief of its own thread) past any of these. */
 const LEAD_REFRESH = { context: 150_000, conversation: 1_200_000, turns: 60, share: 0.6 };
 /** Decisions the team keeps (the oldest go first past this). */
@@ -41,7 +41,7 @@ const MEMBER_REFRESH = { share: 0.7, context: 180_000, conversation: 2_000_000 }
 
 /** Automatic messages in a row (with no message from you) before the team pauses itself. */
 export const AUTO_LIMIT = 60;
-const REPORT_MAX = 2_500;
+const REPORT_MAX = 2_400;
 
 // MARK: - Orders in the agents' replies
 
@@ -215,7 +215,7 @@ Eres ${member.name} en un equipo de agentes de IA coordinado por un orquestador,
 Equipo:
 ${roster}
 
-- Haz la tarea que te llega. Al terminar, responde con un informe breve que empiece por una línea «ESTADO: hecho», «ESTADO: esperando» o «ESTADO: bloqueado», y luego: qué has hecho, qué ficheros has tocado, cómo lo has comprobado y qué queda. No pegues código: está en disco.
+- Haz la tarea que te llega. Al terminar, tu ÚLTIMO mensaje es el informe para el orquestador (no para el usuario); Relevo solo le envía ese. Primera línea «ESTADO: hecho», «ESTADO: esperando» o «ESTADO: bloqueado», y después como mucho 10 líneas sencillas: qué has hecho, ficheros tocados, cómo lo has comprobado, qué queda y cualquier hallazgo que cambie el plan. Sin títulos, tablas ni negritas; no pegues código ni logs: están en disco.
 - Si dejas algo en segundo plano (una compilación, un emulador) y terminas el turno para esperarlo, no hace falta que informes: Relevo lo sabe y el orquestador no te escribirá hasta que acabes.
 - Si te bloqueas o necesitas una decisión, termina tu respuesta con <relevo:pregunta>tu duda concreta</relevo:pregunta> y espera la respuesta.${researcher ? ` Si llevas dos intentos fallidos con el mismo problema, pregunta: el ${researcher.name} puede buscar soluciones que ya existan.` : ''}
 - Otros agentes pueden estar trabajando en el mismo proyecto: toca solo lo que te pidan.
@@ -624,7 +624,7 @@ export class Teams {
   }
 
   /** A turn ended in a team thread: deliver what the orchestrator ordered, or report a member's work to it. */
-  onTurnFinished(thread, { text, changes, errors, background = [] }) {
+  onTurnFinished(thread, { text, messages, changes, errors, background = [] }) {
     const team = this.of(thread);
     const member = this.memberOf(thread);
     if (!team || !member || team.status === 'done') return;
@@ -643,12 +643,13 @@ export class Teams {
     }
     const orders = parseOrders(text);
     const question = orders.find((o) => o.type === 'pregunta');
-    const body = withoutOrders(text);
+    // The report is its last message (with its status line); the researcher's findings can span several.
+    const body = withoutOrders(member.role === 'researcher' || !messages?.length ? text : finalMessage(messages));
     const state = /^\s*\**ESTADO:?\**\s*(hecho|esperando|bloqueado)/im.exec(body)?.[1]?.toLowerCase() ?? null;
     if (question) {
       member.awaitingAnswer = true;
       this._setTask(member, 'bloqueado');
-      this._toLead(team, member, 'pregunta', `${question.body}${body ? `\n\n(Contexto: ${clip(body.replace(/\s+/g, ' '), 600)})` : ''}`);
+      this._toLead(team, member, 'pregunta', `${question.body}${body.trim() ? `\n\n(Contexto: ${clip(compactReport(body).replace(/\s+/g, ' '), 600)})` : ''}`);
       return;
     }
     // A turn that ended with nothing new (no text, no error): nothing to report.
@@ -665,7 +666,7 @@ export class Teams {
     }
     member.waitingFor = background.length ? background.map((b) => b.description).slice(0, 3) : null;
     const report = [];
-    report.push(headTail(elideCode(body, 8), REPORT_MAX));
+    report.push(compactReport(body, member.role === 'researcher' ? REPORT_MAX * 2 : REPORT_MAX));
     if (background.length) report.push(`(Sigue en segundo plano: ${background.map((b) => b.description).slice(0, 3).join(', ')}. Puedes escribirle igualmente.)`);
     if (changes?.files) report.push(`Cambios en disco: ${changes.files} fichero${changes.files === 1 ? '' : 's'} (+${changes.added} −${changes.removed})`);
     if (errors?.length) report.push(`Errores: ${errors.slice(-2).map((e) => clip(e, 300)).join(' · ')}`);
@@ -1015,7 +1016,7 @@ export class Teams {
         h._append(t, { id: h._uuid(), kind: 'notice', text: 'Relevo envía ahora al equipo lo último que dijo este agente: no había llegado' });
         h._changed(t);
         try {
-          this.onTurnFinished(t, { text: said.map((i) => i.text).join('\n\n'), changes: null, errors: items.filter((i) => i.kind === 'error').map((i) => i.text), background: [] });
+          this.onTurnFinished(t, { text: said.map((i) => i.text).join('\n\n'), messages: said.map((i) => i.text), changes: null, errors: items.filter((i) => i.kind === 'error').map((i) => i.text), background: [] });
           t.teamReportedUpTo = t.items.length;
         } catch (e) { h.log?.(`equipo: no se pudo enviar lo de «${t.title}»: ${e?.stack ?? e}`); }
       }
@@ -1396,6 +1397,35 @@ export function isWaitTool(name, title, input) {
 
 /** Tools the orchestrator and the researcher use without asking: reading and searching, never writing. */
 const READ_ONLY = new Set(['Read', 'Glob', 'Grep', 'LS', 'WebSearch', 'WebFetch', 'NotebookRead', 'TodoWrite', 'Task', 'Agent']);
+
+/**
+ * A report as the orchestrator reads it: markdown made plain (no headings, bold or table borders; a table row
+ * becomes «a · b · c»), code elided, and the middle cut if it is still long (the whole one stays in the thread).
+ */
+export function compactReport(text, max = REPORT_MAX) {
+  let s = String(text ?? '')
+    .replace(/^[ \t]*#{1,6}[ \t]+/gm, '')
+    .replace(/\*\*([^*\n]+)\*\*/g, '$1')
+    .replace(/^[ \t]*\|?[ \t]*:?-{3,}[-:| \t]*$\n?/gm, '')
+    .replace(/^[ \t]*\|(.+)\|[ \t]*$/gm, (m, row) => row.split('|').map((c) => c.trim()).filter(Boolean).join(' · '))
+    .replace(/[ \t]+$/gm, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  s = elideCode(s, 6);
+  if (s.length > max) s = `${headTail(s, max)}\n(Recortado: el informe completo está en su hilo.)`;
+  return s;
+}
+
+/**
+ * Of what an agent wrote in a turn, its report: the last message that carries a status line, else its last
+ * message. What came before is progress («voy a…», «ahora reviso…»), not for the orchestrator.
+ */
+export function finalMessage(messages) {
+  const list = (messages ?? []).map((m) => String(m ?? '')).filter((m) => m.trim());
+  if (!list.length) return '';
+  for (let i = list.length - 1; i >= 0; i--) if (/^\s*\**ESTADO:?\**\s*(hecho|esperando|bloqueado)/im.test(withoutOrders(list[i]))) return list.slice(i).join('\n\n');
+  return list[list.length - 1];
+}
 
 function headTail(text, n) {
   const s = String(text ?? '').trim();
