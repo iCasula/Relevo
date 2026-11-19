@@ -194,3 +194,44 @@ test('the orchestrator gets the final report, plain and short, not the progress 
   const long = `ESTADO: hecho\n${'hallazgo importante '.repeat(400)}`;
   assert.equal(compactReport(long), long.trim(), 'nothing is cut');
 });
+
+test('a session is renewed only when its context is really full, after the agent writes its own handoff note', async () => {
+  const { REFRESH, preamble } = await import('../lib/team.mjs');
+  const started = [], notices = [];
+  const rt = { isRunning: false, approvals: new Map(), backgroundTasks: [], context: { used: 100_000, window: 200_000 }, sessionTokens: 9_000_000 };
+  const t = { id: 'L', title: 'Orquestador', projectPath: '/p', queued: [], items: [{ kind: 'user', text: 'El probe ya enumera Vulkan, comprobado en la consola', date: Date.now() / 1000 - 60 }] };
+  const closed = [];
+  const teams = Object.create(Teams.prototype);
+  teams.host = {
+    threads: new Map([['L', t]]), _rt: () => rt, _uuid: () => 'u', _append: (th, it) => { th.items.push({ ...it, date: Date.now() / 1000 }); notices.push(it.text); }, _changed() {}, _saveState() {},
+    _startTurn: (th, text, p, meta) => { started.push(meta.prompt); th.items.push({ kind: 'user', text, from: meta.from, date: Date.now() / 1000 }); },
+    agents: { get: () => ({ close: () => closed.push(1) }), delete() {} }, accountsById: new Map(), projects: () => [], _modelName: () => 'm',
+    teams: { _status: () => 'Estado del equipo: Ejecutor libre' },
+  };
+  const lead = { threadId: 'L', role: 'orchestrator', name: 'Orquestador' };
+  const team = { id: 'T', goal: 'G', status: 'active', decisions: [], members: [lead] };
+  Object.defineProperty(teams, 'list', { value: [team] });
+  teams.of = () => team; teams.memberOf = () => lead; teams._checkBudget = () => {}; teams._dispatch = () => { throw new Error('a note gives no orders'); };
+
+  teams._maybeRefresh(team, lead, t);
+  assert.equal(started.length, 0, '50 % of the window, however many tokens the session added up: not yet');
+  rt.context = { used: 372_000, window: null };
+  teams._maybeRefresh(team, lead, t);
+  assert.equal(started.length, 0, `unknown window: only past ${REFRESH.cap}`);
+  rt.context = { used: 160_000, window: 200_000 };
+  teams._maybeRefresh(team, lead, t);
+  assert.equal(started.length, 1, 'past 75 % of its window: asks for the note first');
+  assert.match(started[0], /nota de traspaso[\s\S]*ya comprobado/);
+  assert.equal(closed.length, 0, 'not renewed until the note is written');
+
+  teams.onTurnFinished(t, { text: 'x', messages: ['Comprobado: Vulkan enumera 1 dispositivo en la consola (19-nov). Espero el NRO runtime-lift de E1. <relevo:tarea para="Ejecutor">no debe salir</relevo:tarea>'] });
+  assert.equal(closed.length, 1, 'now the session starts over');
+  assert.match(lead.handoffNote.text, /Vulkan enumera 1 dispositivo/);
+  assert.doesNotMatch(lead.handoffNote.text, /no debe salir/);
+  assert.equal(t.freshSession, true);
+
+  const fresh = preamble(teams.host, team, lead, true);
+  assert.match(fresh, /Tu nota de traspaso[\s\S]*Vulkan enumera 1 dispositivo/);
+  assert.match(fresh, /Lo último que te ha dicho el usuario[\s\S]*El probe ya enumera Vulkan/);
+  assert.doesNotMatch(preamble(teams.host, team, lead, false), /nota de traspaso \(/);
+});

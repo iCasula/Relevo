@@ -25,9 +25,16 @@ export const ROLES = {
 };
 
 /** Bumped when the agents' instructions change: teams made before get them again. */
-const RULES_VERSION = 8;
+const RULES_VERSION = 9;
 /** The orchestrator gets a fresh session (with a brief of its own thread) past any of these. */
-const LEAD_REFRESH = { context: 150_000, conversation: 1_200_000, turns: 60, share: 0.6 };
+/**
+ * When an agent starts a fresh session: only once its context is really full (this share of the model's
+ * window, never past `cap`; with an unknown window, at `cap`). Counting turns or accumulated tokens renewed
+ * the orchestrator about once an hour, and each renewal costs it what it hadn't saved.
+ */
+export const REFRESH = { share: 0.75, cap: 400_000 };
+/** The agent's own handoff note before a renewal: kept this long (seconds) and at most this many characters. */
+const NOTE_MAX = 6_000, NOTE_TTL = 24 * 3600;
 /** Decisions the team keeps (the oldest go first past this). */
 const DECISIONS_MAX = 40;
 /** Research reports the team keeps, and how many the agents are reminded of. */
@@ -36,8 +43,7 @@ const FINDINGS_MAX = 60, FINDINGS_SHOWN = 15;
 export const BG_CHECK = Number(process.env.RELEVO_BG_CHECK ?? 1800);
 /** From this hour (host time) each team that worked today gets its day's summary. */
 const SUMMARY_HOUR = 21;
-/** Executors and the researcher start a fresh session past this share of their window (or LEAD_REFRESH.context). */
-const MEMBER_REFRESH = { share: 0.7, context: 180_000, conversation: 2_000_000 };
+
 
 /** Automatic messages in a row (with no message from you) before the team pauses itself. */
 export const AUTO_LIMIT = 60;
@@ -152,7 +158,25 @@ function boardBlock(host, team, lead) {
   return `\nDónde está el equipo ahora (vienes de una sesión anterior; esto y las decisiones son lo que importa de ella):\n${host.teams._status(team, lead)}\n${reports.length ? `Último informe de cada uno:\n${reports.join('\n')}\n` : ''}`;
 }
 
+/** What the agent itself wrote down before its session was renewed: the first thing its next session reads. */
+function noteBlock(member) {
+  const n = member.handoffNote;
+  if (!n?.text || Date.now() / 1000 - (n.at ?? 0) > NOTE_TTL) return '';
+  return `\nTu nota de traspaso (la escribiste tú a las ${new Date(n.at * 1000).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}, justo antes de renovar la sesión; fíate de ella):\n${n.text}\n`;
+}
+
+/** What you (the user) wrote lately in this thread, as written: it often carries facts («ya funciona», «está en el escritorio»). */
+function userSaidBlock(host, member) {
+  const t = host.threads.get(member.threadId);
+  const since = Date.now() / 1000 - 24 * 3600;
+  const said = (t?.items ?? []).filter((i) => i.kind === 'user' && !i.from && (i.date ?? 0) >= since && i.text?.trim()).slice(-10);
+  if (!said.length) return '';
+  const hm = (d) => new Date(d * 1000).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
+  return `\nLo último que te ha dicho el usuario (tal cual, del más antiguo al más reciente):\n${said.map((i) => `- ${hm(i.date)}: ${clip(i.text.replace(/\s+/g, ' '), 400)}`).join('\n')}\n`;
+}
+
 export function preamble(host, team, member, fresh = false) {
+  const carried = fresh ? `${noteBlock(member)}${userSaidBlock(host, member)}` : '';
   const taskLine = fresh && member.role !== 'orchestrator' && member.task?.text ? `\nVienes de una sesión anterior. Tu tarea actual (${member.task.state}): ${member.task.text}\n` : '';
   const t = host.threads.get(member.threadId);
   const roster = team.members.map((m) => rosterLine(host, team, m)).join('\n');
@@ -171,7 +195,7 @@ Para dar órdenes, escríbelas tal cual en tu respuesta (fuera de bloques de có
 ${researcher ? `<relevo:investigar para="${executors[0]?.name ?? 'Ejecutor 1'}">qué averiguar y para qué</relevo:investigar>  (para= es opcional: a quién más le llega el informe)\n` : ''}<relevo:respuesta para="${executors[0]?.name ?? 'Ejecutor 1'}">respuesta a su duda o cómo desbloquearse</relevo:respuesta>
 ${executors.some((e) => host.threads.get(e.threadId)?.worktree) ? '<relevo:integrar de="Ejecutor 2"/>  fusiona en la rama principal el worktree de un ejecutor que ha terminado (lo hace Relevo, sin que tú toques git).\n' : ''}<relevo:fin>resumen para el usuario</relevo:fin>  cuando el objetivo esté cumplido y revisado.
 <relevo:hito>un paso comprobable hacia el objetivo</relevo:hito>  añade un hito (en orden); <relevo:hecho>2</relevo:hecho> marca el #2 como conseguido cuando lo hayas comprobado. Relevo los muestra al usuario como progreso y te los recuerda siempre.
-<relevo:decision>una decisión firme, en una línea (qué y por qué)</relevo:decision>  Relevo la guarda y se la recuerda a todo el equipo, también a ti en tus sesiones nuevas. Úsala para lo que no debe reabrirse: tecnologías y proyectos elegidos (p. ej. «usamos shadPS4 como referencia para GNM»), enfoques descartados y por qué, criterios del usuario. <relevo:descartar>3</relevo:descartar> retira la decisión #3 si deja de valer.
+<relevo:decision>una decisión firme, en una línea (qué y por qué)</relevo:decision>  Relevo la guarda y se la recuerda a todo el equipo, también a ti en tus sesiones nuevas. Úsala para lo que no debe reabrirse: tecnologías y proyectos elegidos (p. ej. «usamos shadPS4 como referencia para GNM»), enfoques descartados y por qué, criterios del usuario, y TODO resultado ya comprobado (en la consola, en tests o por el usuario), con fecha: «Comprobado 19-nov: Vulkan enumera 1 dispositivo en la consola sin consoleInit; no repetir la prueba». Un diagnóstico guardado no dice que el arreglo funcione: cuando se compruebe, guárdalo. <relevo:descartar>3</relevo:descartar> retira la decisión #3 si deja de valer.
 
 <relevo:urgente para="${executors[0]?.name ?? 'Ejecutor 1'}">…</relevo:urgente>  solo si lo que está haciendo ahora es claramente erróneo o ya no sirve: interrumpe su turno.
 
@@ -185,7 +209,7 @@ Cómo funciona la entrega: a un agente a mitad de un turno solo le llega lo urge
 - Tareas pequeñas y comprobables. No des a dos ejecutores los mismos ficheros a la vez.
 ${researcher ? `- Antes de que un ejecutor construya algo que ya puede existir (una librería, un proyecto open source, un ejemplo), o en cuanto lleve dos intentos fallidos con el mismo problema, pide al ${researcher.name} que lo busque, y pasa al ejecutor la recomendación concreta.\n` : '- Si un ejecutor lleva dos intentos fallidos con el mismo problema, para y busca otro enfoque (librerías o proyectos open source que ya lo resuelvan) antes de insistir.\n'}- Responde tú las dudas que puedas. Si solo el usuario puede decidir, pregúntaselo en tu respuesta sin dar órdenes y espera.
 - Sé breve y gasta poco: todos ven el código en disco, no lo copies en los mensajes; no leas el proyecto entero, apóyate en los informes y lee solo lo que necesites para decidir.
-${notesOf(member)}${milestonesBlock(team, true)}${decisionsBlock(team)}${findingsBlock(team)}${fresh ? boardBlock(host, team, member) : ''}
+${notesOf(member)}${milestonesBlock(team, true)}${decisionsBlock(team)}${findingsBlock(team)}${fresh ? boardBlock(host, team, member) : ''}${carried}
 Objetivo del usuario:
 ${team.goal}
 </relevo_equipo>
@@ -204,7 +228,7 @@ Tu trabajo es averiguar, no implementar: no modifiques ficheros del proyecto.
 - Responde con un informe accionable y corto (unas 40 líneas como mucho): las opciones que recomiendas con enlace, licencia y lo madura que parece cada una, por qué encaja aquí, cómo aplicarla en pasos concretos, y los riesgos. Nada de volcados de código largos.
 - Si la petición no está clara, termina con <relevo:pregunta>tu duda</relevo:pregunta>.
 - Relevo guarda cada informe tuyo en la biblioteca del equipo: empieza con una línea de conclusión («Conclusión: …»).
-${notesOf(member)}${decisionsBlock(team)}${findingsBlock(team)}${taskLine}</relevo_equipo>
+${notesOf(member)}${decisionsBlock(team)}${findingsBlock(team)}${taskLine}${carried}</relevo_equipo>
 
 `;
   }
@@ -218,7 +242,7 @@ ${roster}
 - Si dejas algo en segundo plano (una compilación, un emulador) y terminas el turno para esperarlo, no hace falta que informes: Relevo lo sabe y el orquestador no te escribirá hasta que acabes.
 - Si te bloqueas o necesitas una decisión, termina tu respuesta con <relevo:pregunta>tu duda concreta</relevo:pregunta> y espera la respuesta.${researcher ? ` Si llevas dos intentos fallidos con el mismo problema, pregunta: el ${researcher.name} puede buscar soluciones que ya existan.` : ''}
 - Otros agentes pueden estar trabajando en el mismo proyecto: toca solo lo que te pidan.
-${notesOf(member)}${decisionsBlock(team)}${taskLine}</relevo_equipo>
+${notesOf(member)}${decisionsBlock(team)}${taskLine}${carried}</relevo_equipo>
 
 `;
 }
@@ -628,6 +652,18 @@ export class Teams {
     const member = this.memberOf(thread);
     if (!team || !member || team.status === 'done') return;
     const h = this.host;
+    // The turn Relevo asked for before renewing: what it wrote is its handoff note, not a report or orders.
+    if (member.noteRequested) {
+      member.noteRequested = false;
+      const asked = [...thread.items].reverse().find((i) => i.kind === 'user')?.from?.label === 'traspaso';
+      if (asked) {
+        const note = withoutOrders(messages?.length ? messages[messages.length - 1] : text).trim();
+        if (note) member.handoffNote = { text: clip(compactReport(note), NOTE_MAX), at: Date.now() / 1000 };
+        this._renew(team, member, thread);
+        h._saveState();
+        return;
+      }
+    }
     this._checkBudget(team);
     if (member.role === 'orchestrator') {
       const orders = parseOrders(text);
@@ -966,15 +1002,30 @@ export class Teams {
   }
 
   /**
-   * An executor or the researcher whose session grew too big starts a fresh one (with a brief, the decisions
-   * and its task), like the orchestrator. Never while it has something running in the background.
+   * An agent whose context is really full starts a fresh session. First it writes its own handoff note (one
+   * short turn): what is verified, what it waits for, what it has half done. Then the session is renewed, and
+   * the new one reads that note, the decisions, the board and your latest messages. Never while it works,
+   * waits for an answer or has something running in the background.
    */
-  _maybeRefreshMember(team, member, t) {
+  _maybeRefresh(team, member, t) {
     const h = this.host;
     const r = h._rt(t);
-    if (r.backgroundTasks?.length || r.isRunning) return;
-    const limit = Math.min(MEMBER_REFRESH.context, (r.context?.window ?? Infinity) * MEMBER_REFRESH.share);
-    if ((r.context?.used ?? 0) <= limit && (r.sessionTokens ?? 0) <= MEMBER_REFRESH.conversation) return;
+    if (r.isRunning || r.approvals.size || r.backgroundTasks?.length || member.noteRequested) return;
+    const window = r.context?.window;
+    const limit = window ? Math.min(window * REFRESH.share, REFRESH.cap) : REFRESH.cap;
+    if ((r.context?.used ?? 0) <= limit) return;
+    member.noteRequested = true;
+    h._append(t, { id: h._uuid(), kind: 'notice', text: 'Contexto casi lleno: antes de renovar la sesión, el agente escribe su nota de traspaso' });
+    h._startTurn(t, 'Relevo va a renovar tu sesión: escribe tu nota de traspaso.', false, {
+      from: { name: 'Relevo', role: 'relevo', label: 'traspaso' },
+      prompt: `(Relevo va a renovar tu sesión porque el contexto está casi lleno. Tu siguiente sesión NO recordará esta conversación: recibirá las decisiones y los hitos guardados, el estado del equipo, los últimos mensajes del usuario y ESTA nota.)\nEscribe ahora tu nota de traspaso: solo texto, sin usar herramientas${member.role === 'orchestrator' ? ' ni dar órdenes' : ''}, en menos de 40 líneas:\n1) Qué está ya comprobado y no hay que repetir (con fecha, commit o fichero).\n2) Qué estás esperando y de quién (del usuario, de cada agente).\n3) Qué tienes a medias y cuál es tu siguiente paso.\n4) Avisos: trampas, rutas, comandos o acuerdos con el usuario que no estén en las decisiones.\nNo repitas las decisiones ni los hitos ya guardados.`,
+    });
+  }
+
+  /** The note is written (or there is none to wait for): the session starts over. */
+  _renew(team, member, t) {
+    const h = this.host;
+    const r = h._rt(t);
     h.agents.get(t.id)?.close();
     h.agents.delete(t.id);
     t.sessionId = null;
@@ -984,9 +1035,12 @@ export class Teams {
     t.teamPrimed = false;
     r.sessionTokens = 0;
     r.context = null;
-    h._append(t, { id: h._uuid(), kind: 'notice', text: 'Sesión renovada para no arrastrar todo el contexto: el siguiente mensaje lleva un resumen, su tarea y las decisiones del equipo' });
+    const carries = ['su nota de traspaso', 'un resumen', member.role === 'orchestrator' ? 'el estado del equipo' : 'su tarea', team.decisions?.length ? `las ${team.decisions.length} decisiones` : null, 'tus últimos mensajes'].filter(Boolean);
+    h._append(t, { id: h._uuid(), kind: 'notice', text: `Sesión renovada (contexto lleno): el siguiente mensaje lleva ${carries.slice(0, -1).join(', ')} y ${carries[carries.length - 1]}` });
     h._changed(t);
   }
+
+  _maybeRefreshMember(team, member, t) { this._maybeRefresh(team, member, t); }
 
   /**
    * The safety net: an agent that finished a turn whose words never reached the team (whatever went wrong on
@@ -1046,24 +1100,8 @@ export class Teams {
   }
 
   _maybeRefreshLead(team, t) {
-    const h = this.host;
-    const r = h._rt(t);
-    // A model with a small window renews sooner, one with a big window no later than LEAD_REFRESH.context.
-    const contextLimit = Math.min(LEAD_REFRESH.context, (r.context?.window ?? Infinity) * LEAD_REFRESH.share);
-    const big = (r.context?.used ?? 0) > contextLimit || (r.sessionTokens ?? 0) > LEAD_REFRESH.conversation || team.leadTurns >= LEAD_REFRESH.turns;
-    if (!big) return;
-    team.leadTurns = 0;
-    h.agents.get(t.id)?.close();
-    h.agents.delete(t.id);
-    t.sessionId = null;
-    t.sessions = {}; // older sessions are bigger still: none is resumed after this
-    t.handoffPending = true;
-    t.freshSession = true;
-    t.teamPrimed = false;
-    r.sessionTokens = 0;
-    r.context = null;
-    h._append(t, { id: h._uuid(), kind: 'notice', text: `Sesión del orquestador renovada para no arrastrar todo el contexto: el siguiente mensaje lleva un resumen, el estado del equipo${team.decisions?.length ? ` y las ${team.decisions.length} decisiones guardadas` : ''}` });
-    h._changed(t);
+    const lead = team.members.find((m) => m.threadId === t.id);
+    if (lead) this._maybeRefresh(team, lead, t);
   }
 
   /** After a restart: whoever was waiting for a background job (which the restart stopped) relaunches it. */
