@@ -1251,6 +1251,7 @@ export class Host {
     r.suggestionDismissed = false;
     this._clearLimitTimers(t);
     r.isRunning = true;
+    r.turnStartedAt = now();
     r.limit = null;
     r.turnItems = [];
     r.statusLine = t.items.filter((i) => i.kind === 'user').length > 1 ? 'Pensando…' : `Iniciando ${account.agentName}…`;
@@ -1417,6 +1418,7 @@ export class Host {
     });
     s.on('turnStarted', (reason) => {
       r.isRunning = true;
+      r.turnStartedAt = now();
       r.turnItems = [];
       r.statusLine = `${account.name} retoma por su cuenta…`;
       if (reason) this._append(t, { id: uuid(), kind: 'notice', text: reason });
@@ -1454,7 +1456,9 @@ export class Host {
           text: turn.filter((i) => i.kind === 'assistant' && i.text).map((i) => i.text).join('\n\n'),
           changes: userItem?.turnChanges ?? null,
           errors: turn.filter((i) => i.kind === 'error').map((i) => i.text),
-          background: r.backgroundTasks ?? [],
+          // Only what this turn left running means «it's waiting»: a job from before (maybe the very one whose end
+          // woke it up, still listed for a moment) doesn't hold back what it says now.
+          background: (r.backgroundTasks ?? []).filter((b) => (b.startedAt ?? 0) >= (r.turnStartedAt ?? 0) - 2),
         });
       }
       if (r.pendingSwitch) {

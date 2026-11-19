@@ -25,7 +25,7 @@ export const ROLES = {
 };
 
 /** Bumped when the agents' instructions change: teams made before get them again. */
-const RULES_VERSION = 6;
+const RULES_VERSION = 7;
 /** The orchestrator gets a fresh session (with a brief of its own thread) past any of these. */
 const LEAD_REFRESH = { context: 150_000, conversation: 1_200_000, turns: 60, share: 0.6 };
 /** Decisions the team keeps (the oldest go first past this). */
@@ -176,9 +176,10 @@ ${executors.some((e) => host.threads.get(e.threadId)?.worktree) ? '<relevo:integ
 
 <relevo:urgente para="${executors[0]?.name ?? 'Ejecutor 1'}">…</relevo:urgente>  solo si lo que está haciendo ahora es claramente erróneo o ya no sirve: interrumpe su turno.
 
-Cómo funciona la entrega: a un agente que está trabajando solo le llega lo urgente; lo demás Relevo no se lo entrega (te lo dirá). No hace falta: cuando termine recibirás su informe y entonces decides su siguiente tarea, con información fresca. Relevo te enviará los informes, dudas y bloqueos de cada agente con su nombre delante («[${executors[0]?.name ?? 'Ejecutor 1'} · informe]», «… · pregunta») y al final el estado del equipo (quién trabaja y cuántos mensajes tuyos le esperan). Reglas:
+Cómo funciona la entrega: a un agente a mitad de un turno solo le llega lo urgente (y la respuesta a una duda suya); lo demás Relevo no se lo entrega y te lo dice. No hace falta: cuando termine recibirás su informe y entonces decides su siguiente tarea, con información fresca. Relevo te enviará los informes, dudas y bloqueos de cada agente con su nombre delante («[${executors[0]?.name ?? 'Ejecutor 1'} · informe]», «… · pregunta») y al final el estado del equipo (quién trabaja y cuántos mensajes tuyos le esperan). Reglas:
 - No acuses recibo ni contestes a informes de progreso («compilando…», «sigo con…»): si no hay nada nuevo que pedir, responde sin órdenes y espera.
-- No mandes nada a quien está trabajando salvo que sea urgente: espera a su informe (mira el estado del equipo). Quien espera un trabajo en segundo plano (una compilación, un emulador) también está trabajando: te informará cuando acabe.
+- No mandes nada a quien está a mitad de un turno salvo que sea urgente: espera a su informe (mira el estado del equipo). Quien solo espera un trabajo en segundo plano (una compilación, un emulador) sí recibe tus mensajes; si no tienes nada nuevo para él, deja que te informe cuando acabe.
+- Si Relevo te dice «No entregado a…», ese mensaje NO le llega solo: vuelve a dárselo cuando te llegue su informe.
 - Una respuesta a quien no te ha preguntado nada no se entrega: se guarda y le llega con su siguiente tarea. No respondas a informes con ESTADO: esperando.
 - No hagas tú el trabajo de los ejecutores (depurar, compilar, hacer commits o merges): pídeselo a ellos${executors.some((e) => host.threads.get(e.threadId)?.worktree) ? ' o usa integrar' : ''}.
 - Toda respuesta y tarea lleva para="…". No existen otras órdenes ni opciones («force», «redirect»…) aparte de las de arriba.
@@ -654,15 +655,18 @@ export class Teams {
     if (!body.trim() && !errors?.length) return;
     // Waiting for something running in the background: not worth waking the orchestrator; the agent picks
     // up by itself when it ends, and reports then.
-    if (background.length && !errors?.length && member.role !== 'researcher') {
+    // «ESTADO: hecho» or «bloqueado» is a report: it goes whatever is still running (a blocked agent must not
+    // sit unheard just because a job it left is still listed).
+    if (background.length && !errors?.length && state !== 'hecho' && state !== 'bloqueado' && member.role !== 'researcher') {
       member.waitingFor = background.map((b) => b.description).slice(0, 3);
       this._setTask(member, 'esperando un trabajo en segundo plano');
       h._saveState();
       return;
     }
-    member.waitingFor = null;
+    member.waitingFor = background.length ? background.map((b) => b.description).slice(0, 3) : null;
     const report = [];
     report.push(headTail(elideCode(body, 8), REPORT_MAX));
+    if (background.length) report.push(`(Sigue en segundo plano: ${background.map((b) => b.description).slice(0, 3).join(', ')}. Puedes escribirle igualmente.)`);
     if (changes?.files) report.push(`Cambios en disco: ${changes.files} fichero${changes.files === 1 ? '' : 's'} (+${changes.added} −${changes.removed})`);
     if (errors?.length) report.push(`Errores: ${errors.slice(-2).map((e) => clip(e, 300)).join(' · ')}`);
     const kind = member.role === 'researcher' ? 'informe de investigación' : errors?.length && !body ? 'error'
@@ -1100,8 +1104,8 @@ export class Teams {
           return;
         }
         if (to.awaitingAnswer) {
-          to.awaitingAnswer = false;
           this._deliver(team, to, o.body, { ...from, label: 'respuesta' });
+          to.awaitingAnswer = false;
           return;
         }
         // It hadn't asked anything (an acknowledgement, a comment): opening a turn for that costs its whole
@@ -1170,8 +1174,11 @@ export class Teams {
     // Someone working only gets urgent orders: anything else would wait until its turn ends, maybe an hour,
     // and be stale by then. The orchestrator gets its report when it finishes and decides with that.
     const target = h.threads.get(member.threadId);
-    const busy = target && this._busy(target);
-    if (busy && !urgent && member.role !== 'orchestrator' && (from.role === 'orchestrator' || from.role === 'researcher')) {
+    // Mid-turn, that is. Something left running in the background doesn't count: the agent is idle, waiting
+    // for it, and can read a message (and an answer to its own question always goes).
+    const midTurn = target && h._rt(target).isRunning;
+    const answer = from.label === 'respuesta' && member.awaitingAnswer;
+    if (midTurn && !urgent && !answer && member.role !== 'orchestrator' && (from.role === 'orchestrator' || from.role === 'researcher')) {
       this._bounce(team, member, text, from);
       return 'bounced';
     }
@@ -1304,9 +1311,9 @@ export class Teams {
     const h = this.host;
     const lead = this._lead(team);
     const what = clip(text.replace(/\s+/g, ' '), 140);
-    team.notes = [...(team.notes ?? []), `No entregado a ${member.name}, que estaba trabajando: «${what}». Decide qué darle cuando llegue su informe; si no podía esperar, usa urgente.`].slice(-6);
+    team.notes = [...(team.notes ?? []), `No entregado a ${member.name}, que estaba a mitad de un turno: «${what}». No se le entregará solo: cuando llegue su informe, vuelve a dárselo si sigue valiendo (o usa urgente si no podía esperar).`].slice(-6);
     if (lead) {
-      h._append(lead, { id: h._uuid(), kind: 'notice', text: `No entregado a ${member.name} (está trabajando): ${from.role === 'researcher' ? 'el informe del Investigador' : 'tu mensaje'} queda para cuando termine` });
+      h._append(lead, { id: h._uuid(), kind: 'notice', text: `No entregado a ${member.name} (está a mitad de un turno): ${from.role === 'researcher' ? 'el informe del Investigador' : 'tu mensaje'} no le llega solo; dáselo de nuevo tras su informe` });
       h._changed(lead);
     }
     h._saveState();

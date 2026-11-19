@@ -474,3 +474,13 @@ test('the guard: in full access a safe step goes on by itself, a recursive delet
   const item = card.threadPatch._0.upserts.find((i) => i.kind === 'approval');
   peer.send(Client.approve(exec, item.id, 'deny'));
 });
+
+test("what an agent says reaches the orchestrator even with an older job still listed in the background", async () => {
+  const claude = snapshot.accounts.find((a) => a.kind === 'claude');
+  const r = await request('createTeam', { team: { projectId: demo(), goal: 'Fondo antiguo', orchestrator: { accountId: claude.id }, executors: [{ accountId: claude.id }], researcher: null } });
+  const boss = r.threadId;
+  peer.send(Client.subscribe(boss));
+  await next(firstDone(boss));
+  peer.send(Client.send(boss, '<relevo:tarea para="Ejecutor">fondo antiguo</relevo:tarea>'));
+  await next((m) => m.threadPatch?._0.id === boss && m.threadPatch._0.upserts.some((i) => i.kind === 'user' && /Sin cambios respecto a mi informe/.test(i.text ?? '')), 20_000);
+});

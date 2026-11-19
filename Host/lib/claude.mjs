@@ -223,6 +223,11 @@ export class ClaudeSession extends EventEmitter {
           this.emit('backgroundTasks', this.background);
         } else if (o.subtype === 'task_notification') {
           this.finishedTask = (this.background ?? []).find((b) => b.id === o.task_id)?.description ?? o.description ?? 'una tarea';
+          // Done: off the list now (the CLI's own update can come after the turn it wakes up).
+          if (o.task_id && (this.background ?? []).some((b) => b.id === o.task_id)) {
+            this.background = this.background.filter((b) => b.id !== o.task_id);
+            this.emit('backgroundTasks', this.background);
+          }
         } else if (o.subtype === 'api_retry') this.emit('status', 'Reintentando la llamada a la API…');
         else if (o.subtype === 'compact_boundary') this.emit('notice', 'Claude ha compactado el contexto');
         break;
@@ -498,6 +503,17 @@ export class FakeSession extends EventEmitter {
         questions: [{ question: '¿Qué color prefieres?', header: 'Color', options: [{ label: 'Rojo', description: 'Cálido' }, { label: 'Azul' }], multiSelect: false }],
         options: [], respond: () => finish(),
       });
+      return;
+    }
+    // «fondo antiguo»: a job from an earlier turn is still listed when it answers (as when one just ended).
+    if (/^fondo antiguo/i.test(text)) {
+      setTimeout(() => {
+        this.emit('backgroundTasks', [{ id: `old${turn}`, description: 'captura antigua', startedAt: Date.now() / 1000 - 600 }]);
+        this.emit('textDelta', `t${turn}`, 'Sin cambios respecto a mi informe anterior: la captura sigue fallando.');
+        this.emit('tokens', { tokens: 100, cacheShare: 0.5, cost: 0 });
+        this.turnActive = false;
+        this.emit('turnFinished');
+      }, 100);
       return;
     }
     // «borra todo»: a destructive command the guard must hold for you.

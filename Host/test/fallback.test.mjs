@@ -139,3 +139,26 @@ test("a pause the loop guard caused ends when you write, without sending what it
   Teams.prototype.userSpoke.call(ctx, {});
   assert.equal(team.status, 'paused');
 });
+
+test('an agent only waiting on background work gets messages; one mid-turn still gets the answer to its question', () => {
+  const started = [], notices = [];
+  const rts = { E: { isRunning: false, approvals: new Map(), backgroundTasks: [{ id: 'q', description: 'QEMU' }] } };
+  const threads = new Map([['E', { id: 'E', queued: [], teamPrimed: true }], ['L', { id: 'L', queued: [] }]]);
+  const teams = Object.create(Teams.prototype);
+  teams.host = {
+    threads, _rt: (t) => rts[t.id] ?? { isRunning: false, approvals: new Map() }, _uuid: () => 'u', _append: (t, it) => notices.push(it.text),
+    _changed() {}, _saveState() {}, _broadcastSnapshot() {}, _startTurn: (t, text) => started.push(text), sendNow() {},
+  };
+  const team = { status: 'active', auto: 0, held: [], members: [{ threadId: 'L', role: 'orchestrator', name: 'Orquestador' }, { threadId: 'E', role: 'executor', name: 'Ejecutor 2', awaitingAnswer: true }] };
+  const [lead, ex] = team.members;
+  const from = { threadId: 'L', name: 'Orquestador', role: 'orchestrator' };
+  assert.equal(teams._deliver(team, ex, 'parche en rama aparte', { ...from, label: 'respuesta' }), 'sent', 'idle with QEMU in the background: delivered');
+  // Mid-turn: a task bounces (and the orchestrator is told it won't arrive by itself)…
+  rts.E.isRunning = true;
+  assert.equal(teams._deliver(team, ex, 'otra tarea', { ...from, label: 'tarea' }), 'bounced');
+  assert.match(notices.pop(), /no le llega solo/);
+  // …but the answer to its own question is queued for when the turn ends.
+  ex.awaitingAnswer = true;
+  assert.equal(teams._deliver(team, ex, 'respuesta', { ...from, label: 'respuesta' }), 'queued');
+  void lead;
+});
