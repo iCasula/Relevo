@@ -263,3 +263,30 @@ test("waiting here: the thread stays on its model and carries on when the balanc
   h._limitAction(t, 'cancelResume');
   assert.equal(r.waitChosen, false);
 });
+
+test("an agent sent to the model you chose goes back to its own as soon as that has quota again", () => {
+  const ds = acct('DS', 'api:deepseek', ['deepseek-v4-pro']);
+  const { h } = stand([acct('CX', 'codex', ['gpt-6.1-terra']), acct('CL', 'claude', ['haiku']), ds]);
+  const notices = [];
+  h._append = (x, it) => notices.push(it.text);
+  // On Codex, with «→ DeepSeek» as its out-of-quota choice: that is where it goes, whatever else has quota.
+  const t = { id: 'T', accountId: 'CX', model: 'gpt-6.1-terra', limitPlan: { mode: 'chain', targets: [{ accountId: 'DS', model: 'deepseek-v4-pro' }] } };
+  assert.deepEqual(h._planTarget(t, t.limitPlan), { accountId: 'DS', model: 'deepseek-v4-pro' });
+  h._rt(t).pendingRelay = { accountId: 'DS', model: 'deepseek-v4-pro' };
+  h._relayNow(t);
+  assert.equal(t.accountId, 'DS');
+  assert.deepEqual(t.home, { accountId: 'CX', model: 'gpt-6.1-terra' }, 'it remembers where it was');
+  assert.match(notices.pop(), /volverá a CX · gpt-6\.1-terra en cuanto recupere la cuota/);
+  // Codex still out: it stays on DeepSeek.
+  h.accounts[0].status.windows = [{ percent: 100, resetsAt: nowS() + 900 }];
+  h._preTurnSwitch(t);
+  assert.equal(t.accountId, 'DS');
+  // Codex has quota again: back before the next turn.
+  h.accounts[0].status.windows = [{ percent: 4 }];
+  h._preTurnSwitch(t);
+  assert.equal(t.accountId, 'CX');
+  assert.equal(t.model, 'gpt-6.1-terra');
+  assert.equal(t.home, null);
+  // And DeepSeek is no last resort by rule: the automatic choice goes by fit for the role, pay-per-use or not.
+  assert.deepEqual(h._planTarget({ id: 'U', accountId: 'CX', model: 'gpt-6.1-terra' }, { mode: 'smart', tier: 'heavy' }), { accountId: 'DS', model: 'deepseek-v4-pro' });
+});

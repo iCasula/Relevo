@@ -1756,7 +1756,8 @@ export class Host {
     const to = this.accountsById.get(target.accountId);
     // Where it was: it goes back there when that quota comes back.
     t.home ??= { accountId: t.accountId, model: t.model };
-    this._append(t, { id: uuid(), kind: 'notice', accountId: target.accountId, text: `Relevo automático a ${to?.name ?? '?'} · ${this._modelName(to, target.model)}` });
+    const home = this.accountsById.get(t.home.accountId);
+    this._append(t, { id: uuid(), kind: 'notice', accountId: target.accountId, text: `Relevo automático a ${to?.name ?? '?'} · ${this._modelName(to, target.model)}${home ? `: volverá a ${home.name} · ${this._modelName(home, t.home.model)} en cuanto recupere la cuota` : ''}` });
     this.select(t, target.accountId, target.model, true, true);
   }
 
@@ -1937,7 +1938,7 @@ export class Host {
         budget: x.budget ?? undefined,
         guard: x.members.every((m) => { const t = this.threads.get(m.threadId); return !t || this._guarded(t); }),
         heldList: this.teams.heldList(x), pausedBy: x.pausedBy ?? undefined,
-        members: x.members.map((m) => { const t = this.threads.get(m.threadId); return clean({ threadId: m.threadId, role: m.role, name: m.name, notes: m.notes, accountId: t?.accountId, model: t?.model ?? 'default', task: m.task ?? undefined, stash: m.stash?.length || undefined, fallback: t ? fallbackOf(t.limitPlan) : undefined, today: t ? this._spendToday(t) : undefined }); }) })),
+        members: x.members.map((m) => { const t = this.threads.get(m.threadId); return clean({ threadId: m.threadId, role: m.role, name: m.name, notes: m.notes, accountId: t?.accountId, model: t?.model ?? 'default', task: m.task ?? undefined, stash: m.stash?.length || undefined, fallback: t ? fallbackOf(t.limitPlan) : undefined, home: t?.home && this.accountsById.has(t.home.accountId) ? { accountId: t.home.accountId, model: t.home.model || 'default' } : undefined, today: t ? this._spendToday(t) : undefined }); }) })),
       hostSettings: { ...settings, limitPlanSummary: this._planSummary(settings.limitPlan), accounts: this._accountDefs() },
       hostPush: { configured: !!this._apnsConfig(), teamId: this.state.push?.apns?.teamId ?? null, keyId: this.state.push?.apns?.keyId ?? null,
         devices: Object.entries(this.state.push?.devices ?? {}).map(([id, d]) => ({ id, name: d.name, environment: d.environment, at: d.at })) },
@@ -1982,6 +1983,8 @@ export class Host {
       limitPlan: t.limitPlan ? { ...t.limitPlan, summary: this._planSummary(t.limitPlan) } : null,
       defaultLimitPlan: { ...this.settings.limitPlan, summary: this._planSummary(this.settings.limitPlan) },
       pendingRelay: r.pendingRelay ?? null, resumeAt: r.resumeAt ?? null, resumeUnknown: r.resumeUnknown || undefined, canWait: true,
+      // Where it goes back to once that quota returns (it is on a fallback now).
+      home: t.home && this.accountsById.has(t.home.accountId) ? { accountId: t.home.accountId, model: t.home.model || 'default' } : undefined,
       suggestion: r.suggestionDismissed ? null : r.suggestion ?? null,
     });
   }

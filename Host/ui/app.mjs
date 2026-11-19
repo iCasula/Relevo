@@ -447,6 +447,7 @@ function renderTeamBar() {
         [ctx, t?.sessionTokens ? `sesión ${shortTokens(t.sessionTokens)} tokens` : ''].filter(Boolean).join(' · '),
         m.stash ? `${m.stash} nota${m.stash === 1 ? '' : 's'} del orquestador para su próxima tarea` : '',
         m.today?.tokens ? `Hoy: ${sheets.spendText(m.today)}` : '',
+        m.home ? `Ahora en un modelo de reserva: vuelve a ${accountOf(hostId, m.home.accountId)?.name ?? '?'} · ${modelName(accountOf(hostId, m.home.accountId), m.home.model)} en cuanto recupere la cuota` : '',
       ].filter(Boolean).join('\n');
       const prov = accountOf(hostId, m.accountId);
       return `<button class="team-chip r-${m.role}${m.threadId === summary.id ? ' on' : ''}" data-team-go="${esc(m.threadId)}" title="${esc(tip)}">${icon(ROLE[m.role]?.icon ?? 'person.2', { size: 11 })}<span>${esc(m.name)}</span>${prov ? badge(prov, 12) : ''}${state}</button>`;
@@ -819,7 +820,9 @@ function renderControls() {
   const acc = accountOf(hostId, rt?.selectedAccountId);
   const model = modelOf(acc, rt?.selectedModel);
   const lastAcc = [...(thread?.items ?? [])].reverse().find((i) => i.kind === 'assistant')?.accountId;
-  const pickTip = acc && lastAcc && lastAcc !== acc.id ? `Al enviar, Relevo pasará el contexto del hilo a ${acc.name}` : 'Proveedor y modelo';
+  const homeAcc = rt?.home && accountOf(hostId, rt.home.accountId);
+  const pickTip = homeAcc ? `Modelo de reserva: vuelve a ${homeAcc.name} · ${modelName(homeAcc, rt.home.model)} en cuanto recupere la cuota`
+    : acc && lastAcc && lastAcc !== acc.id ? `Al enviar, Relevo pasará el contexto del hilo a ${acc.name}` : 'Proveedor y modelo';
   const draft = T.draft.value.trim() || attachments.some((a) => a.path);
   const connected = h?.info.state === 'connected';
   const runningNow = rt?.isRunning;
@@ -838,7 +841,7 @@ function renderControls() {
   } else {
     buttons = `<button class="circle-btn" data-cmd="send" title="Enviar (Intro) · nueva línea con Mayús+Intro"${draft && connected ? '' : ' disabled'}>${icon('arrow.up', { size: 14 })}</button>`;
   }
-  const html = `<button class="pick model" data-cmd="modelMenu" title="${esc(pickTip)}"${rt ? '' : ' disabled'}>${acc ? `${badge(acc, 15)}<span class="acc">${esc(acc.name)}</span><span class="mdl">${esc(modelName(acc, rt?.selectedModel))}</span>` : '<span>Elige una suscripción</span>'}${icon('chevron.up.chevron.down', { size: 9, cls: 'ud' })}</button>`
+  const html = `<button class="pick model" data-cmd="modelMenu" title="${esc(pickTip)}"${rt ? '' : ' disabled'}>${acc ? `${badge(acc, 15)}<span class="acc">${esc(acc.name)}</span><span class="mdl">${esc(modelName(acc, rt?.selectedModel))}</span>${homeAcc ? `<span class="back-home">${icon('arrow.triangle.2.circlepath', { size: 10 })}${esc(homeAcc.name)}</span>` : ''}` : '<span>Elige una suscripción</span>'}${icon('chevron.up.chevron.down', { size: 9, cls: 'ud' })}</button>`
     + (efforts.length ? `<button class="pick${rt?.selectedEffort ? ' set' : ''}" data-cmd="effortMenu" title="Nivel de razonamiento: cuánto «piensa» el modelo antes de responder (más alto = mejor en tareas difíciles, más lento y gasta más cuota)">${icon('brain', { size: 13 })}${esc(effortLabel)}</button>` : '')
     + `<button class="pick${mode[0] === 'full' && !rt?.guard ? ' danger' : ''}" data-cmd="modeMenu" title="${esc(mode[0] === 'full' && rt?.guard ? 'Acceso total protegido: Relevo detiene borrados y escrituras fuera del proyecto' : mode[3])}">${icon(mode[0] === 'full' && rt?.guard ? 'checkmark.shield' : mode[2], { size: 13 })}${esc(mode[1])}${mode[0] === 'full' && rt?.guard ? ' · protegido' : ''}</button>`
     + `<span class="grow"></span>${hint}${buttons}`;
