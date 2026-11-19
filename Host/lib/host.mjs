@@ -1534,7 +1534,8 @@ export class Host {
       r.keys.clear();
       t.updatedAt = now();
       this._changed(t);
-      const skip = !t.team ? null : r.limitHit ? 'límite de cuota' : r.sendNow ? 'mensaje urgente' : r.stopRequested ? 'detenido' : r.pendingSwitch ? 'cambio de modelo' : null;
+      // A model change waiting for this turn to end doesn't make it any less finished: it reports, then switches.
+      const skip = !t.team ? null : r.limitHit ? 'límite de cuota' : r.sendNow ? 'mensaje urgente' : r.stopRequested ? 'detenido' : null;
       if (t.team && skip) {
         this.log(`equipo: el turno de «${t.title}» no se informa (${skip})`);
         // Stopped by you or out of quota: deliberately not reported. The others carry on and report next.

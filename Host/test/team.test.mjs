@@ -494,3 +494,18 @@ test('a report that ends with a question reaches the orchestrator as a question'
   peer.send(Client.send(boss, '<relevo:tarea para="Ejecutor">ESTADO: hecho\nRama lista.\n<relevo:pregunta>¿De dónde restauro el volcado?</relevo:pregunta></relevo:tarea>'));
   await next((m) => m.threadPatch?._0.id === boss && m.threadPatch._0.upserts.some((i) => i.kind === 'user' && /De dónde restauro el volcado/.test(i.text ?? '')), 20_000);
 });
+
+test("a turn that ends with a model change waiting still reports to the orchestrator", async () => {
+  const claude = snapshot.accounts.find((a) => a.kind === 'claude'), codex = snapshot.accounts.find((a) => a.kind === 'codex');
+  const r = await request('createTeam', { team: { projectId: demo(), goal: 'Cambio pendiente', orchestrator: { accountId: claude.id }, executors: [{ accountId: claude.id }], researcher: null } });
+  const boss = r.threadId;
+  peer.send(Client.subscribe(boss));
+  await next(firstDone(boss));
+  const team = (await next((m) => m.snapshot?._0.hostTeams?.some((x) => x.goal === 'Cambio pendiente'))).snapshot._0.hostTeams.find((x) => x.goal === 'Cambio pendiente');
+  const exec = team.members[1].threadId;
+  // «segundo plano» keeps it busy a moment; the switch asked meanwhile waits for the turn.
+  peer.send(Client.send(boss, '<relevo:tarea para="Ejecutor">segundo plano</relevo:tarea>'));
+  await new Promise((res) => setTimeout(res, 300));
+  peer.send(Client.select(exec, codex.id, 'default'));
+  await next((m) => m.threadPatch?._0.id === boss && m.threadPatch._0.upserts.some((i) => i.kind === 'user' && /Compilación terminada/.test(i.text ?? '')), 25_000);
+});

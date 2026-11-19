@@ -1002,7 +1002,7 @@ export class Teams {
         // Threads from before this existed: everything so far counts as told.
         if (t.teamReportedUpTo === undefined) { t.teamReportedUpTo = t.items.length; continue; }
         const r = h._rt(t);
-        if (r.isRunning || r.approvals.size || r.sendNow || r.pendingSwitch || t.queued.length) continue;
+        if (r.isRunning || r.approvals.size || r.sendNow || t.queued.length) continue;
         const items = t.items.slice(t.teamReportedUpTo);
         const lastUser = [...t.items].reverse().find((i) => i.kind === 'user');
         const said = items.filter((i) => i.kind === 'assistant' && i.text?.trim());
