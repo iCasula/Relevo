@@ -64,6 +64,7 @@ struct AgentMessageRow: View {
     let currentThread: UUID
     let expanded: Set<String>
     let toggle: (String) -> Void
+    var roles: [String: RemoteTeamRole] = [:]
 
     /// Short messages show whole; longer ones fold to a few lines (tap to read them).
     private var isLong: Bool { item.text.count > 220 || item.text.split(whereSeparator: \.isNewline).count > 3 }
@@ -104,7 +105,7 @@ struct AgentMessageRow: View {
                     .lineLimit(2)
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
-                ReplyWithOrders(text: item.text, itemId: item.id, expanded: expanded, toggle: toggle)
+                ReplyWithOrders(text: item.text, itemId: item.id, expanded: expanded, toggle: toggle, roles: roles)
             }
         }
         .padding(12)

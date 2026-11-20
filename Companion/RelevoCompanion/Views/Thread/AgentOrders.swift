@@ -1,5 +1,6 @@
 import SwiftUI
 import RelevoMarkdown
+import RelevoProtocol
 
 /// An order inside an agent's reply: `<relevo:tarea para="Ejecutor 1">…</relevo:tarea>`.
 /// The host acts on them; on the phone they fold into one line each, tap to read the whole order.
@@ -42,14 +43,23 @@ struct AgentOrder: Hashable {
         }
     }
 
-    var tint: Color {
-        switch type {
-        case "urgente": .red
-        case "investigar": .green
-        case "pregunta": .purple
-        case "decision", "decisión", "hito", "hecho": .teal
-        default: .blue
-        }
+    /// Team memory (milestones, decisions…), not a message to anyone.
+    var isMemo: Bool { ["fin", "decision", "decisión", "descartar", "hito", "hecho"].contains(type) }
+
+    /// Who gets it: from the team when the name is known, else from the name or the kind.
+    func recipient(_ roles: [String: RemoteTeamRole]) -> RemoteTeamRole {
+        let name = (to ?? "").lowercased()
+        if let role = roles[name] { return role }
+        if name.contains("investig") || type == "investigar" { return .researcher }
+        if name.contains("orquest") || name.isEmpty { return .orchestrator }
+        return .executor
+    }
+
+    /// Messages to other agents take the colour of whoever gets them; team memory stays grey.
+    func tint(_ roles: [String: RemoteTeamRole]) -> Color {
+        if isMemo { return .secondary }
+        if type == "urgente" { return .red }
+        return recipient(roles).color
     }
 
     enum Segment: Hashable {
@@ -98,8 +108,8 @@ struct AgentOrder: Hashable {
         let line = text.split(whereSeparator: \.isNewline)
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .first { !$0.isEmpty && !$0.hasPrefix("```") && !$0.allSatisfy { "-|:".contains($0) } } ?? ""
-        return line.replacingOccurrences(of: #"^(#+|[-*>]|\d+\.)\s*"#, with: "", options: .regularExpression)
-            .replacingOccurrences(of: "**", with: "")
+        return line.replacingOccurrences(of: "**", with: "")
+            .replacingOccurrences(of: #"^(#+|[-*+>]|\d+[.)])\s+"#, with: "", options: .regularExpression)
             .replacingOccurrences(of: "`", with: "")
     }
 }
@@ -110,6 +120,8 @@ struct ReplyWithOrders: View {
     let itemId: String
     let expanded: Set<String>
     let toggle: (String) -> Void
+    /// Team members by lowercased name, to colour each order by who gets it.
+    var roles: [String: RemoteTeamRole] = [:]
 
     var body: some View {
         let segments = AgentOrder.segments(in: text)
@@ -123,7 +135,7 @@ struct ReplyWithOrders: View {
                         MarkdownText(text: prose)
                     case .order(let order):
                         let id = "\(itemId)#order\(index)"
-                        OrderRow(order: order, isExpanded: expanded.contains(id)) { toggle(id) }
+                        OrderRow(order: order, tint: order.tint(roles), isExpanded: expanded.contains(id)) { toggle(id) }
                     }
                 }
             }
@@ -133,6 +145,7 @@ struct ReplyWithOrders: View {
 
 private struct OrderRow: View {
     let order: AgentOrder
+    let tint: Color
     let isExpanded: Bool
     let toggle: () -> Void
 
@@ -143,9 +156,10 @@ private struct OrderRow: View {
             } label: {
                 HStack(alignment: .firstTextBaseline, spacing: 7) {
                     Image(systemName: order.symbol)
-                        .foregroundStyle(order.tint)
+                        .foregroundStyle(tint)
                     Text(order.label + (order.to.map { " → \($0)" } ?? ""))
-                        .fontWeight(.semibold)
+                        .fontWeight(order.isMemo ? .medium : .semibold)
+                        .foregroundStyle(order.isMemo ? .secondary : .primary)
                         .layoutPriority(1)
                     if !isExpanded, !order.body.isEmpty {
                         Text(AgentOrder.preview(order.body))
@@ -176,8 +190,24 @@ private struct OrderRow: View {
                     .padding(12)
             }
         }
-        .background(order.tint.opacity(0.07), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(order.tint.opacity(0.18)))
+        .background {
+            let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+            if order.isMemo {
+                shape.fill(Color.secondary.opacity(0.05))
+                    .overlay(shape.strokeBorder(Color.secondary.opacity(0.35), style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
+            } else {
+                shape.fill(tint.opacity(0.12))
+                    .overlay(shape.strokeBorder(tint.opacity(0.3)))
+            }
+        }
+        .overlay(alignment: .leading) {
+            if !order.isMemo {
+                UnevenRoundedRectangle(topLeadingRadius: 12, bottomLeadingRadius: 12)
+                    .fill(tint)
+                    .frame(width: 3)
+            }
+        }
+        .clipShape(.rect(cornerRadius: 12, style: .continuous))
     }
 }
 

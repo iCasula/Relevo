@@ -526,7 +526,7 @@ function renderTranscript() {
   const all = head ? [head, ...rows] : rows;
   for (const row of all) {
     const footer = row.item ? footers.get(row.item.id) : row.group ? groupFooters.get(row.key) : null;
-    const version = row.html ?? JSON.stringify([row.item ?? row.group, app.expandedItems.has(row.key), headers.has(row.key), footer, app.showTurnUsage]);
+    const version = row.html ?? JSON.stringify([row.item ?? row.group, app.expandedItems.has(row.key), headers.has(row.key), footer, app.showTurnUsage, subOpen(row.key)]);
     let entry = T.cache.get(row.key);
     if (!entry || entry.version !== version) {
       const el = document.createElement('div');
@@ -545,7 +545,12 @@ function renderTranscript() {
   // Working / waiting indicator after the rows.
   const rt = thread.runtime;
   let tail = container.querySelector(':scope > .tail');
-  const tailHTML = rt?.isRunning ? `<div class="working"><span class="dots"><i></i><i></i><i></i></span>${esc(rt.statusLine ?? 'Trabajando…')}</div>`
+  const line = rt?.statusLine ?? 'Trabajando…';
+  const longLine = line.length > 60 || line.includes('\n');
+  const lineOpen = app.expandedItems.has(`${key}#working`);
+  const tailHTML = rt?.isRunning ? (longLine
+    ? `<button class="working long${lineOpen ? ' open' : ''}" data-toggle-item="${esc(`${key}#working`)}" title="${lineOpen ? 'Plegar' : 'Ver el comando entero'}"><span class="dots"><i></i><i></i><i></i></span><span class="wl">${esc(line)}</span>${icon(lineOpen ? 'chevron.down' : 'chevron.right', { size: 9, cls: 'chev' })}</button>`
+    : `<div class="working"><span class="dots"><i></i><i></i><i></i></span>${esc(line)}</div>`)
     : rt?.backgroundTasks?.length ? `<div class="waiting">${icon('clock', { size: 13 })}<div><div class="w-title">${rt.backgroundTasks.length === 1 ? 'Esperando a una tarea en segundo plano' : `Esperando a ${rt.backgroundTasks.length} tareas en segundo plano`}</div>${rt.backgroundTasks.map((b) => `<div class="w-line">${esc(b.description)}</div>`).join('')}<div class="w-line tert">El agente no está trabajando: retomará solo cuando termine.</div></div></div>` : '';
   if (tailHTML) {
     if (!tail) { tail = document.createElement('div'); tail.className = 'tail'; }
@@ -554,6 +559,9 @@ function renderTranscript() {
   } else tail?.remove();
   hydrateImages(hostId, thread.id);
 }
+
+/** Which of a row's orders are unfolded (keys «itemId#orderN»). */
+const subOpen = (key) => [...app.expandedItems].filter((k) => k.startsWith(`${key}#`)).join();
 
 /** Usage and changes of each turn, keyed by the turn's last item (the Mac's TurnFooter). */
 function turnFooters(items) {
@@ -609,13 +617,16 @@ function itemHTML(hostId, it, header) {
     case 'user':
       if (it.from) {
         const role = ROLE[it.from.role] ?? ROLE.team;
-        return `<div class="from-row r-${esc(it.from.role)}"><div class="from-head">${icon(role.icon, { size: 11 })}<b>${esc(it.from.name)}</b>${it.from.label ? `<span>· ${esc(it.from.label)}</span>` : ''}${timeHTML(it.date)}${it.from.threadId ? `<button class="btn link small" data-team-go="${esc(it.from.threadId)}">Ver hilo</button>` : ''}</div><div class="md">${markdown(it.text)}</div></div>`;
+        const long = it.text.length > 220 || it.text.split('\n').length > 3;
+        const chev = long ? `<button class="from-chev" data-toggle-item="${esc(it.id)}" title="${open ? 'Plegar' : 'Desplegar'}">${icon(open ? 'chevron.down' : 'chevron.right', { size: 9 })}</button>` : '';
+        const body = long && !open ? `<button class="from-fold" data-toggle-item="${esc(it.id)}" title="Desplegar"><span>${esc(folded(it.text))}</span></button>` : replyHTML(it.text, it.id, teamRoles(hostId));
+        return `<div class="from-row r-${esc(it.from.role)}"><div class="from-head">${icon(role.icon, { size: 11 })}<b>${esc(it.from.name)}</b>${it.from.label ? `<span>· ${esc(it.from.label)}</span>` : ''}${timeHTML(it.date)}${it.from.threadId ? `<button class="btn link small" data-team-go="${esc(it.from.threadId)}">Ver hilo</button>` : ''}${chev}</div>${body}</div>`;
       }
       return `<div class="user-row"><div class="bubble" title="${esc(fullDate(it.date))}">${esc(it.text)}</div></div>${imagesHTML(hostId, it.text).replace('class="thumbs"', 'class="thumbs" style="justify-content:flex-end"')}`;
     case 'assistant': {
       const acct = accountOf(hostId, it.accountId);
       const author = header && acct ? `<div class="author">${badge(acct, 14)}<b>${esc(acct.name)}</b><span class="m">${esc(modelName(acct, it.model))}</span>${timeHTML(it.date)}</div>` : '';
-      return `${author}<div class="md">${markdown(it.text)}</div>${imagesHTML(hostId, it.text)}`;
+      return `${author}${replyHTML(it.text, it.id, teamRoles(hostId))}${imagesHTML(hostId, it.text)}`;
     }
     case 'reasoning':
       return `<div><button class="toggle-row" data-toggle-item="${esc(it.id)}">${icon('brain', { size: 11 })}Razonamiento${icon(open ? 'chevron.down' : 'chevron.right', { size: 9 })}</button>${open ? `<div class="reasoning-body">${esc(it.text)}</div>` : ''}</div>`;
@@ -634,6 +645,77 @@ function itemHTML(hostId, it, header) {
     case 'approval': return it.questions?.length ? questionHTML(it) : approvalHTML(it);
     default: return `<div class="notice"><span class="c">${esc(it.text)}</span></div>`;
   }
+}
+
+// MARK: - Orders between agents, folded
+
+// Messages to other agents, coloured by who gets them; team memory (milestones, decisions…) in grey.
+const ORDER = {
+  tarea: ['Tarea', 'arrow.triangle.pull'], urgente: ['Urgente', 'exclamationmark.circle.fill'],
+  investigar: ['Investigar', 'globe'], respuesta: ['Respuesta', 'arrow.uturn.backward'],
+  pregunta: ['Pregunta', 'questionmark.bubble.fill'], integrar: ['Integrar', 'arrow.triangle.merge'],
+  fin: ['Fin', 'checkmark.circle', true], decision: ['Decisión', 'checkmark.seal', true],
+  descartar: ['Descartar', 'xmark.circle', true], hito: ['Hito', 'checklist', true], hecho: ['Hecho', 'checkmark.circle.fill', true],
+};
+/** The role of whoever an order goes to: from the team when the name is known, else from the name or the kind. */
+function recipientRole(o, roles) {
+  const to = o.to?.toLowerCase() ?? '';
+  return roles?.get(to) ?? (/investig/.test(to) || o.type === 'investigar' ? 'researcher' : /orquest/.test(to) || !to ? 'orchestrator' : 'executor');
+}
+const teamRoles = (hostId) => {
+  const id = current().summary?.team?.id;
+  const team = id && teamOf(hostId, id);
+  return team ? new Map(team.members.map((m) => [m.name.toLowerCase(), m.role])) : null;
+};
+const ORDER_TAG = /<relevo:(tarea|urgente|investigar|respuesta|pregunta|integrar|fin|decisi[oó]n|descartar|hito|hecho)\b([^>]*?)(?:\/>|>([\s\S]*?)<\/relevo:\1\s*>)/gi;
+const ORDER_TO = /\b(?:para|de)\s*=\s*(?:["“']([^"”']+)["”']|([^\s"”'>/]+))/i;
+
+/** The reply cut into prose and orders, in order; tags inside code blocks stay text (as the host reads them). */
+function orderSegments(text) {
+  if (!text?.includes('<relevo:')) return null;
+  const code = [...text.matchAll(/```[\s\S]*?(?:```|$)/g)].map((m) => [m.index, m.index + m[0].length]);
+  const out = [];
+  let cursor = 0;
+  const prose = (to) => { const t = text.slice(cursor, to).trim(); if (t) out.push({ text: t }); };
+  for (const m of text.matchAll(ORDER_TAG)) {
+    if (code.some(([a, b]) => m.index < b && m.index + m[0].length > a)) continue;
+    prose(m.index);
+    const to = ORDER_TO.exec(m[2] ?? '');
+    out.push({ type: m[1].toLowerCase().replace('ó', 'o'), to: (to?.[1] ?? to?.[2])?.trim(), body: (m[3] ?? '').trim() });
+    cursor = m.index + m[0].length;
+  }
+  if (!out.some((x) => x.type)) return null;
+  prose(text.length);
+  return out;
+}
+
+/** First meaningful line without markdown marks, for a folded row. */
+function previewLine(text) {
+  const line = String(text).split('\n').map((l) => l.trim()).find((l) => l && !l.startsWith('```') && !/^[-|: ]+$/.test(l)) ?? '';
+  return line.replaceAll('**', '').replace(/^(#+|[-*+>]|\d+[.)])\s+/, '').replaceAll('`', '');
+}
+
+/** A long message from another agent, folded: its orders as «Tarea → X», the rest as plain text. */
+function folded(text) {
+  const segs = orderSegments(text);
+  const plain = segs ? segs.map((x) => x.type ? `${ORDER[x.type]?.[0] ?? x.type}${x.to ? ` → ${x.to}` : ''}: ${previewLine(x.body)}` : x.text).join('\n') : text;
+  return plain.replace(/<\/?relevo:[^>]*>/g, '').replace(/[*`#>]/g, '').replace(/\n{2,}/g, '\n').trim();
+}
+
+/** An agent's reply with each order folded to one line (tap to read the whole order). */
+function replyHTML(text, id, roles) {
+  const segs = orderSegments(text);
+  if (!segs) return `<div class="md">${markdown(text)}</div>`;
+  return `<div class="reply">${segs.map((x, i) => {
+    if (!x.type) return `<div class="md">${markdown(x.text)}</div>`;
+    const key = `${id}#order${i}`;
+    const open = app.expandedItems.has(key);
+    const [label, sym, memo] = ORDER[x.type] ?? [x.type, 'text.bubble'];
+    const cls = memo ? 'memo' : x.type === 'urgente' ? 'msg urgent' : `msg r-${recipientRole(x, roles)}`;
+    const head = `<button class="order-head" data-toggle-item="${esc(key)}"${x.body ? '' : ' disabled'}>${icon(sym, { size: 12, cls: 'sym' })}<b>${esc(label)}${x.to ? ` → ${esc(x.to)}` : ''}</b>`
+      + `${!open && x.body ? `<span class="pv">${esc(previewLine(x.body))}</span>` : '<span class="grow"></span>'}${x.body ? icon(open ? 'chevron.down' : 'chevron.right', { size: 9, cls: 'chev' }) : ''}</button>`;
+    return `<div class="order ${cls}">${head}${open && x.body ? `<div class="md order-body">${markdown(x.body)}</div>` : ''}</div>`;
+  }).join('')}</div>`;
 }
 
 /** When a message was sent: the time (the full date on hover). */

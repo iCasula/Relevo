@@ -70,6 +70,10 @@ final class ThreadViewModel {
         guard let id = summary?.team?.id else { return nil }
         return client.snapshot?.hostTeams?.first { $0.id == id }
     }
+    /// The team's members by lowercased name, to colour the orders by who gets them.
+    var teamRoles: [String: RemoteTeamRole] {
+        Dictionary((team?.members ?? []).map { ($0.name.lowercased(), $0.role) }, uniquingKeysWith: { a, _ in a })
+    }
     var items: [RemoteItem] { thread?.items ?? [] }
     var runtime: RemoteRuntime? { thread?.runtime }
     var isLoading: Bool { thread == nil }
