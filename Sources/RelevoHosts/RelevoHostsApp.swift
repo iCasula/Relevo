@@ -160,7 +160,7 @@ final class HostsModel: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
         let config = WKWebViewConfiguration()
         config.userContentController.add(self, name: "relevo")
         config.preferences.setValue(true, forKey: "developerExtrasEnabled")
-        let web = WKWebView(frame: .zero, configuration: config)
+        let web = EditingWebView(frame: .zero, configuration: config)
         web.navigationDelegate = self
         web.uiDelegate = self
         web.allowsBackForwardNavigationGestures = false
@@ -193,6 +193,7 @@ final class HostsModel: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
     func showWindow() {
         if window == nil { makeWindow(); loadPage() }
         NSApp.setActivationPolicy(.regular)
+        AppDelegate.installMenu()
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate()
     }
@@ -298,12 +299,36 @@ final class HostsModel: NSObject, ObservableObject, WKScriptMessageHandler, WKNa
     }
 }
 
+// MARK: - Web view
+
+/// ⌘C, ⌘V, ⌘X, ⌘A, ⌘Z and ⇧⌘Z straight to the page. A menu-bar app (SwiftUI's MenuBarExtra) doesn't keep a
+/// main menu of its own, and without its Edit items these keys never reached the web view.
+final class EditingWebView: WKWebView {
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting([.capsLock, .numericPad, .function])
+        guard mods == .command || mods == [.command, .shift], let key = event.charactersIgnoringModifiers?.lowercased() else {
+            return super.performKeyEquivalent(with: event)
+        }
+        let action: Selector? = switch (key, mods == .shift.union(.command)) {
+        case ("c", false): #selector(NSText.copy(_:))
+        case ("v", false): #selector(NSText.paste(_:))
+        case ("x", false): #selector(NSText.cut(_:))
+        case ("a", false): #selector(NSText.selectAll(_:))
+        case ("z", false): Selector(("undo:"))
+        case ("z", true): Selector(("redo:"))
+        default: nil
+        }
+        if let action, window?.firstResponder is NSView, NSApp.sendAction(action, to: nil, from: self) { return true }
+        return super.performKeyEquivalent(with: event)
+    }
+}
+
 // MARK: - App delegate
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        NSApp.mainMenu = Self.mainMenu()
+        Self.installMenu()
         MainActor.assumeIsolated { HostsModel.shared.start() }
     }
 
@@ -316,7 +341,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
-    /// Without a main menu ⌘C/⌘V/⌘A don't reach the web view.
+    /// The Edit menu, for the menu bar. SwiftUI may swap it for its own when the window opens, so it is put
+    /// back each time; the keys themselves don't depend on it (EditingWebView).
+    static func installMenu() { NSApp.mainMenu = mainMenu() }
+
     private static func mainMenu() -> NSMenu {
         let menu = NSMenu()
         let app = NSMenuItem()
