@@ -173,6 +173,41 @@ test('an agent only waiting on background work gets messages; one mid-turn still
   void lead;
 });
 
+test('every agent sees where the others stand: working, background, free, waiting for you, out of quota', () => {
+  const at = Math.floor(new Date('2026-11-20T10:00:00').getTime() / 1000);
+  const rts = {
+    L: { isRunning: true, turnStartedAt: at, statusLine: 'Leyendo informes', approvals: new Map(), backgroundTasks: [] },
+    E1: { isRunning: false, approvals: new Map(), backgroundTasks: [{ id: 'b', description: 'QEMU 900 s', startedAt: at + 60 }] },
+    E2: { isRunning: false, approvals: new Map(), backgroundTasks: [], resumeAt: at + 3 * 3600, limit: { accountId: 'claude' } },
+    E3: { isRunning: false, approvals: new Map([['a', {}]]), backgroundTasks: [] },
+    I: { isRunning: false, approvals: new Map(), backgroundTasks: [], pendingSwitch: { accountId: 'codex', auto: false } },
+  };
+  const threads = new Map(Object.keys(rts).map((id) => [id, { id, queued: [], items: [{ date: at + 120 }], home: id === 'E1' ? { accountId: 'claude' } : null }]));
+  const teams = Object.create(Teams.prototype);
+  teams.host = { threads, _rt: (t) => rts[t.id], accountsById: new Map([['claude', { name: 'Claude' }], ['codex', { name: 'Codex' }]]) };
+  const team = { status: 'active', held: [], outbox: [], members: [
+    { threadId: 'L', role: 'orchestrator', name: 'Orquestador' },
+    { threadId: 'E1', role: 'executor', name: 'Ejecutor 1', task: { text: 'Shaders', state: 'en curso', since: at } },
+    { threadId: 'E2', role: 'executor', name: 'Ejecutor 2' },
+    { threadId: 'E3', role: 'executor', name: 'Ejecutor 3' },
+    { threadId: 'I', role: 'researcher', name: 'Investigador' },
+  ] };
+  // An executor reads the others, the orchestrator included, without the orchestrator's own bookkeeping.
+  const seen = teams._status(team, team.members[2]);
+  assert.match(seen, /Orquestador \(orquestador\) trabajando desde las 10:00: Leyendo informes/);
+  assert.match(seen, /Ejecutor 1 esperando un trabajo en segundo plano desde las 10:01 \(QEMU 900 s\); en un modelo de reserva hasta que vuelva la cuota de Claude · tarea «Shaders»/);
+  assert.match(seen, /Ejecutor 3 BLOQUEADO esperando al usuario/);
+  assert.match(seen, /Investigador libre desde las 10:02; cambiará a Codex al quedar libre/);
+  assert.doesNotMatch(seen, /Ejecutor 2 /, 'not itself');
+  // The orchestrator sees who is out of quota and until when.
+  assert.match(teams._status(team, team.members[0]), /Ejecutor 2 SIN CUOTA: retoma solo hacia las 13:00/);
+  // A quota stop with nothing planned, and a relay on its way.
+  rts.E2.resumeAt = null;
+  assert.match(teams._status(team, team.members[0]), /Ejecutor 2 SIN CUOTA: parado hasta que el usuario decida/);
+  rts.E2.pendingRelay = { accountId: 'codex' };
+  assert.match(teams._status(team, team.members[0]), /Ejecutor 2 SIN CUOTA: pasa a Codex en unos segundos/);
+});
+
 test("the safety net: an agent's last words the orchestrator never got are sent, once; a deliberate skip isn't", () => {
   const sent = [], notices = [];
   const t = { id: 'E', title: 'Ejecutor 2', queued: [], items: [{ kind: 'user', text: 'tarea', done: true, date: 1 }] };

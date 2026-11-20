@@ -224,7 +224,7 @@ ${executors.some((e) => host.threads.get(e.threadId)?.worktree) ? '<relevo:integ
 
 <relevo:urgente para="${executors[0]?.name ?? 'Ejecutor 1'}">…</relevo:urgente>  solo si lo que está haciendo ahora es claramente erróneo o ya no sirve: interrumpe su turno.
 
-Cómo funciona la entrega: a un agente a mitad de un turno solo le llega lo urgente (y la respuesta a una duda suya); lo demás queda pendiente: cuando termine, te llega su informe con tu orden pendiente al lado, y si no le das otra en esa respuesta, Relevo se la entrega tal cual. Al final de cada mensaje que recibes, «Qué ha sido de tus mensajes» te dice si cada orden se entregó, está en cola o pendiente: no supongas que algo llegó sin verlo ahí. Relevo te enviará los informes, dudas y bloqueos de cada agente con su nombre delante («[${executors[0]?.name ?? 'Ejecutor 1'} · informe]», «… · pregunta») y al final el estado del equipo (quién trabaja y cuántos mensajes tuyos le esperan). Reglas:
+Cómo funciona la entrega: a un agente a mitad de un turno solo le llega lo urgente (y la respuesta a una duda suya); lo demás queda pendiente: cuando termine, te llega su informe con tu orden pendiente al lado, y si no le das otra en esa respuesta, Relevo se la entrega tal cual. Al final de cada mensaje que recibes, «Qué ha sido de tus mensajes» te dice si cada orden se entregó, está en cola o pendiente: no supongas que algo llegó sin verlo ahí. Relevo te enviará los informes, dudas y bloqueos de cada agente con su nombre delante («[${executors[0]?.name ?? 'Ejecutor 1'} · informe]», «… · pregunta») y al final el estado del equipo: de cada uno si trabaja (desde cuándo y en qué), espera un trabajo en segundo plano, está libre, BLOQUEADO esperando al usuario o SIN CUOTA (y cuándo retoma), y cuántos mensajes tuyos le esperan. A quien está SIN CUOTA o BLOQUEADO no le sirve una orden nueva: reparte su trabajo urgente a otro o espera. Reglas:
 - No acuses recibo ni contestes a informes de progreso («compilando…», «sigo con…»): si no hay nada nuevo que pedir, responde sin órdenes y espera.
 - No mandes nada a quien está a mitad de un turno salvo que sea urgente: espera a su informe (mira el estado del equipo). Quien solo espera un trabajo en segundo plano (una compilación, un emulador) sí recibe tus mensajes; si no tienes nada nuevo para él, deja que te informe cuando acabe.
 - Si Relevo te dice «Pendiente para…», no la repitas: le llega sola salvo que le des otra orden al leer su informe. Si te dice «no entregada», esa sí tienes que volver a darla.
@@ -255,6 +255,7 @@ Tu trabajo es averiguar, no implementar: no modifiques ficheros del proyecto.
 - Después de la conclusión, solo lo que hace falta para actuar: la evidencia con fichero:línea o enlace, qué hacer en pasos concretos y los riesgos; si recomiendas algo externo, su licencia y lo maduro que está. Apunta a unos 2.500 caracteres y pásate solo si un hallazgo lo exige. Sin títulos, tablas ni volcados de código.
 - Si la petición no está clara, termina con <relevo:pregunta>tu duda</relevo:pregunta>.
 - Relevo guarda cada informe en la biblioteca del equipo con su línea de conclusión: no repitas lo ya investigado, amplíalo.
+- Cada mensaje del equipo trae al final el estado de los demás (quién trabaja, quién está libre, BLOQUEADO o SIN CUOTA).
 ${notesOf(member)}${decisionsBlock(team)}${findingsBlock(team)}${taskLine}${carried}</relevo_equipo>
 
 `;
@@ -269,6 +270,7 @@ ${roster}
 - Si dejas algo en segundo plano (una compilación, un emulador) y terminas el turno para esperarlo, no hace falta que informes: Relevo lo sabe y el orquestador no te escribirá hasta que acabes.
 - Si te bloqueas o necesitas una decisión, termina tu respuesta con <relevo:pregunta>tu duda concreta</relevo:pregunta> y espera la respuesta.${researcher ? ` Si llevas dos intentos fallidos con el mismo problema, pregunta: el ${researcher.name} puede buscar soluciones que ya existan.` : ''}
 - Otros agentes pueden estar trabajando en el mismo proyecto: toca solo lo que te pidan.
+- Cada mensaje del equipo trae al final el estado de los demás (trabajando, en segundo plano, libre, BLOQUEADO esperando al usuario, SIN CUOTA y cuándo retoma): no esperes una respuesta de quien no puede darla; dilo en tu informe.
 ${notesOf(member)}${decisionsBlock(team)}${taskLine}${carried}</relevo_equipo>
 
 `;
@@ -1486,8 +1488,9 @@ export class Teams {
       fresh = `(Decisiones nuevas del equipo: síguelas.\n${news.map((d) => `#${d.id} ${d.text}`).join('\n')})\n\n`;
     }
     member.decisionsSeen = team.nextDecision ?? 0;
-    // The orchestrator always sees where the team stands, so it doesn't pile orders on someone busy.
-    const status = member.role === 'orchestrator' ? `\n\n(${this._status(team, member)})` : '';
+    // Everyone sees where the others stand: the orchestrator so it doesn't pile orders on someone busy, the rest
+    // so they don't wait on someone out of quota or ask someone who is stuck.
+    const status = `\n\n(${this._status(team, member)})`;
     const prompt = `${fresh}${header}\n${text}${status}`;
     const meta = { from: { threadId: from.threadId ?? null, name: from.name, role: from.role, label: from.label ?? null } };
     const r = h._rt(t);
@@ -1649,21 +1652,58 @@ export class Teams {
   }
 
   /** «Ejecutor 1 trabajando, con 2 mensajes tuyos sin entregar · Ejecutor 2 libre · …» */
-  _status(team, lead) {
+  /**
+   * Where one member stands, for the others: waiting for the user, out of quota (and until when), renewing its
+   * session, working (since when, on what), waiting for a background job, or free (since when).
+   */
+  _memberState(team, m) {
     const h = this.host;
-    const parts = team.members.filter((m) => m !== lead).map((m) => {
-      const t = h.threads.get(m.threadId);
-      if (!t) return null;
-      const r = h._rt(t);
-      const waiting = t.queued.filter((q) => q.team).reduce((n, q) => n + (q.merged ? (q.text.match(/^\[/gm) ?? []).length : 1), 0);
-      const state = r.approvals.size ? 'esperando una respuesta o una aprobación' : r.isRunning ? 'trabajando'
-        : r.backgroundTasks?.length ? `esperando un trabajo en segundo plano (${r.backgroundTasks.map((b) => b.description).slice(0, 2).join(', ')})` : 'libre';
-      const task = m.task?.text ? ` · tarea «${clip(m.task.text, 90)}» (${m.task.state} desde las ${new Date(m.task.since * 1000).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })})` : '';
+    const t = h.threads.get(m.threadId);
+    if (!t) return null;
+    const r = h._rt(t);
+    const at = (sec) => new Date(sec * 1000).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
+    const nameOf = (id) => h.accountsById.get(id)?.name ?? 'otro modelo';
+    let state;
+    if (r.approvals.size) state = 'BLOQUEADO esperando al usuario (una pregunta o un permiso)';
+    else if (!r.isRunning && r.pendingRelay) state = `SIN CUOTA: pasa a ${nameOf(r.pendingRelay.accountId)} en unos segundos`;
+    else if (!r.isRunning && r.resumeAt) state = r.resumeUnknown ? 'SIN CUOTA: retoma solo en cuanto vuelva (se comprueba cada pocos minutos)' : `SIN CUOTA: retoma solo hacia las ${at(r.resumeAt)}`;
+    else if (!r.isRunning && r.limit) state = 'SIN CUOTA: parado hasta que el usuario decida';
+    else if (m.noteRequested) state = 'renovando su sesión (escribe su nota de traspaso)';
+    else if (r.isRunning) {
+      const since = r.turnStartedAt ? ` desde las ${at(r.turnStartedAt)}` : '';
+      const doing = r.statusLine && !/^Trabajando/.test(r.statusLine) ? `: ${clip(r.statusLine.replace(/\s+/g, ' '), 70)}` : '';
+      state = `trabajando${since}${doing}`;
+    } else if (r.backgroundTasks?.length) {
+      const first = Math.min(...r.backgroundTasks.map((b) => b.startedAt ?? Infinity));
+      state = `esperando un trabajo en segundo plano${Number.isFinite(first) ? ` desde las ${at(first)}` : ''} (${r.backgroundTasks.map((b) => clip(b.description ?? '', 50)).slice(0, 2).join(', ')})`;
+    } else {
+      const last = t.items?.at(-1)?.date;
+      state = `libre${last ? ` desde las ${at(last)}` : ''}`;
+    }
+    const extra = [];
+    if (r.pendingSwitch && !r.pendingSwitch.auto) extra.push(`cambiará a ${nameOf(r.pendingSwitch.accountId)} al quedar libre`);
+    if (t.home) extra.push(`en un modelo de reserva hasta que vuelva la cuota de ${nameOf(t.home.accountId)}`);
+    return { t, r, state: extra.length ? `${state}; ${extra.join('; ')}` : state };
+  }
+
+  /**
+   * Where the team stands, as one member reads it (everyone but itself). The orchestrator also sees what waits
+   * for each one and what became of the orders it sent.
+   */
+  _status(team, self) {
+    const lead = self?.role === 'orchestrator';
+    const parts = team.members.filter((m) => m !== self).map((m) => {
+      const s = this._memberState(team, m);
+      if (!s) return null;
+      const label = m.role === 'orchestrator' ? `${m.name} (orquestador)` : m.name;
+      const task = m.task?.text ? ` · tarea «${clip(m.task.text, lead ? 90 : 60)}» (${m.task.state} desde las ${new Date(m.task.since * 1000).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })})` : '';
+      if (!lead) return `${label} ${s.state}${task}`;
+      const waiting = s.t.queued.filter((q) => q.team).reduce((n, q) => n + (q.merged ? (q.text.match(/^\[/gm) ?? []).length : 1), 0);
       const parked = m.parked ? `, con una orden tuya pendiente de darle al terminar («${clip(m.parked.text.replace(/\s+/g, ' '), 60)}»)` : '';
-      return `${m.name} ${state}${waiting ? `, con ${waiting} mensaje${waiting === 1 ? '' : 's'} en cola que leerá al terminar` : ''}${parked}${task}`;
+      return `${label} ${s.state}${waiting ? `, con ${waiting} mensaje${waiting === 1 ? '' : 's'} en cola que leerá al terminar` : ''}${parked}${task}`;
     }).filter(Boolean);
-    const paused = team.status === 'paused' ? `EQUIPO EN PAUSA: tus órdenes se retienen sin entregar hasta que el usuario las revise (${team.held.length} retenidas). ` : '';
-    const news = this._outboxNews(team);
+    const paused = team.status === 'paused' ? (lead ? `EQUIPO EN PAUSA: tus órdenes se retienen sin entregar hasta que el usuario las revise (${team.held.length} retenidas). ` : 'EQUIPO EN PAUSA. ') : '';
+    const news = lead ? this._outboxNews(team) : [];
     const out = news.length ? `\nQué ha sido de tus mensajes: ${news.join(' | ')}` : '';
     return `${paused}Estado del equipo: ${parts.join(' | ')}${out}`;
   }

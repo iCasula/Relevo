@@ -63,7 +63,7 @@ before(async () => {
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`host didn't start:\n${out}`)), 20_000);
     service.stdout.on('data', (d) => { out += d; if (out.includes('listening on')) { clearTimeout(timer); resolve(); } });
-    if (process.env.TEAM_LOG) service.stdout.on('data', (d) => fs.appendFileSync(process.env.TEAM_LOG, d));
+    if (process.env.TEAM_LOG) for (const s of [service.stdout, service.stderr]) s.on('data', (d) => fs.appendFileSync(process.env.TEAM_LOG, d));
   });
   const info = parsePairingLink(execFileSync(process.execPath, [SCRIPT, 'pair'], { env }).toString().trim());
   peer = await connectCompanion({ host: '127.0.0.1', port, serverId: info.serverId, secret: Buffer.from(info.key, 'base64url') });

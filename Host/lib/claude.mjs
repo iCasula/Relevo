@@ -533,7 +533,8 @@ export class FakeSession extends EventEmitter {
       });
       return;
     }
-    if (/permiso/i.test(text) && !text.includes('<relevo_handoff>')) {
+    // The team's status Relevo adds at the end («…una pregunta o un permiso») isn't a request.
+    if (/permiso/i.test(text.replace(/\n\n\((?:EQUIPO EN PAUSA[^\n]*?)?Estado del equipo:[\s\S]*$/, '')) && !text.includes('<relevo_handoff>')) {
       this.emit('toolStarted', `tool${turn}`, 'Bash', 'echo hola', { command: 'echo hola' });
       this.emit('approval', {
         key: `tool${turn}`, title: 'Bash: echo hola', detail: 'Prueba de permiso', questions: null, toolName: 'Bash', input: { command: 'echo hola' },
