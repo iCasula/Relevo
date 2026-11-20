@@ -15,7 +15,7 @@ struct TranscriptItemView: View {
                 AgentMessageRow(item: item, sender: sender, currentThread: viewModel.threadId,
                                 expanded: viewModel.expanded, toggle: { viewModel.toggle(id: $0) }, roles: viewModel.teamRoles)
             } else {
-                UserBubble(text: item.text)
+                UserBubble(text: item.text, date: item.date)
             }
         case .assistant:
             if let to = item.to ?? viewModel.reportGuess(item) {
@@ -27,7 +27,7 @@ struct TranscriptItemView: View {
                 ReplyWithOrders(text: item.text, itemId: item.id, expanded: viewModel.expanded, toggle: { viewModel.toggle(id: $0) }, roles: viewModel.teamRoles)
                 let images = FileReference.imageReferences(in: item.text)
                 if !images.isEmpty {
-                    ImageStrip(paths: images, load: { await viewModel.thumbnail($0) }, open: { viewModel.open(path: $0) })
+                    ImageStrip(paths: images, key: item.id, load: { await viewModel.thumbnail($0) }, open: { viewModel.open(path: $0) })
                 }
                 if showTurnUsage, let usage = item.usage { TurnUsageLine(usage: usage) }
             }
@@ -232,16 +232,23 @@ private struct QuestionCard: View {
 
 private struct UserBubble: View {
     let text: String
+    let date: Date
 
     var body: some View {
         HStack {
             Spacer(minLength: 48)
-            Text(text)
-                .textSelection(.enabled)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .foregroundStyle(.white)
-                .background(Color.accentColor.gradient, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+            VStack(alignment: .trailing, spacing: 3) {
+                Text(text)
+                    .textSelection(.enabled)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .foregroundStyle(.white)
+                    .background(Color.accentColor.gradient, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                Text(date, format: Calendar.current.isDateInToday(date) ? .dateTime.hour().minute() : .dateTime.day().month(.abbreviated).hour().minute())
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.tertiary)
+                    .padding(.trailing, 8)
+            }
         }
     }
 }

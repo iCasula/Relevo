@@ -168,6 +168,7 @@ code, pre, .mono { font-family: var(--mono); }
 
 .row { display: flex; flex-direction: column; gap: 6px; }
 .user-row { display: flex; justify-content: flex-end; padding-left: 80px; }
+.user-when { display: flex; justify-content: flex-end; padding: 3px 8px 0 0; font-size: 11px; color: var(--tertiary); font-variant-numeric: tabular-nums; }
 .bubble { background: var(--bubble); border-radius: 18px; padding: 9px 14px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; line-height: 1.38; }
 .author { display: flex; align-items: center; gap: 6px; font-size: 10px; }
 .author b { font-weight: 600; }
@@ -232,6 +233,9 @@ button.working { width: 100%; background: none; border: 0; text-align: left; cur
 .waiting .w-title { font-size: 12px; font-weight: 500; }
 .waiting .w-line { font-size: 10px; }
 .thumbs { display: flex; gap: 8px; overflow-x: auto; padding: 2px 0; scrollbar-width: none; }
+.thumb-wrap { position: relative; flex: none; display: flex; }
+.thumb-x { position: absolute; top: 5px; right: 5px; width: 20px; height: 20px; border-radius: 50%; border: 0; padding: 0; background: rgba(0, 0, 0, .55); color: #fff; display: flex; align-items: center; justify-content: center; opacity: 0; transition: opacity .12s; cursor: pointer; }
+.thumb-wrap:hover .thumb-x, .thumb-x:focus-visible { opacity: 1; }
 .thumb { display: flex; flex-direction: column; gap: 4px; background: none; border: 0; padding: 0; text-align: left; flex: none; }
 .thumb .frame { height: 150px; min-width: 70px; max-width: 260px; width: 110px; border-radius: 10px; background: var(--fill-quaternary); display: flex; align-items: center; justify-content: center; overflow: hidden; color: var(--tertiary); }
 .thumb.loaded .frame { width: auto; }

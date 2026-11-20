@@ -19,7 +19,7 @@ struct ItemView: View {
                 MarkdownText(text: item.text)
                 let images = FileReference.imageReferences(in: item.text)
                 if !images.isEmpty {
-                    ImageStrip(paths: images, load: { path in await thumbnail(path) }, open: { runtime.openReference($0, nearText: item.text) })
+                    ImageStrip(paths: images, key: item.id, load: { path in await thumbnail(path) }, open: { runtime.openReference($0, nearText: item.text) })
                 }
             }
         case .reasoning:

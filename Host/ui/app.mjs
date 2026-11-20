@@ -619,13 +619,13 @@ function itemHTML(hostId, it, header) {
   switch (it.kind) {
     case 'user':
       if (it.from) return agentRowHTML(hostId, it, it.from, false);
-      return `<div class="user-row"><div class="bubble" title="${esc(fullDate(it.date))}">${esc(it.text)}</div></div>${imagesHTML(hostId, it.text).replace('class="thumbs"', 'class="thumbs" style="justify-content:flex-end"')}`;
+      return `<div class="user-row"><div class="bubble" title="${esc(fullDate(it.date))}">${esc(it.text)}</div></div>${it.date ? `<div class="user-when">${timeHTML(it.date)}</div>` : ''}${imagesHTML(hostId, it.text, it.id).replace('class="thumbs"', 'class="thumbs" style="justify-content:flex-end"')}`;
     case 'assistant': {
       const to = it.to ?? reportGuess(hostId, it);
       if (to) return agentRowHTML(hostId, it, to, true);
       const acct = accountOf(hostId, it.accountId);
       const author = header && acct ? `<div class="author">${badge(acct, 14)}<b>${esc(acct.name)}</b><span class="m">${esc(modelName(acct, it.model))}</span>${timeHTML(it.date)}</div>` : '';
-      return `${author}${replyHTML(it.text, it.id, teamRoles(hostId))}${imagesHTML(hostId, it.text)}`;
+      return `${author}${replyHTML(it.text, it.id, teamRoles(hostId))}${imagesHTML(hostId, it.text, it.id)}`;
     }
     case 'reasoning':
       return `<div><button class="toggle-row" data-toggle-item="${esc(it.id)}">${icon('brain', { size: 11 })}Razonamiento${icon(open ? 'chevron.down' : 'chevron.right', { size: 9 })}</button>${open ? `<div class="reasoning-body">${esc(it.text)}</div>` : ''}</div>`;
@@ -785,20 +785,32 @@ function questionHTML(it) {
 
 // Image strip (ImageStrip): thumbnails 150 tall of the images a message names.
 const IMAGE_PATH = /(?:^|[\s(`'"*])((?:[A-Za-z]:[\\/]|~?\/|\.{1,2}[\\/])?[\w.\-\\/]*[\w-]\.(?:png|jpe?g|gif|webp|bmp|tiff?|heic|heif))(?=$|[\s)\]`'".,;:*])/gim;
-function imagesHTML(hostId, text) {
-  const paths = [...new Set([...String(text ?? '').matchAll(IMAGE_PATH)].map((m) => m[1]))].slice(0, 12);
+function imagesHTML(hostId, text, id) {
+  const paths = [...new Set([...String(text ?? '').matchAll(IMAGE_PATH)].map((m) => m[1]))].filter((p) => !app.hiddenImages.has(`${id}|${p}`)).slice(0, 12);
   if (!paths.length) return '';
-  return `<div class="thumbs">${paths.map((p) => `<button class="thumb" data-image="${esc(p)}" title="${esc(p.split(/[\\/]/).pop())}"><span class="frame"><span class="spinner"></span></span><span class="fname">${esc(p.split(/[\\/]/).pop())}</span></button>`).join('')}</div>`;
+  return `<div class="thumbs">${paths.map((p) => `<span class="thumb-wrap"><button class="thumb" data-image="${esc(p)}" title="${esc(p.split(/[\\/]/).pop())}"><span class="frame"><span class="spinner"></span></span><span class="fname">${esc(p.split(/[\\/]/).pop())}</span></button>`
+    + `<button class="thumb-x" data-hide-image="${esc(`${id}|${p}`)}" title="Quitar la vista previa">${icon('xmark', { size: 9 })}</button></span>`).join('')}</div>`;
 }
 
+/** A preview out of the way: this one goes, and stays gone for that message. */
+function hideImage(el, key) {
+  app.hiddenImages.add(key);
+  save('hiddenImages', [...app.hiddenImages].slice(-500));
+  const strip = el.closest('.thumbs');
+  el.closest('.thumb-wrap')?.remove();
+  if (strip && !strip.querySelector('.thumb')) strip.remove();
+}
 
 function hydrateImages(hostId, threadId) {
   for (const b of T.rows.querySelectorAll('.thumb:not([data-ready])')) {
     b.dataset.ready = '1';
     imageData(hostId, threadId, b.dataset.image, 480).then((url) => {
       const frame = b.querySelector('.frame');
-      if (url) { frame.innerHTML = `<img src="${url}" alt="">`; b.classList.add('loaded'); }
-      else frame.innerHTML = icon('photo', { size: 22 });
+      if (url) { frame.innerHTML = `<img src="${url}" alt="">`; b.classList.add('loaded'); return; }
+      // Only named, not on the host's disk (a file on a console, a name in an explanation): no preview.
+      const strip = b.closest('.thumbs');
+      b.closest('.thumb-wrap')?.remove();
+      if (strip && !strip.querySelector('.thumb')) strip.remove();
     });
   }
 }
@@ -1241,6 +1253,7 @@ document.addEventListener('click', (e) => {
   }
   if (d.newIn) { newThread(d.host, d.newIn); return; }
   if (d.accountPop) { accountPopover(el, d.host, d.accountPop); return; }
+  if (d.hideImage) { hideImage(el, d.hideImage); return; }
   if (d.toggleItem) {
     if (!app.expandedItems.delete(d.toggleItem)) app.expandedItems.add(d.toggleItem);
     T.stick = false;

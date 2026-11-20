@@ -16,6 +16,8 @@ export const app = {
   sel: load('selection', null), // { host, thread }
   expanded: new Set(load('expandedProjects', null) ?? []), // host/project keys (absent = expanded)
   collapsedProjects: new Set(load('collapsedProjects2', [])),
+  /** Image previews you closed («itemId|path»). */
+  hiddenImages: new Set(load('hiddenImages', [])),
   showTools: load('showTools', true),
   showTurnUsage: load('showTurnUsage', true),
   drafts: new Map(load('drafts', [])),
