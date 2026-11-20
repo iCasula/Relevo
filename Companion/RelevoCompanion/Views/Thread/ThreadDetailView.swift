@@ -187,20 +187,6 @@ private struct RelayMenu: View, Equatable {
     }
 }
 
-private struct WorkingRow: View {
-    let text: String?
-
-    var body: some View {
-        HStack(spacing: 8) {
-            ProgressView()
-            Text(text ?? "Trabajando…")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-        }
-        .padding(.vertical, 4)
-    }
-}
-
 /// The agent isn't working, it's waiting for something it left running (tests, a build…), and will pick up
 /// on its own when it finishes.
 private struct WaitingRow: View {

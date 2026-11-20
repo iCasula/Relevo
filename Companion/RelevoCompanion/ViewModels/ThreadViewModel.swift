@@ -261,8 +261,10 @@ final class ThreadViewModel {
 
     func suggestion(_ action: SuggestionAction) { client.send(.suggestion(threadId: threadId, action: action)) }
 
-    func toggle(_ item: RemoteItem) {
-        if expanded.remove(item.id) == nil { expanded.insert(item.id) }
+    func toggle(_ item: RemoteItem) { toggle(id: item.id) }
+
+    func toggle(id: String) {
+        if expanded.remove(id) == nil { expanded.insert(id) }
     }
 
     /// The Mac classifies what you're typing («Relevo suggests»), so the draft goes over after a short pause.

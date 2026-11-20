@@ -62,6 +62,12 @@ struct AgentMessageRow: View {
     let item: RemoteItem
     let sender: RemoteSender
     let currentThread: UUID
+    let expanded: Set<String>
+    let toggle: (String) -> Void
+
+    /// Short messages show whole; longer ones fold to a few lines (tap to read them).
+    private var isLong: Bool { item.text.count > 220 || item.text.split(whereSeparator: \.isNewline).count > 3 }
+    private var isExpanded: Bool { expanded.contains(item.id) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -82,10 +88,24 @@ struct AgentMessageRow: View {
                     }
                     .font(.caption.weight(.medium))
                 }
+                if isLong {
+                    Image(systemName: "chevron.right")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                }
             }
             .font(.caption)
             .foregroundStyle(.secondary)
-            MarkdownText(text: item.text)
+            if isLong && !isExpanded {
+                Text(Self.folded(item.text))
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                ReplyWithOrders(text: item.text, itemId: item.id, expanded: expanded, toggle: toggle)
+            }
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -95,6 +115,27 @@ struct AgentMessageRow: View {
                 .fill(sender.role.color.opacity(0.6))
                 .frame(width: 3)
         }
+        .contentShape(.rect)
+        .onTapGesture {
+            guard isLong else { return }
+            withAnimation(.snappy(duration: 0.2)) { toggle(item.id) }
+        }
+        .accessibilityAction(named: isExpanded ? "Plegar" : "Desplegar") { if isLong { toggle(item.id) } }
+    }
+
+    /// The opening lines without tags or markdown marks.
+    static func folded(_ text: String) -> String {
+        let plain = AgentOrder.segments(in: text).map { segment -> String in
+            switch segment {
+            case .text(let t): t
+            case .order(let o): o.label + (o.to.map { " → \($0)" } ?? "") + ": " + o.body
+            }
+        }.joined(separator: "\n")
+        return plain.split(whereSeparator: \.isNewline)
+            .map { AgentOrder.preview(String($0)) }
+            .filter { !$0.isEmpty }
+            .prefix(3)
+            .joined(separator: " ")
     }
 }
 

@@ -12,14 +12,15 @@ struct TranscriptItemView: View {
         switch item.kind {
         case .user:
             if let sender = item.from {
-                AgentMessageRow(item: item, sender: sender, currentThread: viewModel.threadId)
+                AgentMessageRow(item: item, sender: sender, currentThread: viewModel.threadId,
+                                expanded: viewModel.expanded, toggle: { viewModel.toggle(id: $0) })
             } else {
                 UserBubble(text: item.text)
             }
         case .assistant:
             VStack(alignment: .leading, spacing: 6) {
                 if showsAuthor { AuthorLine(account: viewModel.account(item.accountId), model: item.model, date: item.date) }
-                MarkdownText(text: item.text)
+                ReplyWithOrders(text: item.text, itemId: item.id, expanded: viewModel.expanded) { viewModel.toggle(id: $0) }
                 let images = FileReference.imageReferences(in: item.text)
                 if !images.isEmpty {
                     ImageStrip(paths: images, load: { await viewModel.thumbnail($0) }, open: { viewModel.open(path: $0) })
