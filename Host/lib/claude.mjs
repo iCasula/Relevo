@@ -466,6 +466,13 @@ export class FakeSession extends EventEmitter {
       }, 100);
       return;
     }
+    // «comando largo»: runs a long shell command for 90 s (how the phone folds it while it runs).
+    if (/^comando largo/i.test(text)) {
+      const cmd = `wsl.exe --distribution Ubuntu -- bash -lc 'cd /mnt/v/demo/runtime/host && timeout --signal=TERM 900s env ME1_ENTRY=0x80 ME1_SAMPLE_MS=1000 qemu-aarch64-static -L /usr/aarch64-linux-gnu ./build/lift-host > build/qemu-900s.log 2>&1; echo RC=$?; tail -n 50 build/qemu-900s.log'`;
+      this.emit('toolStarted', `long${turn}`, 'Bash', cmd, { command: cmd });
+      setTimeout(() => { if (!this.turnActive) return; this.emit('toolFinished', `long${turn}`, true, 'RC=0'); finish(); }, 90_000);
+      return;
+    }
     // «temporizador …»: says it (orders included) and then waits on a 12 s timer, unless interrupted.
     if (/^temporizador/i.test(text)) {
       this.emit('textDelta', `t${turn}`, `Eco (${this.model}, ${this.mode}): ${text}`);

@@ -153,34 +153,104 @@ test('an agent only waiting on background work gets messages; one mid-turn still
   const [lead, ex] = team.members;
   const from = { threadId: 'L', name: 'Orquestador', role: 'orchestrator' };
   assert.equal(teams._deliver(team, ex, 'parche en rama aparte', { ...from, label: 'respuesta' }), 'sent', 'idle with QEMU in the background: delivered');
-  // Mid-turn: a task bounces (and the orchestrator is told it won't arrive by itself)…
+  // Mid-turn: a task is kept pending (and the orchestrator is told it goes when the turn ends)…
   rts.E.isRunning = true;
-  assert.equal(teams._deliver(team, ex, 'otra tarea', { ...from, label: 'tarea' }), 'bounced');
-  assert.match(notices.pop(), /no le llega solo/);
+  assert.equal(teams._deliver(team, ex, 'otra tarea', { ...from, label: 'tarea' }), 'parked');
+  assert.match(notices.pop(), /Pendiente para Ejecutor 2/);
+  assert.equal(ex.parked.text, 'otra tarea');
+  // …while it writes its handoff note for Relevo, a message simply waits in its queue.
+  ex.noteRequested = true;
+  assert.equal(teams._deliver(team, ex, 'tarea durante el traspaso', { ...from, label: 'tarea' }), 'queued');
+  ex.noteRequested = false;
   // …but the answer to its own question is queued for when the turn ends.
   ex.awaitingAnswer = true;
   assert.equal(teams._deliver(team, ex, 'respuesta', { ...from, label: 'respuesta' }), 'queued');
+  // Idle, but seconds away from the model change you asked for: it waits for the new model.
+  rts.E.isRunning = false; rts.E.backgroundTasks = [];
+  teams.host._switchSoon = () => true;
+  assert.equal(teams._deliver(team, ex, 'tarea tras el cambio', { ...from, label: 'tarea' }), 'queued');
+  assert.equal(started.length, 1, 'no turn on the old model');
   void lead;
 });
 
-test("the safety net: a finished turn whose words never reached the team is sent, once", () => {
+test("the safety net: an agent's last words the orchestrator never got are sent, once; a deliberate skip isn't", () => {
   const sent = [], notices = [];
   const t = { id: 'E', title: 'Ejecutor 2', queued: [], items: [{ kind: 'user', text: 'tarea', done: true, date: 1 }] };
+  const L = { id: 'L', title: 'Orquestador', queued: [], items: [] };
   const teams = Object.create(Teams.prototype);
-  teams.host = { threads: new Map([['E', t]]), _rt: () => ({ isRunning: false, approvals: new Map() }), _append: (th, it) => { th.items.push({ ...it, date: 2 }); notices.push(it.text); }, _changed() {}, _uuid: () => 'u', log() {} };
+  teams.host = { threads: new Map([['E', t], ['L', L]]), _rt: () => ({ isRunning: false, approvals: new Map(), backgroundTasks: [] }), _append: (th, it) => { th.items.push({ ...it, date: th.items.at(-1)?.date ?? 0 }); notices.push(it.text); }, _changed() {}, _uuid: () => 'u', log() {} };
   teams.onTurnFinished = (th, a) => sent.push(a.text);
-  Object.defineProperty(teams, 'list', { value: [{ status: 'active', members: [{ threadId: 'E', role: 'executor', name: 'Ejecutor 2' }] }] });
-  teams.sweepUnreported(1e12);
-  assert.equal(t.teamReportedUpTo, 1, 'older threads: what is there counts as told');
-  t.items.push({ kind: 'assistant', text: 'ESTADO: hecho <relevo:pregunta>¿restauro el volcado?</relevo:pregunta>', date: 3 });
+  const ex = { threadId: 'E', role: 'executor', name: 'Ejecutor 2' };
+  Object.defineProperty(teams, 'list', { value: [{ status: 'active', members: [{ threadId: 'L', role: 'orchestrator', name: 'Orquestador' }, ex] }] });
+  teams.sweepUnreported(2 * 1000);
+  assert.equal(t.teamSince, 2, 'first look: what is there counts as handled');
+  // It got its last report through at 2; at 3 it said more that never arrived (the night of 20-nov).
+  ex.lastToLeadAt = 2;
+  t.items.push({ id: 'a1', kind: 'assistant', text: 'ESTADO: hecho\nLos NRO están listos.', date: 3 });
   teams.sweepUnreported(3 * 1000 + 5_000);
   assert.equal(sent.length, 0, 'too soon: it may still be on its way');
   teams.sweepUnreported(3 * 1000 + 30_000);
   assert.equal(sent.length, 1);
-  assert.match(sent[0], /restauro el volcado/);
+  assert.match(sent[0], /NRO están listos/);
   assert.match(notices[0], /no había llegado/);
   teams.sweepUnreported(1e12);
   assert.equal(sent.length, 1, 'not twice');
+  // Stopped by you (or its handoff note): never sent.
+  t.items.push({ id: 'a2', kind: 'assistant', text: 'a medias', date: 50, teamSkip: true });
+  teams.sweepUnreported(1e12);
+  assert.equal(sent.length, 1);
+});
+
+test("the orchestrator's orders that never went out are sent by the sweep, and only those", () => {
+  const delivered = [], notices = [];
+  const L = { id: 'L', title: 'Orquestador', queued: [], items: [] };
+  const R = { id: 'R', title: 'Investigador', queued: [], items: [] };
+  const teams = Object.create(Teams.prototype);
+  teams.host = { threads: new Map([['L', L], ['R', R]]), _rt: () => ({ isRunning: false, approvals: new Map(), backgroundTasks: [] }), _append: (th, it) => notices.push(it.text), _changed() {}, _uuid: () => 'u', log() {}, _saveState() {} };
+  const team = { status: 'active', auto: 0, held: [], findings: [], members: [{ threadId: 'L', role: 'orchestrator', name: 'Orquestador' }, { threadId: 'R', role: 'researcher', name: 'Investigador' }] };
+  teams._deliver = (tm, m, text, from) => { delivered.push([m.name, text, from.label]); return 'sent'; };
+  Object.defineProperty(teams, 'list', { value: [team] });
+  teams.sweepUnreported(1000);
+  // One order went out with its turn (marked); one never did (the 07:44 research order).
+  L.items.push({ id: 'o1', kind: 'assistant', text: '<relevo:investigar>ya enviada</relevo:investigar>', date: 2, orderSigs: ['investigar||ya enviada'] });
+  L.items.push({ id: 'o2', kind: 'assistant', text: 'Pido investigación.\n<relevo:investigar para="Ejecutor 1">compara las trazas FIOS</relevo:investigar>', date: 3 });
+  teams.sweepUnreported(100_000);
+  assert.deepEqual(delivered.map((d) => d[1]), ['compara las trazas FIOS']);
+  assert.match(notices[0], /no habían salido/);
+  assert.match(notices[1], /Entregas: investigar → Investigador: entregada/);
+  assert.match(team.outbox.at(-1).result, /sent/);
+  teams.sweepUnreported(200_000);
+  assert.equal(delivered.length, 1, 'once');
+});
+
+test('the watchdog: a team idle for a while wakes the orchestrator once, then tells you; a question for you is waiting, not stuck', () => {
+  const delivered = [], notices = [];
+  const L = { id: 'L', title: 'Orquestador', queued: [], items: [{ kind: 'assistant', text: '<relevo:tarea para="Ejecutor 1">x</relevo:tarea>', date: 100 }] };
+  const E = { id: 'E', title: 'Ejecutor 1', queued: [], items: [{ kind: 'user', text: 'x', date: 101 }, { kind: 'assistant', text: 'ESTADO: hecho\nListo.', date: 200 }] };
+  const teams = Object.create(Teams.prototype);
+  teams.host = { threads: new Map([['L', L], ['E', E]]), _rt: () => ({ isRunning: false, approvals: new Map(), backgroundTasks: [] }), _append: (th, it) => notices.push(it.text), _changed() {}, _uuid: () => 'u', log() {}, _broadcastSnapshot() {} };
+  teams._attention = () => {};
+  const team = { status: 'active', auto: 0, held: [], members: [{ threadId: 'L', role: 'orchestrator', name: 'Orquestador' }, { threadId: 'E', role: 'executor', name: 'Ejecutor 1' }] };
+  teams._deliver = (tm, m, text) => { delivered.push(text); L.items.push({ kind: 'assistant', text: 'vale', date: L.items.at(-1).date + 1000 }); return 'sent'; };
+  Object.defineProperty(teams, 'list', { value: [team] });
+  teams.watchIdle(200 + 60);
+  assert.equal(delivered.length, 0, 'not idle long enough');
+  teams.watchIdle(200 + 1000);
+  assert.equal(delivered.length, 1);
+  assert.match(delivered[0], /lleva 17 min parado[\s\S]*Ejecutor 1: libre desde las .*ESTADO: hecho/);
+  teams.watchIdle(200 + 1100);
+  assert.equal(delivered.length, 1, 'once per idle stretch');
+  // It answered without giving work; idle again: a second nudge, then you are told instead.
+  teams.watchIdle(L.items.at(-1).date + 1000);
+  assert.equal(delivered.length, 2);
+  teams.watchIdle(L.items.at(-1).date + 1000);
+  assert.equal(delivered.length, 2);
+  assert.match(notices.at(-1), /sigue parado tras dos avisos/);
+  // Its last word is a question for you: that's waiting for you.
+  team.nudges = 0; team.nudgedFor = null;
+  L.items.push({ kind: 'assistant', text: '¿Abro el FTP o esperamos?', date: 9_000 });
+  teams.watchIdle(20_000);
+  assert.equal(delivered.length, 2);
 });
 
 test('the orchestrator gets the final report, plain and short, not the progress chatter', async () => {

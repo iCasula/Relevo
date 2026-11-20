@@ -39,6 +39,12 @@ const RESUMABLE = (a) => a && (a.kind === 'claude' || a.kind.startsWith('api:') 
 const RESUME_WITHIN = 12 * 3600;
 /** A thread waiting for quota with no reset time looks again this often (seconds). */
 const QUOTA_POLL = 300;
+/**
+ * A model change you asked for, once the agent is free: 1 s after its turn ends; after its background job
+ * ends, long enough for the turn that job wakes up (to say what came of it) to start first (seconds).
+ */
+const SWITCH_QUIET = Number(process.env.RELEVO_SWITCH_QUIET ?? 1);
+const SWITCH_AFTER_JOB = Number(process.env.RELEVO_SWITCH_AFTER_JOB ?? 10);
 
 /**
  * How well a model fits a role, from its name: «heavy» (executors: the strongest) or «light» (orchestrator,
@@ -1195,6 +1201,33 @@ export class Host {
   }
 
   /**
+   * The pending switch happens when the thread has been fully idle for `wait`: no turn, nothing in the
+   * background, no question waiting, nothing said lately; and, in a team, after what the agent said last has
+   * gone to its orchestrator. Anything that keeps it busy postpones it (the end of that calls this again).
+   */
+  _switchWhenIdle(t, wait = SWITCH_QUIET) {
+    const r = this._rt(t);
+    clearTimeout(r.switchTimer);
+    if (!r.pendingSwitch) return;
+    const target = this.accountsById.get(r.pendingSwitch.accountId);
+    r.statusLine = `Cambiará a ${target?.name ?? 'otro modelo'} en cuanto esté libre del todo`;
+    this._changed(t);
+    r.switchTimer = setTimeout(() => {
+      r.switchTimer = null;
+      if (!r.pendingSwitch || r.isRunning || r.approvals.size || r.backgroundTasks?.length) return;
+      const last = t.items[t.items.length - 1];
+      if ((last?.date ?? 0) > now() - wait + 0.5) { this._switchWhenIdle(t, wait); return; }
+      if (t.team) { try { this.teams.flushUnreported(t); } catch (e) { this.log(`equipo: ${e.message}`); } }
+      const { accountId, model, carryOn, auto } = r.pendingSwitch;
+      r.pendingSwitch = null;
+      r.statusLine = null;
+      this.select(t, accountId, model, carryOn, auto);
+      if (!r.isRunning && !r.pendingSwitch) this._next(t);
+    }, wait * 1000);
+    r.switchTimer.unref?.();
+  }
+
+  /**
    * Model or subscription for the thread. Another provider means a new agent that gets the thread's context
    * with the next message (`relay` sends that message right away, to carry on with the task).
    */
@@ -1261,8 +1294,20 @@ export class Host {
     return null;
   }
 
+  /** A switch you asked for is about to happen (the agent is idle and its jobs are done): it's seconds away. */
+  _switchSoon(t) {
+    const r = this._rt(t);
+    return !!(r.pendingSwitch && !r.pendingSwitch.auto && r.switchTimer && !r.isRunning && !r.backgroundTasks?.length);
+  }
+
   _startTurn(t, text, pendingRequest = false, meta = {}) {
     const r = this._rt(t);
+    // What arrives in those seconds (from you or from its team) waits and goes to the new model, right after.
+    if (this._switchSoon(t)) {
+      t.queued.push({ id: uuid(), text, prompt: meta.prompt, from: meta.from, team: !!meta.from });
+      this._changed(t);
+      return;
+    }
     this._preTurnSwitch(t);
     const account = this._account(t);
     const problem = this._diskProblem(t);
@@ -1464,13 +1509,9 @@ export class Host {
       r.backgroundTasks = list;
       this._changed(t);
       this._checkRestart();
-      // A switch waiting for this work happens now that it's over.
-      if (!list.length && r.pendingSwitch && !r.isRunning) {
-        const { accountId, model, carryOn, auto } = r.pendingSwitch;
-        r.pendingSwitch = null;
-        r.statusLine = null;
-        this.select(t, accountId, model, carryOn, auto);
-      }
+      // A switch waiting for this work happens once the agent is really idle: the end of a job often wakes it
+      // up to say what came of it, and that has to be said (and reach its team) on the model that did it.
+      if (!list.length && r.pendingSwitch && !r.isRunning) this._switchWhenIdle(t, SWITCH_AFTER_JOB);
     });
     s.on('context', (used, window) => { r.context = { used, window: window ?? null }; });
     s.on('failure', (f) => {
@@ -1537,18 +1578,22 @@ export class Host {
       t.updatedAt = now();
       this._changed(t);
       // A model change waiting for this turn to end doesn't make it any less finished: it reports, then switches.
+      // Only what's new since the last report (a turn the agent resumed by itself continues the same request).
+      const start = Math.max(userItem ? t.items.indexOf(userItem) + 1 : 0, r.reportedUpTo?.get(userItem?.id) ?? 0);
+      const turn = t.items.slice(start);
+      // Out of quota only if this turn really ended on an error: a stale flag must never swallow a report.
+      if (r.limitHit && !turn.some((i) => i.kind === 'error')) { this.log(`equipo: «${t.title}» tenía marcado un límite sin error en este turno; se informa igualmente`); r.limitHit = false; }
       const skip = !t.team ? null : r.limitHit ? 'límite de cuota' : r.sendNow ? 'mensaje urgente' : r.stopRequested ? 'detenido' : null;
       if (t.team && skip) {
         this.log(`equipo: el turno de «${t.title}» no se informa (${skip})`);
-        // Stopped by you or out of quota: deliberately not reported. The others carry on and report next.
+        // Stopped by you or out of quota: deliberately not reported (nor its orders sent). The others carry on.
+        for (const i of turn) if (i.kind === 'assistant') i.teamSkip = true;
         if (r.stopRequested || r.limitHit) t.teamReportedUpTo = t.items.length;
       } else if (t.team) {
-        // Only what's new since the last report (a turn the agent resumed by itself continues the same request).
-        const start = Math.max(userItem ? t.items.indexOf(userItem) + 1 : 0, r.reportedUpTo?.get(userItem?.id) ?? 0);
-        const turn = t.items.slice(start);
         r.reportedUpTo = new Map([[userItem?.id, t.items.length]]);
         try {
           this.teams.onTurnFinished(t, {
+            items: turn.filter((i) => i.kind === 'assistant' && i.text),
             text: turn.filter((i) => i.kind === 'assistant' && i.text).map((i) => i.text).join('\n\n'),
             messages: turn.filter((i) => i.kind === 'assistant' && i.text).map((i) => i.text),
             changes: userItem?.turnChanges ?? null,
@@ -1561,6 +1606,13 @@ export class Host {
         } catch (e) {
           this.log(`equipo: fallo al informar del turno de «${t.title}»: ${e?.stack ?? e}`);
         }
+      }
+      // A switch you asked for waits until the agent is fully idle (no turn, no job, nothing said for a moment);
+      // what's queued for it goes after, on the new model. Only a relay for quota goes at once.
+      if (r.pendingSwitch && !r.pendingSwitch.auto && !r.sendNow) {
+        this._switchWhenIdle(t);
+        this._checkRestart();
+        return;
       }
       if (r.pendingSwitch) {
         const { accountId, model, carryOn, auto } = r.pendingSwitch;

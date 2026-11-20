@@ -25,7 +25,7 @@ export const ROLES = {
 };
 
 /** Bumped when the agents' instructions change: teams made before get them again. */
-const RULES_VERSION = 10;
+const RULES_VERSION = 11;
 /** The orchestrator gets a fresh session (with a brief of its own thread) past any of these. */
 /**
  * When an agent starts a fresh session: only once its context is really full (this share of the model's
@@ -47,11 +47,21 @@ const SUMMARY_HOUR = 21;
 
 /** Automatic messages in a row (with no message from you) before the team pauses itself. */
 export const AUTO_LIMIT = 60;
+/** The whole team idle this long (seconds) wakes the orchestrator; an order «en curso» never received, after STUCK_AFTER. */
+export const IDLE_NUDGE = Number(process.env.RELEVO_IDLE_NUDGE ?? 900);
+const STUCK_AFTER = Math.min(600, IDLE_NUDGE);
+/** A thread this quiet (seconds) has finished saying what it had to say. */
+const QUIET = Math.min(20, IDLE_NUDGE / 3);
+/** Orders that are messages for someone (the rest only change the team's memory). */
+const MESSAGE_ORDERS = ['tarea', 'urgente', 'investigar', 'respuesta', 'integrar', 'fin'];
 
 // MARK: - Orders in the agents' replies
 
 const TAG = /<relevo:(tarea|urgente|investigar|respuesta|pregunta|integrar|fin|decisi[oó]n|descartar|hito|hecho)\b([^>]*?)(?:\/>|>([\s\S]*?)<\/relevo:\1\s*>)/gi;
 const FENCED = /```[\s\S]*?(?:```|$)/g;
+const orderSig = (o) => `${o.type}|${o.to ?? ''}|${o.body}`;
+/** What became of a message, as the orchestrator and you read it. */
+const RESULT = { sent: 'entregada', queued: 'en cola (la lee al terminar su turno)', bounced: 'no entregada: estaba a mitad de un turno', parked: 'pendiente: se la doy cuando termine su turno', held: 'retenida (equipo en pausa)', gone: 'no entregada: su hilo no existe', stashed: 'guardada para su próxima tarea', answered: 'respondida en su pregunta', replaced: 'sustituida por otra más reciente', dropped: 'descartada: le diste otra orden' };
 
 /** The orders in a reply, outside code blocks: [{ type, to, body }]. */
 export function parseOrders(text) {
@@ -214,10 +224,11 @@ ${executors.some((e) => host.threads.get(e.threadId)?.worktree) ? '<relevo:integ
 
 <relevo:urgente para="${executors[0]?.name ?? 'Ejecutor 1'}">…</relevo:urgente>  solo si lo que está haciendo ahora es claramente erróneo o ya no sirve: interrumpe su turno.
 
-Cómo funciona la entrega: a un agente a mitad de un turno solo le llega lo urgente (y la respuesta a una duda suya); lo demás Relevo no se lo entrega y te lo dice. No hace falta: cuando termine recibirás su informe y entonces decides su siguiente tarea, con información fresca. Relevo te enviará los informes, dudas y bloqueos de cada agente con su nombre delante («[${executors[0]?.name ?? 'Ejecutor 1'} · informe]», «… · pregunta») y al final el estado del equipo (quién trabaja y cuántos mensajes tuyos le esperan). Reglas:
+Cómo funciona la entrega: a un agente a mitad de un turno solo le llega lo urgente (y la respuesta a una duda suya); lo demás queda pendiente: cuando termine, te llega su informe con tu orden pendiente al lado, y si no le das otra en esa respuesta, Relevo se la entrega tal cual. Al final de cada mensaje que recibes, «Qué ha sido de tus mensajes» te dice si cada orden se entregó, está en cola o pendiente: no supongas que algo llegó sin verlo ahí. Relevo te enviará los informes, dudas y bloqueos de cada agente con su nombre delante («[${executors[0]?.name ?? 'Ejecutor 1'} · informe]», «… · pregunta») y al final el estado del equipo (quién trabaja y cuántos mensajes tuyos le esperan). Reglas:
 - No acuses recibo ni contestes a informes de progreso («compilando…», «sigo con…»): si no hay nada nuevo que pedir, responde sin órdenes y espera.
 - No mandes nada a quien está a mitad de un turno salvo que sea urgente: espera a su informe (mira el estado del equipo). Quien solo espera un trabajo en segundo plano (una compilación, un emulador) sí recibe tus mensajes; si no tienes nada nuevo para él, deja que te informe cuando acabe.
-- Si Relevo te dice «No entregado a…», ese mensaje NO le llega solo: vuelve a dárselo cuando te llegue su informe.
+- Si Relevo te dice «Pendiente para…», no la repitas: le llega sola salvo que le des otra orden al leer su informe. Si te dice «no entregada», esa sí tienes que volver a darla.
+- Si Relevo te avisa de que el equipo lleva un rato parado, reparte el trabajo que quede; si estáis esperando al usuario, dilo en una línea.
 - Una respuesta a quien no te ha preguntado nada no se entrega: se guarda y le llega con su siguiente tarea. No respondas a informes con ESTADO: esperando.
 - No hagas tú el trabajo de los ejecutores (depurar, compilar, hacer commits o merges): pídeselo a ellos${executors.some((e) => host.threads.get(e.threadId)?.worktree) ? ' o usa integrar' : ''}.
 - Toda respuesta y tarea lleva para="…". No existen otras órdenes ni opciones («force», «redirect»…) aparte de las de arriba.
@@ -279,8 +290,8 @@ export class Teams {
       team.pausedBy = /mensajes automáticos/.test(last?.text ?? '') ? 'limit' : /presupuesto/.test(last?.text ?? '') ? 'budget' : 'user';
     }
     this._watch = setInterval(() => {
-      try { this.watchBackground(); this._maybeSummary(); this.sweepUnreported(); } catch (e) { host.log?.(`team watch: ${e.message}`); }
-    }, Math.min(60, BG_CHECK / 2) * 1000);
+      try { this.watchBackground(); this._maybeSummary(); this.sweepUnreported(); this.watchIdle(); } catch (e) { host.log?.(`team watch: ${e.message}`); }
+    }, Math.max(1, Math.min(60, BG_CHECK / 2, IDLE_NUDGE / 3)) * 1000);
     this._watch.unref?.();
   }
 
@@ -616,6 +627,7 @@ export class Teams {
     if (!team) return;
     if (team.status === 'paused' && team.pausedBy === 'limit') this._reactivate(team, 'Equipo reactivado por tu mensaje');
     team.auto = 0;
+    team.nudges = 0;
     if (team.status === 'done') team.status = 'active'; // you asked for more
   }
 
@@ -664,7 +676,7 @@ export class Teams {
   }
 
   /** A turn ended in a team thread: deliver what the orchestrator ordered, or report a member's work to it. */
-  onTurnFinished(thread, { text, messages, changes, errors, background = [] }) {
+  onTurnFinished(thread, { items = null, text, messages, changes, errors, background = [] }) {
     const team = this.of(thread);
     const member = this.memberOf(thread);
     if (!team || !member || team.status === 'done') return;
@@ -676,6 +688,7 @@ export class Teams {
       if (asked) {
         const note = withoutOrders(messages?.length ? messages[messages.length - 1] : text).trim();
         if (note) member.handoffNote = { text: clip(compactReport(note), NOTE_MAX), at: Date.now() / 1000 };
+        for (const i of items ?? []) i.teamSkip = true; // its handoff note: for its next session, not the team
         this._renew(team, member, thread);
         h._saveState();
         return;
@@ -684,7 +697,9 @@ export class Teams {
     this._checkBudget(team);
     if (member.role === 'orchestrator') {
       const orders = parseOrders(text);
-      this._dispatch(team, member, thread, orders);
+      const sent = this._dispatch(team, member, thread, orders, items);
+      this._offerParked(team, sent);
+      this._receipt(team, thread, sent);
       // A turn with no orders is the orchestrator talking to you (a question, a decision, a summary).
       const said = withoutOrders(text).trim();
       if (!orders.some((o) => !['decision', 'descartar', 'hito', 'hecho'].includes(o.type)) && said && team.status !== 'done') this._attention(thread, 'orquestador', said);
@@ -754,15 +769,33 @@ export class Teams {
   }
 
   /** The orders of the orchestrator's turn not sent yet (some may have gone when it started waiting on a timer). */
-  _dispatch(team, member, thread, orders) {
+  _dispatch(team, member, thread, orders, items = null) {
     const r = this.host._rt(thread);
     r.sentOrders ??= new Set();
-    for (const o of orders) {
-      const sig = `${o.type}|${o.to ?? ''}|${o.body}`;
+    const sent = [];
+    // Each order is marked on the message that has it once it goes out: the sweep sends whatever never did.
+    const list = items?.length
+      ? items.flatMap((it) => parseOrders(it.text).map((o) => ({ o, it })))
+      : orders.map((o) => ({ o, it: null }));
+    for (const { o, it } of list) {
+      const sig = orderSig(o);
+      if (it?.orderSigs?.includes(sig)) continue;
+      if (it) it.orderSigs = [...(it.orderSigs ?? []), sig];
       if (r.sentOrders.has(sig)) continue;
       r.sentOrders.add(sig);
-      this._order(team, member, o);
+      const res = this._order(team, member, o);
+      if (res) sent.push(res);
     }
+    for (const it of items ?? []) it.teamDone = true;
+    return sent;
+  }
+
+  /** «Entregado: tarea → Ejecutor 2 · investigar → Investigador (en cola)»: what each order did, in the lead's thread. */
+  _receipt(team, thread, sent) {
+    if (!sent.length) return;
+    const h = this.host;
+    h._append(thread, { id: h._uuid(), kind: 'notice', text: `Entregas: ${sent.map((x) => `${x.type} → ${x.to}: ${RESULT[x.result] ?? x.result}`).join(' · ')}` });
+    h._changed(thread);
   }
 
   /**
@@ -780,7 +813,16 @@ export class Teams {
     // Who it's waiting for, if the timer says (Antigravity's schedule carries what it's for).
     const said = `${title ?? ''} ${JSON.stringify(input ?? {})}`;
     r.waitingFor = team.members.filter((m) => m !== member && new RegExp(`\\b${m.name.replace(/\s+/g, '\\s*')}\\b`, 'i').test(said)).map((m) => m.name);
-    this._dispatch(team, member, thread, parseOrders(turnText));
+    const sent = this._dispatch(team, member, thread, parseOrders(turnText), this._turnItems(thread));
+    for (const it of this._turnItems(thread)) delete it.teamDone; // the turn isn't over: what it says next still counts
+    this._receipt(team, thread, sent);
+  }
+
+  /** The replies of the turn running now in a thread (since the message that started it). */
+  _turnItems(thread) {
+    const r = this.host._rt(thread);
+    const start = r.turnUserItem ? thread.items.findIndex((i) => i.id === r.turnUserItem) + 1 : 0;
+    return thread.items.slice(Math.max(0, start)).filter((i) => i.kind === 'assistant' && i.text);
   }
 
   /** Something in this thread is for you: the apps notify it until you write there. */
@@ -1061,36 +1103,123 @@ export class Teams {
   _maybeRefreshMember(team, member, t) { this._maybeRefresh(team, member, t); }
 
   /**
-   * The safety net: an agent that finished a turn whose words never reached the team (whatever went wrong on
-   * the way) gets them sent now, once its thread has been quiet for a moment. Each turn at most twice.
+   * The safety net, end to end: whatever went wrong on the way, it compares what each agent said with what the
+   * orchestrator got from it, and what the orchestrator wrote with what went out. Once a thread is quiet:
+   * - the orchestrator's orders that never left (a message with an order not marked as sent) go now;
+   * - an agent's last words the orchestrator never received (said after the last thing it got from it) go now.
+   * Each at most once.
    */
-  sweepUnreported(nowMs = Date.now()) {
+  sweepUnreported(nowMs = Date.now(), only = null) {
     const h = this.host;
+    const nowS = nowMs / 1000;
     for (const team of this.list) {
       if (team.status === 'done') continue;
+      const lead = team.members.find((m) => m.role === 'orchestrator');
       for (const member of team.members) {
         const t = h.threads.get(member.threadId);
-        if (!t) continue;
-        // Threads from before this existed: everything so far counts as told.
-        if (t.teamReportedUpTo === undefined) { t.teamReportedUpTo = t.items.length; continue; }
+        if (!t || (only && t !== only)) continue;
+        // The first look at a thread: what it said before counts as handled.
+        if (t.teamSince === undefined) { t.teamSince = nowS; continue; }
         const r = h._rt(t);
         if (r.isRunning || r.approvals.size || r.sendNow || t.queued.length) continue;
-        const items = t.items.slice(t.teamReportedUpTo);
-        const lastUser = [...t.items].reverse().find((i) => i.kind === 'user');
-        const said = items.filter((i) => i.kind === 'assistant' && i.text?.trim());
         const last = t.items[t.items.length - 1];
-        if (!said.length || !lastUser?.done || (last?.date ?? 0) * 1000 > nowMs - 20_000) continue;
-        if ((t.teamSweeps ?? 0) >= 2 && t.teamSweptAt === t.items.length) continue;
-        t.teamSweeps = t.teamSweptAt === t.items.length ? (t.teamSweeps ?? 0) + 1 : 1;
-        t.teamSweptAt = t.items.length;
-        h.log?.(`equipo: «${t.title}» terminó un turno que no llegó al equipo; se envía ahora`);
+        if (!only && (last?.date ?? 0) > nowS - QUIET) continue;
+        if (member.role === 'orchestrator') {
+          const pending = t.items.filter((i) => i.kind === 'assistant' && i.text && !i.teamSkip && (i.date ?? 0) > t.teamSince
+            && parseOrders(i.text).some((o) => !(i.orderSigs ?? []).includes(orderSig(o))));
+          if (!pending.length) continue;
+          h.log?.(`equipo: ${member.name} escribió órdenes que no habían salido; se envían ahora`);
+          h._append(t, { id: h._uuid(), kind: 'notice', text: 'Relevo envía ahora órdenes que escribiste y no habían salido' });
+          const sent = this._dispatch(team, member, t, [], pending);
+          this._receipt(team, t, sent);
+          h._changed(t);
+          h._saveState?.();
+          continue;
+        }
+        // Waiting on its own job: it reports when that ends.
+        if (r.backgroundTasks?.length || !lead) continue;
+        const since = Math.max(member.lastToLeadAt ?? 0, t.teamSince);
+        const said = t.items.filter((i) => i.kind === 'assistant' && i.text?.trim() && !i.teamSkip && (i.date ?? 0) > since);
+        if (!said.length || member.sweptItem === said[said.length - 1].id) continue;
+        member.sweptItem = said[said.length - 1].id;
+        h.log?.(`equipo: lo último que dijo ${member.name} no había llegado a ${lead.name}; se envía ahora`);
         h._append(t, { id: h._uuid(), kind: 'notice', text: 'Relevo envía ahora al equipo lo último que dijo este agente: no había llegado' });
         h._changed(t);
         try {
-          this.onTurnFinished(t, { text: said.map((i) => i.text).join('\n\n'), messages: said.map((i) => i.text), changes: null, errors: items.filter((i) => i.kind === 'error').map((i) => i.text), background: [] });
-          t.teamReportedUpTo = t.items.length;
+          this.onTurnFinished(t, {
+            items: said, text: said.map((i) => i.text).join('\n\n'), messages: said.map((i) => i.text), changes: null,
+            errors: t.items.filter((i) => i.kind === 'error' && (i.date ?? 0) > since).map((i) => i.text), background: [],
+          });
         } catch (e) { h.log?.(`equipo: no se pudo enviar lo de «${t.title}»: ${e?.stack ?? e}`); }
       }
+    }
+  }
+
+  /** Before its agent changes: whatever it said that hasn't reached the team goes now, from the model that said it. */
+  flushUnreported(thread) { this.sweepUnreported(Date.now(), thread); }
+
+  /**
+   * The watchdog, without an AI: a team where nobody works, waits on a job or has a message on its way gets its
+   * orchestrator woken once that lasts IDLE_NUDGE (with what each agent said last). Twice in a row with no order
+   * coming out of it, and it's you who gets told instead. Also: a pending order for an agent that's now free
+   * goes, and an order that's «en curso» on the board but never reached its agent is pointed out.
+   */
+  watchIdle(nowS = Date.now() / 1000) {
+    const h = this.host;
+    const hhmm = (s) => new Date(s * 1000).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
+    for (const team of this.list) {
+      if (team.status !== 'active') continue;
+      const lead = team.members.find((m) => m.role === 'orchestrator');
+      const leadThread = lead && h.threads.get(lead.threadId);
+      if (!leadThread) continue;
+      const busy = (t) => {
+        const r = h._rt(t);
+        return !!(r.isRunning || r.approvals.size || r.sendNow || t.queued.length || r.backgroundTasks?.length || r.limit || r.resumeAt || r.pendingRelay);
+      };
+      const members = team.members.map((m) => ({ m, t: h.threads.get(m.threadId) })).filter((x) => x.t);
+      // A pending order whose agent is free, with nobody deciding about it now: it goes.
+      for (const { m, t } of members) {
+        if (m.parked && m.role !== 'orchestrator' && !busy(t) && !busy(leadThread) && nowS - m.parked.at > QUIET * 3) this._deliverParked(team, m);
+      }
+      // An order on the board that its agent never got (it said nothing and was never asked since).
+      for (const { m, t } of members) {
+        if (m.role === 'orchestrator' || m.task?.state !== 'en curso' || busy(t) || m.stuckWarned === m.task.since) continue;
+        if (nowS - m.task.since < STUCK_AFTER) continue;
+        const got = t.items.some((i) => (i.kind === 'user' || i.kind === 'assistant') && (i.date ?? 0) >= m.task.since - 5);
+        if (got) continue;
+        m.stuckWarned = m.task.since;
+        h.log?.(`equipo: ${m.name} tiene una tarea en curso desde las ${hhmm(m.task.since)} que nunca le llegó`);
+        this._deliver(team, lead, `${m.name} figura con la tarea «${clip(m.task.text ?? '', 140)}» en curso desde las ${hhmm(m.task.since)}, pero no le ha llegado ni ha hecho nada desde entonces: está libre. Dásela otra vez si sigue valiendo.`, { name: 'Relevo', role: 'relevo', label: 'vigilante' });
+      }
+      if (members.some(({ t }) => busy(t))) continue;
+      const lastActivity = Math.max(...members.map(({ t }) => t.items[t.items.length - 1]?.date ?? 0));
+      if (nowS - lastActivity < IDLE_NUDGE || team.nudgedFor === lastActivity) continue;
+      // Its last word was a question for you: the team is waiting for you, not stuck.
+      const lastLead = [...leadThread.items].reverse().find((i) => i.kind === 'assistant' && i.text);
+      const said = withoutOrders(lastLead?.text ?? '').trim();
+      if (lastLead && !parseOrders(lastLead.text).some((o) => MESSAGE_ORDERS.includes(o.type)) && /[?¿][^\n]*$/.test(said.split('\n').filter(Boolean).pop() ?? '')) continue;
+      team.nudgedFor = lastActivity;
+      if ((team.nudges ?? 0) >= 2) {
+        if (team.nudges === 2) {
+          team.nudges = 3;
+          h._append(leadThread, { id: h._uuid(), kind: 'notice', text: 'El equipo sigue parado tras dos avisos y el orquestador no reparte trabajo: mira si necesita algo de ti' });
+          this._attention(leadThread, 'parado', 'El equipo está parado: el orquestador no reparte trabajo');
+          h._push?.(leadThread, 'Equipo parado', 'Nadie trabaja y el orquestador no reparte trabajo', `parado${Math.round(lastActivity)}`);
+          h._changed(leadThread);
+        }
+        continue;
+      }
+      team.nudges = (team.nudges ?? 0) + 1;
+      const lines = members.filter(({ m }) => m !== lead).map(({ m, t }) => {
+        const lastSaid = [...t.items].reverse().find((i) => i.kind === 'assistant' && i.text && !i.teamSkip);
+        if (!lastSaid) return `- ${m.name}: no ha dicho nada aún`;
+        const head = withoutOrders(lastSaid.text).split('\n').map((l) => l.trim()).filter(Boolean);
+        const state = head.find((l) => /^\**ESTADO/i.test(l)) ?? head[0] ?? '';
+        return `- ${m.name}: libre desde las ${hhmm(lastSaid.date ?? lastActivity)} · «${clip(state.replace(/\*/g, ''), 160)}»`;
+      });
+      const minutes = Math.round((nowS - lastActivity) / 60);
+      h.log?.(`equipo: lleva ${minutes} min parado; se avisa a ${lead.name}`);
+      this._deliver(team, lead, `El equipo lleva ${minutes} min parado: nadie trabaja ni espera un trabajo en segundo plano, y no hay mensajes en camino.\n${lines.join('\n')}\nSi queda trabajo hacia el objetivo, repártelo ahora. Si de verdad estáis esperando algo del usuario, dilo en una línea y no repartas.`, { name: 'Relevo', role: 'relevo', label: 'vigilante' });
     }
   }
 
@@ -1150,7 +1279,52 @@ export class Teams {
 
   _toLead(team, from, kind, text) {
     const lead = team.members.find((m) => m.role === 'orchestrator');
-    if (lead) this._deliver(team, lead, text, { threadId: from.threadId, name: from.name, role: from.role, label: kind });
+    if (!lead) return null;
+    // Its pending order comes back with its report: the orchestrator decides with fresh information.
+    if (from.parked && !from.parked.offered) {
+      const at = new Date(from.parked.at * 1000).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
+      text += `\n\n(Pendiente para ${from.name} desde las ${at}, no se le pudo dar porque estaba trabajando: «${clip(from.parked.text.replace(/\s+/g, ' '), 300)}». Si en esta respuesta no le das otra orden, Relevo se la entrega tal cual al terminar tu turno.)`;
+      from.parked.offered = true;
+    }
+    const res = this._deliver(team, lead, text, { threadId: from.threadId, name: from.name, role: from.role, label: kind });
+    if (['sent', 'queued', 'held'].includes(res)) from.lastToLeadAt = Date.now() / 1000;
+    this.host.log?.(`equipo: ${kind} de ${from.name} → ${lead.name}: ${res}`);
+    return res;
+  }
+
+  /**
+   * The outbox: each message the orchestrator sent and what became of it. Its next message carries what changed
+   * («entregada», «en cola», «pendiente»…), so it never has to guess whether something arrived.
+   */
+  _sent(team, type, to, body, result) {
+    const h = this.host;
+    const entry = { id: (team.nextOut = (team.nextOut ?? 0) + 1), type, to: to.name, what: clip(String(body).replace(/\s+/g, ' '), 90), at: Date.now() / 1000, result };
+    // In a queue: which entry, to tell when it's read.
+    if (result === 'queued') entry.queueId = h.threads.get(to.threadId)?.queued.find((q) => q.team)?.id ?? null;
+    if (result === 'parked' && to.parked) to.parked.outId = entry.id;
+    team.outbox = [...(team.outbox ?? []), entry].slice(-30);
+    if (['sent', 'queued', 'parked'].includes(result)) team.nudges = 0; // work is moving again
+    h.log?.(`equipo: ${type} → ${to.name}: ${result}`);
+    return { type, to: to.name, result };
+  }
+
+  /** Outbox lines the orchestrator hasn't read yet; a queued one reads «entregada» once its turn takes it. */
+  _outboxNews(team) {
+    const h = this.host;
+    const lines = [];
+    for (const e of team.outbox ?? []) {
+      if (e.result === 'queued' || e.result === 'parked') {
+        const m = findMember(team, e.to);
+        const t = m && h.threads.get(m.threadId);
+        const stillQueued = e.result === 'queued' && t?.queued.some((q) => q.id === e.queueId);
+        const stillParked = e.result === 'parked' && m?.parked?.outId === e.id;
+        if (!stillQueued && !stillParked) { e.result = 'sent'; e.shown = false; }
+      }
+      if (e.shown) continue;
+      e.shown = true;
+      lines.push(`${new Date(e.at * 1000).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })} ${e.type} → ${e.to} («${e.what}»): ${RESULT[e.result] ?? e.result}`);
+    }
+    return lines.slice(-8);
   }
 
   _order(team, lead, o) {
@@ -1171,7 +1345,7 @@ export class Teams {
         const res = this._deliver(team, to, `${notes}${o.body}`, { ...from, label: o.type === 'urgente' ? 'urgente' : 'tarea' }, false, o.type === 'urgente');
         // On the board only what really went out (not what bounced off someone busy or is held in a pause).
         if (res === 'sent' || res === 'queued') { to.stash = []; this._setTask(to, 'en curso', clip(o.body.replace(/\s+/g, ' '), 140)); }
-        return;
+        return this._sent(team, o.type, to, o.body, res);
       }
       case 'investigar': {
         if (!researcher) { complain('Este equipo no tiene investigador: busca tú o pide al usuario que lo añada.'); return; }
@@ -1183,8 +1357,8 @@ export class Teams {
         const unseen = rt?.teamPrimed ? (team.findings ?? []).filter((f) => f.id > (researcher.findingsSeen ?? 0)) : [];
         const extra = unseen.length ? `\n\n(Investigado desde tu última consulta:\n${unseen.map(findingLine).join('\n')})` : '';
         const res = this._deliver(team, researcher, `${o.body}${extra}`, { ...from, label: researcher.reportFor ? `investigación para ${researcher.reportFor}` : 'investigación' });
-        if (res === 'sent' || res === 'queued') researcher.findingsSeen = team.nextFinding ?? 0;
-        return;
+        if (res === 'sent' || res === 'queued') { researcher.findingsSeen = team.nextFinding ?? 0; this._setTask(researcher, 'en curso', clip(o.body.replace(/\s+/g, ' '), 140)); }
+        return this._sent(team, 'investigar', researcher, o.body, res);
       }
       case 'respuesta': {
         // Without para=: whoever is waiting for an answer, if only one is; else the only executor.
@@ -1199,19 +1373,19 @@ export class Teams {
           h._resolve(t, pending.id, null, answers);
           h._append(t, { id: h._uuid(), kind: 'notice', text: `${lead.name} ha respondido por ti` });
           h._changed(t);
-          return;
+          return this._sent(team, 'respuesta', to, o.body, 'answered');
         }
         if (to.awaitingAnswer) {
-          this._deliver(team, to, o.body, { ...from, label: 'respuesta' });
+          const res = this._deliver(team, to, o.body, { ...from, label: 'respuesta' });
           to.awaitingAnswer = false;
-          return;
+          return this._sent(team, 'respuesta', to, o.body, res);
         }
         // It hadn't asked anything (an acknowledgement, a comment): opening a turn for that costs its whole
         // context. It's kept and goes with its next task.
         to.stash = [...(to.stash ?? []), clip(o.body.replace(/\s+/g, ' '), 300)].slice(-4);
         h._append(leadThread, { id: h._uuid(), kind: 'notice', text: `Respuesta guardada para la próxima tarea de ${to.name} (no había preguntado nada)` });
         h._changed(leadThread);
-        return;
+        return this._sent(team, 'respuesta', to, o.body, 'stashed');
       }
       case 'integrar': {
         const to = o.to ? findMember(team, o.to) : null;
@@ -1277,9 +1451,10 @@ export class Teams {
     // for it, and can read a message (and an answer to its own question always goes).
     const midTurn = target && h._rt(target).isRunning;
     const answer = from.label === 'respuesta' && member.awaitingAnswer;
-    if (midTurn && !urgent && !answer && member.role !== 'orchestrator' && (from.role === 'orchestrator' || from.role === 'researcher')) {
-      this._bounce(team, member, text, from);
-      return 'bounced';
+    // Writing its handoff note for Relevo isn't work: what arrives meanwhile waits and goes to its new session.
+    const handoff = member.noteRequested;
+    if (midTurn && !urgent && !answer && !handoff && member.role !== 'orchestrator' && (from.role === 'orchestrator' || from.role === 'researcher')) {
+      return this._bounce(team, member, text, from);
     }
     if (team.status === 'paused' && !resumed) { this._hold(team, member, text, from); return 'held'; }
     team.auto += 1;
@@ -1320,7 +1495,8 @@ export class Teams {
       h.sendNow(t, text, { ...meta, prompt: `${prompt}\n\n(Esto interrumpe lo que estabas haciendo: atiéndelo primero.)` });
       return 'sent';
     }
-    if (r.isRunning || r.approvals.size) {
+    // Busy, or seconds away from the model change you asked for: it reads this when it's ready.
+    if (r.isRunning || r.approvals.size || h._switchSoon?.(t)) {
       // Whatever arrives for someone busy goes as one message when its turn ends, not one turn per message.
       const waiting = t.queued.find((q) => q.team);
       if (waiting) this._merge(waiting, header, text, prompt, member.role);
@@ -1409,6 +1585,20 @@ export class Teams {
   _bounce(team, member, text, from) {
     const h = this.host;
     const lead = this._lead(team);
+    // An order for someone mid-turn is kept (the latest one): the orchestrator sees it again with that agent's
+    // report and either gives another order or lets Relevo deliver this one. It is never just dropped.
+    if (from.role === 'orchestrator') {
+      const prev = member.parked;
+      const old = prev?.outId && team.outbox?.find((x) => x.id === prev.outId);
+      if (old) { old.result = 'replaced'; old.shown = false; }
+      member.parked = { text, from, label: from.label ?? null, at: Date.now() / 1000, offered: false };
+      if (lead) {
+        h._append(lead, { id: h._uuid(), kind: 'notice', text: `Pendiente para ${member.name} (está a mitad de un turno): se le entrega cuando termine, salvo que al leer su informe le des otra orden` });
+        h._changed(lead);
+      }
+      h._saveState();
+      return 'parked';
+    }
     const what = clip(text.replace(/\s+/g, ' '), 140);
     team.notes = [...(team.notes ?? []), `No entregado a ${member.name}, que estaba a mitad de un turno: «${what}». No se le entregará solo: cuando llegue su informe, vuelve a dárselo si sigue valiendo (o usa urgente si no podía esperar).`].slice(-6);
     if (lead) {
@@ -1416,6 +1606,34 @@ export class Teams {
       h._changed(lead);
     }
     h._saveState();
+    return 'bounced';
+  }
+
+  /**
+   * After the orchestrator's turn: a pending order it was shown again goes now, unless it gave that agent
+   * something else in this turn (then it's dropped: the new order replaces it).
+   */
+  _offerParked(team, sent) {
+    for (const m of team.members) {
+      if (!m.parked || m.role === 'orchestrator') continue;
+      // Another order that reached it in this turn replaces the pending one (the pending one itself doesn't count).
+      if (sent.some((x) => x.to === m.name && x.result !== 'parked' && ['tarea', 'urgente', 'investigar', 'respuesta'].includes(x.type))) {
+        const e = team.outbox?.find((x) => x.id === m.parked.outId);
+        if (e) { e.result = 'dropped'; e.shown = false; }
+        m.parked = null;
+      } else if (m.parked.offered) this._deliverParked(team, m);
+    }
+  }
+
+  _deliverParked(team, m) {
+    const p = m.parked;
+    if (!p) return;
+    m.parked = null;
+    const res = this._deliver(team, m, p.text, p.from);
+    const e = team.outbox?.find((x) => x.id === p.outId);
+    if (e && res !== 'parked') { e.result = res; e.shown = false; }
+    if ((res === 'sent' || res === 'queued') && ['tarea', 'urgente'].includes(p.label)) this._setTask(m, 'en curso', clip(p.text.replace(/\s+/g, ' '), 140));
+    this.host.log?.(`equipo: orden pendiente → ${m.name}: ${res}`);
   }
 
   /** Adds a message to the one already waiting for a member. */
@@ -1441,10 +1659,13 @@ export class Teams {
       const state = r.approvals.size ? 'esperando una respuesta o una aprobación' : r.isRunning ? 'trabajando'
         : r.backgroundTasks?.length ? `esperando un trabajo en segundo plano (${r.backgroundTasks.map((b) => b.description).slice(0, 2).join(', ')})` : 'libre';
       const task = m.task?.text ? ` · tarea «${clip(m.task.text, 90)}» (${m.task.state} desde las ${new Date(m.task.since * 1000).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })})` : '';
-      return `${m.name} ${state}${waiting ? `, con ${waiting} mensaje${waiting === 1 ? '' : 's'} sin entregar` : ''}${task}`;
+      const parked = m.parked ? `, con una orden tuya pendiente de darle al terminar («${clip(m.parked.text.replace(/\s+/g, ' '), 60)}»)` : '';
+      return `${m.name} ${state}${waiting ? `, con ${waiting} mensaje${waiting === 1 ? '' : 's'} en cola que leerá al terminar` : ''}${parked}${task}`;
     }).filter(Boolean);
     const paused = team.status === 'paused' ? `EQUIPO EN PAUSA: tus órdenes se retienen sin entregar hasta que el usuario las revise (${team.held.length} retenidas). ` : '';
-    return `${paused}Estado del equipo: ${parts.join(' | ')}`;
+    const news = this._outboxNews(team);
+    const out = news.length ? `\nQué ha sido de tus mensajes: ${news.join(' | ')}` : '';
+    return `${paused}Estado del equipo: ${parts.join(' | ')}${out}`;
   }
 }
 

@@ -18,7 +18,7 @@ const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'relevo-team-'));
 const port = 41000 + Math.floor(Math.random() * 8000);
 const env = {
   ...process.env, RELEVO_HOST_DATA: path.join(dir, 'data'), RELEVO_PROJECTS: path.join(dir, 'projects'), RELEVO_PORT: String(port),
-  RELEVO_FAKE_AGENT: '1', RELEVO_SUPERVISE: '0', RELEVO_ENV_FILE: path.join(dir, 'none.env'),
+  RELEVO_FAKE_AGENT: '1', RELEVO_SUPERVISE: '0', RELEVO_ENV_FILE: path.join(dir, 'none.env'), RELEVO_SWITCH_AFTER_JOB: '2',
 };
 let service, peer, snapshot, team, lead;
 const demo = () => snapshot.projects.find((p) => p.name === 'demo').id;
@@ -63,6 +63,7 @@ before(async () => {
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`host didn't start:\n${out}`)), 20_000);
     service.stdout.on('data', (d) => { out += d; if (out.includes('listening on')) { clearTimeout(timer); resolve(); } });
+    if (process.env.TEAM_LOG) service.stdout.on('data', (d) => fs.appendFileSync(process.env.TEAM_LOG, d));
   });
   const info = parsePairingLink(execFileSync(process.execPath, [SCRIPT, 'pair'], { env }).toString().trim());
   peer = await connectCompanion({ host: '127.0.0.1', port, serverId: info.serverId, secret: Buffer.from(info.key, 'base64url') });
@@ -226,7 +227,7 @@ test('editing a team keeps its threads and tells the orchestrator what changed',
   assert.match(text, /Nuevo objetivo:[\s\S]*Solo traducciones[\s\S]*pasa a Codex[\s\S]*ha salido del equipo[\s\S]*Se une el Investigador/);
 });
 
-test("orders for a busy executor go back to the orchestrator instead of piling up", async () => {
+test("an order for a busy executor waits as pending, comes back with its report, and goes if not replaced", async () => {
   const claude = snapshot.accounts.find((a) => a.kind === 'claude');
   const r = await request('createTeam', { team: { projectId: demo(), goal: 'Cola', orchestrator: { accountId: claude.id }, executors: [{ accountId: claude.id }], researcher: null } });
   assert.ok(r.ok, r.error);
@@ -237,20 +238,22 @@ test("orders for a busy executor go back to the orchestrator instead of piling u
   peer.send(Client.send(boss, '<relevo:tarea para="Ejecutor">pregunta algo</relevo:tarea>'));
   await next((m) => m.threadPatch?._0.id === boss && m.threadPatch._0.upserts.some((i) => i.from?.label === 'pregunta'));
   await next((m) => m.threadPatch?._0.id === boss && !m.threadPatch._0.runtime.isRunning && !m.threadPatch._0.runtime.queued?.length);
-  // …so a normal order for it isn't queued: the orchestrator is told instead.
+  // …so a normal order for it isn't queued: it's kept pending, and the orchestrator is told.
   peer.send(Client.send(boss, '<relevo:tarea para="Ejecutor">haz A</relevo:tarea>'));
-  await next((m) => m.threadPatch?._0.id === boss && m.threadPatch._0.upserts.some((i) => i.kind === 'notice' && /No entregado a Ejecutor/.test(i.text)));
+  await next((m) => m.threadPatch?._0.id === boss && m.threadPatch._0.upserts.some((i) => i.kind === 'notice' && /Pendiente para Ejecutor/.test(i.text)));
   const snap = (await next((m) => m.snapshot?._0.hostTeams?.some((x) => x.goal === 'Cola'))).snapshot._0;
   const exId = snap.hostTeams.find((x) => x.goal === 'Cola').members.find((m) => m.role === 'executor').threadId;
   peer.send(Client.subscribe(exId));
   const ex = (await next((m) => m.thread?._0.id === exId)).thread._0;
   assert.equal(ex.runtime.queued?.length ?? 0, 0, 'nothing waiting for the executor');
-  // Once it answers and finishes, its report reaches the orchestrator with a note of what wasn't delivered.
+  // Once it answers and finishes, its report reaches the orchestrator with the pending order beside it…
   const q = ex.items.find((i) => i.kind === 'approval' && !i.resolution);
   peer.send(Client.answer(exId, q.id, { [q.questions[0].question]: 'Azul' }));
   peer.send(Client.subscribe(boss));
   const report = await next((m) => m.threadPatch?._0.id === boss && m.threadPatch._0.upserts.some((i) => i.from?.label === 'informe'));
-  assert.match(report.threadPatch._0.upserts.find((i) => i.from?.label === 'informe').text, /No entregado a Ejecutor[\s\S]*haz A/);
+  assert.match(report.threadPatch._0.upserts.find((i) => i.from?.label === 'informe').text, /Pendiente para Ejecutor[\s\S]*haz A/);
+  // …and the orchestrator gives it nothing else in that reply, so the pending order goes as it was.
+  await next((m) => m.threadPatch?._0.id === boss && m.threadPatch._0.upserts.some((i) => i.kind === 'notice' && /Entregas: tarea → Ejecutor|orden pendiente/.test(i.text ?? '')) || m.snapshot?._0.hostTeams?.find((x) => x.goal === 'Cola')?.members.find((x) => x.role === 'executor')?.task?.text === 'haz A', 20_000);
 });
 
 test('orders: para= among other attributes, and integrar de=', () => {
@@ -507,5 +510,25 @@ test("a turn that ends with a model change waiting still reports to the orchestr
   peer.send(Client.send(boss, '<relevo:tarea para="Ejecutor">segundo plano</relevo:tarea>'));
   await new Promise((res) => setTimeout(res, 300));
   peer.send(Client.select(exec, codex.id, 'default'));
+  await next((m) => m.threadPatch?._0.id === boss && m.threadPatch._0.upserts.some((i) => i.kind === 'user' && /Compilación terminada/.test(i.text ?? '')), 25_000);
+  // Only then, with the agent fully idle, does it change model.
+  await next((m) => m.snapshot?._0.threads.find((x) => x.id === exec)?.accountId === codex.id, 20_000);
+});
+
+test('after running out of quota and waiting, what an executor reports still reaches the orchestrator', async () => {
+  const claude = snapshot.accounts.find((a) => a.kind === 'claude');
+  const r = await request('createTeam', { team: { projectId: demo(), goal: 'Espera cuota', orchestrator: { accountId: claude.id }, executors: [{ accountId: claude.id, fallback: 'wait' }], researcher: null } });
+  const boss = r.threadId;
+  peer.send(Client.subscribe(boss));
+  await next(firstDone(boss));
+  const team = (await next((m) => m.snapshot?._0.hostTeams?.some((x) => x.goal === 'Espera cuota'))).snapshot._0.hostTeams.find((x) => x.goal === 'Espera cuota');
+  const exec = team.members[1].threadId;
+  peer.send(Client.send(boss, '<relevo:tarea para="Ejecutor">agota la cuota</relevo:tarea>'));
+  await new Promise((res) => setTimeout(res, 1500)); // its turn ends at once on the limit
+  // The quota is back: it carries on by itself, and that turn is a report like any other.
+  peer.send(Client.limitAction(exec, 'resumeNow'));
+  await next((m) => m.threadPatch?._0.id === boss && m.threadPatch._0.upserts.some((i) => i.kind === 'user' && /Sigue con la tarea/.test(i.text ?? '')), 20_000);
+  // And the next order's report too, also when it comes from the turn a background job wakes up.
+  peer.send(Client.send(boss, '<relevo:tarea para="Ejecutor">segundo plano</relevo:tarea>'));
   await next((m) => m.threadPatch?._0.id === boss && m.threadPatch._0.upserts.some((i) => i.kind === 'user' && /Compilación terminada/.test(i.text ?? '')), 25_000);
 });
