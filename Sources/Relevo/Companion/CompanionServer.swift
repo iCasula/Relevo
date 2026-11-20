@@ -182,7 +182,7 @@ final class CompanionPeer {
 
     private func receive(_ data: Data) {
         guard let message = try? CompanionCoding.decode(ClientMessage.self, from: data) else { return }
-        if case .hello(let device, _) = message {
+        if case .hello(let device, _, _) = message {
             deviceName = device
             greeted = true
             server?.peerIdentified(self)

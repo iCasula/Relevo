@@ -337,10 +337,10 @@ export class ClaudeSession extends EventEmitter {
     options.push({ id: 'deny', label: 'Denegar', isAllow: false });
     this.emit('approval', {
       key, title: `${req.display_name ?? req.tool_name}: ${toolTitle(req.tool_name, input)}`, detail, options, questions: null, toolName: req.tool_name, input,
-      respond: (choice) => {
+      respond: (choice, answers, note) => {
         if (choice === 'allow') this._respond(rid, { behavior: 'allow', updatedInput: input });
         else if (choice === 'session') this._respond(rid, { behavior: 'allow', updatedInput: input, updatedPermissions: suggestions.map((s) => ({ ...s, destination: 'session' })) });
-        else this._respond(rid, { behavior: 'deny', message: 'El usuario ha denegado esta acción desde Relevo.' });
+        else this._respond(rid, { behavior: 'deny', message: note || 'El usuario ha denegado esta acción desde Relevo.' });
       },
     });
   }
@@ -533,8 +533,20 @@ export class FakeSession extends EventEmitter {
       });
       return;
     }
+    // «copia fuera»: a copy outside the project, which the guard stops but the orchestrator may approve.
+    if (/^copia fuera/i.test(text)) {
+      const command = 'cp build/a.bin /opt/fuera/a.bin';
+      this.emit('toolStarted', `tool${turn}`, 'Bash', command, { command });
+      this.emit('approval', {
+        key: `tool${turn}`, title: `Bash: ${command}`, detail: null, questions: null, toolName: 'Bash', input: { command },
+        options: [{ id: 'allow', label: 'Permitir', isAllow: true }, { id: 'session', label: 'Permitir en esta sesión', isAllow: true }, { id: 'deny', label: 'Denegar', isAllow: false }],
+        respond: (choice, answers, note) => { this.emit('toolFinished', `tool${turn}`, choice !== 'deny', choice !== 'deny' ? `copiado (${choice})` : `Denegado: ${note ?? ''}`); finish(); },
+      });
+      return;
+    }
     // The team's status Relevo adds at the end («…una pregunta o un permiso») isn't a request.
-    if (/permiso/i.test(text.replace(/\n\n\((?:EQUIPO EN PAUSA[^\n]*?)?Estado del equipo:[\s\S]*$/, '')) && !text.includes('<relevo_handoff>')) {
+    // (Nor is a teammate's permission the orchestrator is asked to decide.)
+    if (/permiso/i.test(text.replace(/\n\n\((?:EQUIPO EN PAUSA[^\n]*?)?Estado del equipo:[\s\S]*$/, '')) && !text.includes('<relevo_handoff>') && !/pide permiso para/.test(text)) {
       this.emit('toolStarted', `tool${turn}`, 'Bash', 'echo hola', { command: 'echo hola' });
       this.emit('approval', {
         key: `tool${turn}`, title: 'Bash: echo hola', detail: 'Prueba de permiso', questions: null, toolName: 'Bash', input: { command: 'echo hola' },

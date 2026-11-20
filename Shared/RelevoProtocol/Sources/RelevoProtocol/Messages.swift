@@ -2,7 +2,8 @@ import Foundation
 
 /// iPhone → Mac.
 public enum ClientMessage: Codable, Sendable {
-    case hello(device: String, version: Int)
+    /// `features`: what this client understands beyond version 1 ("snapshotPatch": see `SnapshotPatch`).
+    case hello(device: String, version: Int, features: [String]? = nil)
     /// The thread the companion is looking at (nil = none). The Mac then streams its transcript.
     case subscribe(threadId: UUID?)
     /// Sent while the agent works, it is queued on the Mac and goes out when the turn ends.

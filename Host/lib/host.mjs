@@ -22,6 +22,7 @@ import { buildAccount, API_PRESETS, ACP_PRESETS, TYPES } from './accounts.mjs';
 import { Teams, fallbackOf } from './team.mjs';
 import { checkRequest, guardRoots } from './guard.mjs';
 import { APNs, validKey } from './apns.mjs';
+import { diffSnapshot } from '../ui/state.mjs';
 
 const PROTOCOL_VERSION = 1;
 const MAX_STORED_ITEMS = 1500;
@@ -59,7 +60,7 @@ export function modelScore(m, tier) {
 }
 /** What this host does beyond the shared protocol; clients show those controls only when listed. */
 export const HOST_FEATURES = ['teams', 'projects', 'threads', 'git', 'images', 'usage', 'login', 'settings', 'limitPlans', 'history', 'titles', 'accounts',
-  'turns', 'worktrees', 'pullRequests', 'suggest', 'quickActions', 'attachments', 'teamRename', 'teamDecisions', 'teamMemory', 'smartFallback', 'teamBudget', 'teamHeld', 'guard', 'push', 'waitHere'];
+  'turns', 'worktrees', 'pullRequests', 'suggest', 'quickActions', 'attachments', 'teamRename', 'teamDecisions', 'teamMemory', 'smartFallback', 'teamBudget', 'teamHeld', 'guard', 'push', 'waitHere', 'leadApproves'];
 const IMAGE_UPLOAD = /\.(png|jpe?g|gif|webp)$/i;
 
 /** Providers this host can run. Each account is one provider with its own CLI login on this machine. */
@@ -376,6 +377,7 @@ export class Host {
     if (name === 'hello') {
       peer.greeted = true;
       peer.device = a.device;
+      peer.patches = Array.isArray(a.features) && a.features.includes('snapshotPatch');
       this.log(`iPhone connected: ${a.device} from ${peer.remote}`);
       peer.send({ welcome: { name: this.config.name, version: PROTOCOL_VERSION } });
       peer.send({ addresses: { hosts: localAddresses(), port: this.config.port } });
@@ -491,6 +493,7 @@ export class Host {
       case 'updateTeam': run(() => this.teams.update(String(a.teamId).toUpperCase(), a.changes ?? {})); break;
       case 'teamDecisions': run(() => this.teams.editDecisions(String(a.teamId).toUpperCase(), { add: a.add, remove: a.remove })); break;
       case 'setGuard': if (t) run(() => { this.setGuard(t, a.on); return {}; }); else if (a.teamId) run(() => this.teams.setGuard(String(a.teamId).toUpperCase(), a.on)); break;
+      case 'setLeadApproves': run(() => this.teams.setLeadApproves(String(a.teamId).toUpperCase(), a.on)); break;
       case 'teamHeld': run(() => this.teams.reviewHeld(String(a.teamId).toUpperCase(), String(a.id ?? ''), a.action === 'send' ? 'send' : 'discard')); break;
       case 'teamMemory': run(() => this.teams.editMemory(String(a.teamId).toUpperCase(), { kind: a.kind, add: a.add, remove: a.remove, toggle: a.toggle })); break;
       case 'pullRequest': if (t) run(async () => ({ pr: await gitops.pullRequest(t.projectPath) })); break;
@@ -1482,6 +1485,9 @@ export class Host {
       });
       r.approvals.set(it.id, req.respond);
       r.statusLine = it.questions?.length ? 'Esperando tu respuesta…' : held ? 'Relevo ha detenido una acción: espera tu permiso' : 'Esperando tu aprobación…';
+      // In a team, the orchestrator decides first on what can be undone (a write outside the project, an ordinary
+      // permission); what can't be undone is always yours.
+      if (held && !held.critical && this.teams.onApproval(t, it, req, held)) { this._changed(t); return; }
       if (held) {
         t.attention = { kind: 'guard', text: `${held.reason}: ${String(req.command ?? req.title ?? '').slice(0, 160)}`, at: now() };
         this._push(t, `Relevo ha detenido una acción · ${t.team?.name ?? t.title}`, `${held.reason}. Decide tú si se hace.`, 'guard');
@@ -1637,7 +1643,7 @@ export class Host {
     this._startTurn(t, q.text, false, { prompt: q.prompt, from: q.from });
   }
 
-  _resolve(t, itemId, optionId, answers) {
+  _resolve(t, itemId, optionId, answers, note = null) {
     const r = this._rt(t);
     const respond = r.approvals.get(itemId);
     const it = this._item(t, itemId);
@@ -1650,11 +1656,11 @@ export class Host {
     } else {
       const option = (it.options ?? []).find((o) => o.id === optionId);
       it.resolution = option?.label ?? optionId;
-      respond(optionId, null);
+      respond(optionId, null, note);
     }
     r.statusLine = 'Pensando…';
-    // The action Relevo stopped has been decided: the thread no longer waits for you.
-    if (t.attention?.kind === 'guard' && ![...r.approvals.keys()].some((id) => this._item(t, id)?.guard)) { delete t.attention; this._broadcastSnapshot(); }
+    // The action Relevo stopped (or the orchestrator passed on to you) has been decided: the thread no longer waits.
+    if (t.attention?.kind === 'guard' && ![...r.approvals.keys()].some((id) => { const x = this._item(t, id); return x?.guard || x?.escalated; })) { delete t.attention; this._broadcastSnapshot(); }
     this._touch(t, it);
     this._changed(t);
   }
@@ -1991,6 +1997,7 @@ export class Host {
         findings: (x.findings ?? []).map((f) => ({ id: f.id, topic: f.topic, summary: f.summary, links: f.links ?? [], by: f.by, at: f.at })),
         budget: x.budget ?? undefined,
         guard: x.members.every((m) => { const t = this.threads.get(m.threadId); return !t || this._guarded(t); }),
+        leadApproves: x.leadApproves !== false,
         heldList: this.teams.heldList(x), pausedBy: x.pausedBy ?? undefined,
         members: x.members.map((m) => { const t = this.threads.get(m.threadId); return clean({ threadId: m.threadId, role: m.role, name: m.name, notes: m.notes, accountId: t?.accountId, model: t?.model ?? 'default', task: m.task ?? undefined, stash: m.stash?.length || undefined, fallback: t ? fallbackOf(t.limitPlan) : undefined, home: t?.home && this.accountsById.has(t.home.accountId) ? { accountId: t.home.accountId, model: t.home.model || 'default' } : undefined, today: t ? this._spendToday(t) : undefined }); }) })),
       hostSettings: { ...settings, limitPlanSummary: this._planSummary(settings.limitPlan), accounts: this._accountDefs() },
@@ -2101,12 +2108,15 @@ export class Host {
     }, 300);
   }
 
+  /** The whole snapshot on hello; after that only what changed, to clients that take patches. */
   _sendSnapshot(peer, force = false) {
-    const snap = this._snapshot();
-    const json = JSON.stringify(snap);
-    if (!force && json === peer.lastSnapshot) return;
-    peer.lastSnapshot = json;
-    peer.send({ snapshot: { _0: snap } });
+    const snap = JSON.parse(JSON.stringify(this._snapshot())); // as the peer will read it (no undefined)
+    const prev = peer.lastSnapshot;
+    peer.lastSnapshot = snap;
+    if (force || !prev) { peer.send({ snapshot: { _0: snap } }); return; }
+    const patch = diffSnapshot(prev, snap);
+    if (!patch) return;
+    peer.send(peer.patches ? { snapshotPatch: { _0: patch } } : { snapshot: { _0: snap } });
   }
 
   _broadcastActivity() {

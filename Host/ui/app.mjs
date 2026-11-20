@@ -655,6 +655,7 @@ const ORDER = {
   pregunta: ['Pregunta', 'questionmark.bubble.fill'], integrar: ['Integrar', 'arrow.triangle.merge'],
   fin: ['Fin', 'checkmark.circle', true], decision: ['Decisión', 'checkmark.seal', true],
   descartar: ['Descartar', 'xmark.circle', true], hito: ['Hito', 'checklist', true], hecho: ['Hecho', 'checkmark.circle.fill', true],
+  aprobar: ['Permitir', 'checkmark.shield'], denegar: ['Denegar', 'xmark.octagon'], consultar: ['Consultar al usuario', 'hand.raised'],
 };
 /** The role of whoever an order goes to: from the team when the name is known, else from the name or the kind. */
 function recipientRole(o, roles) {
@@ -666,7 +667,7 @@ const teamRoles = (hostId) => {
   const team = id && teamOf(hostId, id);
   return team ? new Map(team.members.map((m) => [m.name.toLowerCase(), m.role])) : null;
 };
-const ORDER_TAG = /<relevo:(tarea|urgente|investigar|respuesta|pregunta|integrar|fin|decisi[oó]n|descartar|hito|hecho)\b([^>]*?)(?:\/>|>([\s\S]*?)<\/relevo:\1\s*>)/gi;
+const ORDER_TAG = /<relevo:(tarea|urgente|investigar|respuesta|pregunta|integrar|fin|decisi[oó]n|descartar|hito|hecho|aprobar|denegar|consultar)\b([^>]*?)(?:\/>|>([\s\S]*?)<\/relevo:\1\s*>)/gi;
 const ORDER_TO = /\b(?:para|de)\s*=\s*(?:["“']([^"”']+)["”']|([^\s"”'>/]+))/i;
 
 /** The reply cut into prose and orders, in order; tags inside code blocks stay text (as the host reads them). */

@@ -7,7 +7,9 @@
 // - formatting disks;
 // - deleting, moving or writing outside the project folder (its worktrees and the temp folder are fine);
 // - deleting through a path held in a variable, which can't be checked before it expands.
-// Those come to you as a permission request, with the reason.
+// Those come to you as a permission request, with the reason. In a team, only what can't be undone (deletions,
+// discarding work, disks) always waits for you: a write outside the project goes to the orchestrator first,
+// which approves it or passes it on to you (see Teams.onApproval).
 
 import os from 'node:os';
 import path from 'node:path';
@@ -55,7 +57,8 @@ export function normalize(p, platform = process.platform) {
   let s = String(p ?? '').trim().replace(/^["']|["']$/g, '');
   if (!s) return '';
   if (s.startsWith('~')) s = path.join(os.homedir(), s.slice(1));
-  const wsl = /^\/mnt\/([a-zA-Z])(?:\/(.*))?$/.exec(s);
+  // WSL's /mnt/v/x, and on Windows Git Bash's /v/x: both are V:\x.
+  const wsl = /^\/mnt\/([a-zA-Z])(?:\/(.*))?$/.exec(s) ?? (platform === 'win32' ? /^\/([a-zA-Z])(?:\/(.*))?$/.exec(s) : null);
   if (wsl) s = `${wsl[1].toUpperCase()}:\\${(wsl[2] ?? '').replace(/\//g, '\\')}`;
   const windows = platform === 'win32' || /^[A-Za-z]:[\\/]/.test(s);
   if (windows) {
@@ -94,9 +97,10 @@ export function guardRoots({ projectPath, worktreePath, extra = [] }) {
   return [projectPath, worktreePath, os.tmpdir(), process.env.TEMP, process.env.TMP, '/tmp', ...extra].filter(Boolean);
 }
 
-/** Why a shell command must wait for you, or null. */
+/** Why a shell command must wait for you, or null. `critical`: it can't be undone (only you decide those). */
 export function checkCommand(command, { roots = [], cwd = null, platform = process.platform } = {}) {
-  const cmd = String(command ?? '').trim();
+  // A heredoc's lines are text going into a file, not commands: «cat >> notes.md <<'EOF'» is judged, its body isn't.
+  const cmd = String(command ?? '').replace(/<<-?[ \t]*(["']?)([A-Za-z_]\w*)\1([^\n]*)\n[\s\S]*?\n[ \t]*\2[ \t]*(?=\n|$)/g, '<<$1$2$1$3').trim();
   if (!cmd) return null;
   // A wrapper's inner command counts too: bash -lc '…', powershell -Command "…", wsl -- …, cmd /c …
   const parts = cmd.split(SPLIT).flatMap((p) => {
@@ -105,27 +109,32 @@ export function checkCommand(command, { roots = [], cwd = null, platform = proce
   });
   for (const raw of parts) {
     const part = raw.replace(/^(?:wsl(?:\.exe)?\s+(?:-\S+\s+(?:\S+\s+)?)*--\s+|sudo\s+|env\s+(?:\S+=\S+\s+)*|exec\s+)/i, '').trim();
-    for (const [re, why] of DESTRUCTIVE) if (re.test(part)) return { reason: why };
+    for (const [re, why] of DESTRUCTIVE) if (re.test(part)) return { reason: why, critical: true };
     const deletes = DELETE_VERB.test(part);
-    const writes = deletes || WRITE_VERB.test(part) || /(?:^|[^>])>{1,2}\s*["']?(?:[A-Za-z]:[\\/]|\/(?!dev\/null)|~)/.test(part);
-    if (!writes) continue;
-    if (deletes && /\$\{?\w+|%\w+%|\$\(/.test(part.replace(DELETE_VERB, ''))) return { reason: 'borrado con una ruta en una variable (no se puede comprobar antes)' };
-    let checked = absolutePaths(part);
-    // A copy only writes its destination (its last argument, or -Destination); a move also takes away its source.
+    const verb = deletes || WRITE_VERB.test(part);
+    const redirects = [...part.matchAll(/(?:^|[^>&\d])\d?>{1,2}[ \t]*("[^"]+"|'[^']+'|[^\s;&|<>]+)/g)].map((m) => m[1].replace(/^["']|["']$/g, ''))
+      .filter((p) => /^(?:[A-Za-z]:[\\/]|\/|~)/.test(p) && !/^\/(?:dev\/(?:null|std)|tmp\b)/.test(p));
+    if (!verb && !redirects.length) continue;
+    if (deletes && /\$\{?\w+|%\w+%|\$\(/.test(part.replace(DELETE_VERB, ''))) return { reason: 'borrado con una ruta en una variable (no se puede comprobar antes)', critical: true };
+    // Only a redirect writes («objdump … > /tmp/x»): the program and the files it reads aren't written.
+    let checked = verb ? absolutePaths(part) : redirects;
+    // A copy only writes its destination (its last argument, or -Destination; robocopy's second); a move also
+    // takes away its source. Windows switches (/MIR, /LOG:…) aren't paths.
     if (/^(?:sudo\s+)?(?:cp|copy|Copy-Item|cpi|xcopy|robocopy|install|rsync)\b/i.test(part)) {
-      const args = words(part).slice(1).filter((w) => !w.startsWith('-') && !/^\/[A-Z]+$/.test(w));
-      const dest = /-Destination\s+("[^"]+"|'[^']+'|\S+)/i.exec(part)?.[1]?.replace(/^["']|["']$/g, '') ?? args[args.length - 1];
-      checked = dest && /^(?:[A-Za-z]:[\\/]|\\\\|~|\/)/.test(dest) ? [dest] : [];
+      const windows = /^(?:copy|xcopy|robocopy)\b/i.test(part);
+      const args = words(part).slice(1).filter((w) => !w.startsWith('-') && !(windows ? /^\/[A-Za-z]+(?::|$)/ : /^\/[A-Z]+$/).test(w));
+      const dest = /-Destination\s+("[^"]+"|'[^']+'|\S+)/i.exec(part)?.[1]?.replace(/^["']|["']$/g, '') ?? (/^robocopy\b/i.test(part) ? args[1] : args[args.length - 1]);
+      checked = [...(dest && /^(?:[A-Za-z]:[\\/]|\\\\|~|\/)/.test(dest) ? [dest] : []), ...redirects];
     }
     for (const p of checked) {
-      if (isRoot(p, platform)) return { reason: `opera sobre la raíz de un disco (${p})` };
-      if (!inside(p, roots, platform)) return { reason: `${deletes ? 'borra' : /^(?:mv|move|Move-Item|mi)\b/i.test(part) ? 'mueve' : 'escribe'} fuera de la carpeta del proyecto (${p})` };
+      if (isRoot(p, platform)) return { reason: `opera sobre la raíz de un disco (${p})`, critical: true };
+      if (!inside(p, roots, platform)) return { reason: `${deletes ? 'borra' : /^(?:mv|move|Move-Item|mi)\b/i.test(part) ? 'mueve' : 'escribe'} fuera de la carpeta del proyecto (${p})`, critical: deletes };
     }
     // ..\..\ out of the project from where it runs.
     if (cwd && /(?:^|[\s"'])\.\.[\\/]/.test(part)) {
       for (const m of part.matchAll(/(?:^|[\s"'])((?:\.\.[\\/])+[^\s"'|;&<>]*)/g)) {
         const abs = resolveFrom(cwd, m[1]);
-        if (!inside(abs, roots, platform)) return { reason: `${deletes ? 'borra' : 'escribe'} fuera de la carpeta del proyecto (${m[1]})` };
+        if (!inside(abs, roots, platform)) return { reason: `${deletes ? 'borra' : 'escribe'} fuera de la carpeta del proyecto (${m[1]})`, critical: deletes };
       }
     }
   }

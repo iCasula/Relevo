@@ -11,7 +11,15 @@ import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { connectCompanion } from '../lib/transport.mjs';
 import { parseOrders, withoutOrders, findMember } from '../lib/team.mjs';
-import { parsePairingLink, Client } from '../ui/state.mjs';
+import { parsePairingLink, Client, applySnapshotPatch } from '../ui/state.mjs';
+
+/** The host sends patches after the first snapshot: the tests read each one as the whole snapshot it makes. */
+let lastSnapshot = null, patches = 0;
+function wholeSnapshot(msg) {
+  if (msg.snapshotPatch) { patches++; msg = { snapshot: { _0: applySnapshotPatch(lastSnapshot, msg.snapshotPatch._0) } }; }
+  if (msg.snapshot) lastSnapshot = msg.snapshot._0;
+  return msg;
+}
 
 const SCRIPT = path.join(path.dirname(path.dirname(fileURLToPath(import.meta.url))), 'relevo-host.mjs');
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'relevo-team-'));
@@ -68,7 +76,7 @@ before(async () => {
   const info = parsePairingLink(execFileSync(process.execPath, [SCRIPT, 'pair'], { env }).toString().trim());
   peer = await connectCompanion({ host: '127.0.0.1', port, serverId: info.serverId, secret: Buffer.from(info.key, 'base64url') });
   peer.on('message', (data) => {
-    const msg = JSON.parse(data.toString('utf8'));
+    const msg = wholeSnapshot(JSON.parse(data.toString('utf8')));
     const w = waiters.find((x) => x.predicate(msg));
     if (w) { waiters.splice(waiters.indexOf(w), 1); w.resolve(msg); } else inbox.push(msg);
   });
@@ -274,6 +282,29 @@ test("an answer to someone who didn't ask isn't delivered: it goes with its next
   const fromEx = (i) => i.kind === 'user' && (i.from?.name === 'Ejecutor' || i.text?.includes('[Ejecutor · informe]'));
   const report = await next((m) => m.threadPatch?._0.id === boss && m.threadPatch._0.upserts.some(fromEx));
   assert.match(report.threadPatch._0.upserts.find(fromEx).text, /Notas anteriores del Orquestador: Recibido, sigue así[\s\S]*haz C/);
+});
+
+test('an answer to a blocked executor goes at once, even after it chatted with you', async () => {
+  const claude = snapshot.accounts.find((a) => a.kind === 'claude');
+  const r = await request('createTeam', { team: { projectId: demo(), goal: 'Atascos', orchestrator: { accountId: claude.id }, executors: [{ accountId: claude.id }], researcher: null } });
+  const boss = r.threadId;
+  peer.send(Client.subscribe(boss));
+  await next(firstDone(boss));
+  peer.send(Client.send(boss, '<relevo:tarea para="Ejecutor">Rebase parado.\nESTADO: bloqueado\nEl rebase se ha parado en un conflicto.</relevo:tarea>'));
+  await next((m) => m.threadPatch?._0.id === boss && m.threadPatch._0.upserts.some((i) => i.kind === 'user' && i.from?.name === 'Ejecutor'), 20_000);
+  const ex = snapshot.threads.find((t) => t.team?.id === r.teamId && t.team.role === 'executor')
+    ?? lastSnapshot.threads.find((t) => t.team?.id === r.teamId && t.team.role === 'executor');
+  // You say hello to it: its answer has no status line, and it stays blocked.
+  peer.send(Client.subscribe(ex.id));
+  await next((m) => m.thread?._0.id === ex.id);
+  peer.send(Client.send(ex.id, 'hola'));
+  await next((m) => m.threadPatch?._0.id === ex.id && !m.threadPatch._0.runtime.isRunning && m.threadPatch._0.upserts.some((i) => i.kind === 'assistant' && i.usage));
+  peer.send(Client.subscribe(boss));
+  await next((m) => m.thread?._0.id === boss);
+  peer.send(Client.send(boss, '<relevo:respuesta para="Ejecutor">Aborta el rebase</relevo:respuesta>'));
+  const receipt = await next((m) => m.threadPatch?._0.id === boss && m.threadPatch._0.upserts.some((i) => i.kind === 'notice' && /respuesta → Ejecutor/.test(i.text)));
+  assert.match(receipt.threadPatch._0.upserts.find((i) => /respuesta → Ejecutor/.test(i.text)).text, /entregada/);
+  assert.ok(patches > 0, 'the snapshot travels as patches after the first one');
 });
 
 test("waiting for a background job doesn't wake the orchestrator; the result does", async () => {
@@ -531,4 +562,57 @@ test('after running out of quota and waiting, what an executor reports still rea
   // And the next order's report too, also when it comes from the turn a background job wakes up.
   peer.send(Client.send(boss, '<relevo:tarea para="Ejecutor">segundo plano</relevo:tarea>'));
   await next((m) => m.threadPatch?._0.id === boss && m.threadPatch._0.upserts.some((i) => i.kind === 'user' && /Compilación terminada/.test(i.text ?? '')), 25_000);
+});
+
+test('a permission the guard holds goes to the orchestrator, which allows, denies or passes it on to you', async () => {
+  const claude = snapshot.accounts.find((a) => a.kind === 'claude');
+  // Earlier tests leave agents at work: room for this team's two.
+  assert.ok((await request('setSettings', { settings: { maxAgents: 8 } })).ok);
+  const made = await request('createTeam', { team: { projectId: demo(), goal: 'Copias del equipo', orchestrator: { accountId: claude.id }, executors: [{ accountId: claude.id }], researcher: null, mode: 'full' } });
+  assert.ok(made.ok, made.error);
+  const t = (await next((m) => m.snapshot?._0.hostTeams?.some((x) => x.goal === 'Copias del equipo'))).snapshot._0.hostTeams.find((x) => x.goal === 'Copias del equipo');
+  assert.equal(t.leadApproves, true, 'on by default');
+  const [boss, exec] = [t.members[0].threadId, t.members[1].threadId];
+  // One thread at a time: look at one until what it shows passes.
+  const see = (id, pass) => { peer.send(Client.subscribe(id)); return next((m) => (m.thread?._0.id === id && pass(m.thread._0.items, m.thread._0.runtime)) || (m.threadPatch?._0.id === id && pass(m.threadPatch._0.upserts, m.threadPatch._0.runtime)), 20_000); };
+  const bossIdle = (also = () => true) => see(boss, (items, rt) => !rt.isRunning && !rt.queued?.length && also(items));
+  const permit = (items) => items.find((x) => x.kind === 'user' && x.from?.label === 'permiso');
+  const lastTool = (items) => items.filter((i) => i.kind === 'tool').at(-1);
+  await bossIdle((items) => items.some((i) => i.kind === 'assistant'));
+
+  // Allowed: the whole command reaches it, with why Relevo stopped it; it allows it once (not for the session).
+  inbox.length = 0;
+  peer.send(Client.send(exec, 'copia fuera'));
+  const asked = await see(boss, (items) => permit(items));
+  assert.match(permit(asked.thread?._0.items ?? asked.threadPatch._0.upserts).text, /cp build\/a\.bin \/opt\/fuera\/a\.bin[\s\S]*escribe fuera de la carpeta del proyecto[\s\S]*relevo:aprobar para="Ejecutor"/);
+  await bossIdle();
+  peer.send(Client.send(boss, '<relevo:aprobar para="Ejecutor"/>'));
+  await see(exec, (items) => lastTool(items)?.output === 'copiado (allow)');
+  await see(exec, (items) => items.some((i) => i.kind === 'approval' && i.resolution === 'Permitido por Orquestador') && items.some((i) => i.kind === 'notice' && i.text === 'Orquestador lo ha permitido'));
+  await bossIdle();
+
+  // Denied: the agent reads why.
+  inbox.length = 0;
+  peer.send(Client.send(exec, 'copia fuera'));
+  await see(boss, (items) => permit(items));
+  await bossIdle();
+  peer.send(Client.send(boss, '<relevo:denegar para="Ejecutor">cópialo dentro de out/</relevo:denegar>'));
+  const denied = await see(exec, (items) => /^Denegado/.test(lastTool(items)?.output ?? ''));
+  assert.match(lastTool(denied.thread?._0.items ?? denied.threadPatch._0.upserts).output, /ha denegado esta acción: cópialo dentro de out\//);
+  await bossIdle();
+
+  // Passed on: it's yours, flagged in the sidebar; the orchestrator can no longer decide it.
+  inbox.length = 0;
+  peer.send(Client.send(exec, 'copia fuera'));
+  await see(boss, (items) => permit(items));
+  await bossIdle();
+  peer.send(Client.send(boss, '<relevo:consultar para="Ejecutor">toca /opt</relevo:consultar>'));
+  const flagged = await next((m) => m.snapshot?._0.threads?.some((x) => x.id === exec && x.attention?.kind === 'guard'), 20_000);
+  assert.match(flagged.snapshot._0.threads.find((x) => x.id === exec).attention.text, /prefiere que lo decidas tú: toca \/opt/);
+  await bossIdle();
+  peer.send(Client.send(boss, '<relevo:aprobar para="Ejecutor"/>'));
+  await see(boss, (items) => items.some((i) => i.kind === 'notice' && /aprobar → Ejecutor: no tenía ningún permiso esperando/.test(i.text ?? '')));
+  const card = (await see(exec, (items) => items.some((i) => i.kind === 'approval' && !i.resolution && i.escalated))).thread._0.items.find((i) => i.kind === 'approval' && !i.resolution);
+  peer.send(Client.approve(exec, card.id, 'deny'));
+  await next((m) => m.snapshot?._0.threads?.some((x) => x.id === exec && !x.attention), 20_000);
 });

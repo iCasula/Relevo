@@ -11,7 +11,15 @@ import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { connectCompanion } from '../lib/transport.mjs';
 import { handoffText } from '../lib/handoff.mjs';
-import { parsePairingLink, Client } from '../ui/state.mjs';
+import { parsePairingLink, Client, applySnapshotPatch } from '../ui/state.mjs';
+
+/** The host sends patches after the first snapshot: the tests read each one as the whole snapshot it makes. */
+let lastSnapshot = null, patches = 0;
+function wholeSnapshot(msg) {
+  if (msg.snapshotPatch) { patches++; msg = { snapshot: { _0: applySnapshotPatch(lastSnapshot, msg.snapshotPatch._0) } }; }
+  if (msg.snapshot) lastSnapshot = msg.snapshot._0;
+  return msg;
+}
 
 const SCRIPT = path.join(path.dirname(path.dirname(fileURLToPath(import.meta.url))), 'relevo-host.mjs');
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'relevo-handoff-'));
@@ -50,7 +58,7 @@ before(async () => {
   const info = parsePairingLink(execFileSync(process.execPath, [SCRIPT, 'pair'], { env }).toString().trim());
   peer = await connectCompanion({ host: '127.0.0.1', port, serverId: info.serverId, secret: Buffer.from(info.key, 'base64url') });
   peer.on('message', (data) => {
-    const msg = JSON.parse(data.toString('utf8'));
+    const msg = wholeSnapshot(JSON.parse(data.toString('utf8')));
     const w = waiters.find((x) => x.predicate(msg));
     if (w) { waiters.splice(waiters.indexOf(w), 1); w.resolve(msg); } else inbox.push(msg);
   });

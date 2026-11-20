@@ -22,6 +22,9 @@ struct AgentOrder: Hashable {
         case "descartar": "Descartar"
         case "hito": "Hito"
         case "hecho": "Hecho"
+        case "aprobar": "Permitir"
+        case "denegar": "Denegar"
+        case "consultar": "Consultar al usuario"
         default: type.capitalized
         }
     }
@@ -39,6 +42,9 @@ struct AgentOrder: Hashable {
         case "descartar": "xmark.circle"
         case "hito": "flag"
         case "hecho": "checkmark.circle"
+        case "aprobar": "checkmark.shield"
+        case "denegar": "xmark.octagon"
+        case "consultar": "hand.raised"
         default: "envelope"
         }
     }
@@ -68,7 +74,7 @@ struct AgentOrder: Hashable {
     }
 
     private static let tag = try! NSRegularExpression(
-        pattern: #"<relevo:(tarea|urgente|investigar|respuesta|pregunta|integrar|fin|decisi[oó]n|descartar|hito|hecho)\b([^>]*?)(?:/>|>([\s\S]*?)</relevo:\1\s*>)"#,
+        pattern: #"<relevo:(tarea|urgente|investigar|respuesta|pregunta|integrar|fin|decisi[oó]n|descartar|hito|hecho|aprobar|denegar|consultar)\b([^>]*?)(?:/>|>([\s\S]*?)</relevo:\1\s*>)"#,
         options: [.caseInsensitive])
     private static let fenced = try! NSRegularExpression(pattern: "```[\\s\\S]*?(?:```|$)")
     private static let attr = try! NSRegularExpression(pattern: #"\b(?:para|de)\s*=\s*(?:["“']([^"”']+)["”']|([^\s"”'>/]+))"#, options: [.caseInsensitive])

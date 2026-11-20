@@ -53,15 +53,17 @@ const STUCK_AFTER = Math.min(600, IDLE_NUDGE);
 /** A thread this quiet (seconds) has finished saying what it had to say. */
 const QUIET = Math.min(20, IDLE_NUDGE / 3);
 /** Orders that are messages for someone (the rest only change the team's memory). */
-const MESSAGE_ORDERS = ['tarea', 'urgente', 'investigar', 'respuesta', 'integrar', 'fin'];
+const MESSAGE_ORDERS = ['tarea', 'urgente', 'investigar', 'respuesta', 'integrar', 'fin', 'aprobar', 'denegar', 'consultar'];
+/** A permission the orchestrator hasn't decided in this long (seconds) goes to you. */
+export const PERMIT_WAIT = Number(process.env.RELEVO_PERMIT_WAIT ?? 600);
 
 // MARK: - Orders in the agents' replies
 
-const TAG = /<relevo:(tarea|urgente|investigar|respuesta|pregunta|integrar|fin|decisi[oó]n|descartar|hito|hecho)\b([^>]*?)(?:\/>|>([\s\S]*?)<\/relevo:\1\s*>)/gi;
+const TAG = /<relevo:(tarea|urgente|investigar|respuesta|pregunta|integrar|fin|decisi[oó]n|descartar|hito|hecho|aprobar|denegar|consultar)\b([^>]*?)(?:\/>|>([\s\S]*?)<\/relevo:\1\s*>)/gi;
 const FENCED = /```[\s\S]*?(?:```|$)/g;
 const orderSig = (o) => `${o.type}|${o.to ?? ''}|${o.body}`;
 /** What became of a message, as the orchestrator and you read it. */
-const RESULT = { sent: 'entregada', queued: 'en cola (la lee al terminar su turno)', bounced: 'no entregada: estaba a mitad de un turno', parked: 'pendiente: se la doy cuando termine su turno', held: 'retenida (equipo en pausa)', gone: 'no entregada: su hilo no existe', stashed: 'guardada para su próxima tarea', answered: 'respondida en su pregunta', replaced: 'sustituida por otra más reciente', dropped: 'descartada: le diste otra orden' };
+const RESULT = { sent: 'entregada', queued: 'en cola (la lee al terminar su turno)', bounced: 'no entregada: estaba a mitad de un turno', parked: 'pendiente: se la doy cuando termine su turno', held: 'retenida (equipo en pausa)', gone: 'no entregada: su hilo no existe', stashed: 'guardada para su próxima tarea', answered: 'respondida en su pregunta', approved: 'permitido', denied: 'denegado', escalated: 'pasado al usuario', nothing: 'no tenía ningún permiso esperando (ya estaba decidido)', replaced: 'sustituida por otra más reciente', dropped: 'descartada: le diste otra orden' };
 
 /** The orders in a reply, outside code blocks: [{ type, to, body }]. */
 export function parseOrders(text) {
@@ -224,6 +226,11 @@ ${executors.some((e) => host.threads.get(e.threadId)?.worktree) ? '<relevo:integ
 
 <relevo:urgente para="${executors[0]?.name ?? 'Ejecutor 1'}">…</relevo:urgente>  solo si lo que está haciendo ahora es claramente erróneo o ya no sirve: interrumpe su turno.
 
+Permisos: cuando un agente necesita permiso para algo que se puede deshacer (escribir fuera de la carpeta del proyecto, un comando que su modo no deja pasar), Relevo te lo pasa como «[${executors[0]?.name ?? 'Ejecutor 1'} · permiso]» con el comando entero, y el agente queda parado hasta que decidas. Lo irreversible (borrados, descartes de git, discos) va siempre directo al usuario.
+<relevo:aprobar para="${executors[0]?.name ?? 'Ejecutor 1'}"/>  si encaja con su tarea y sus rutas son las del proyecto o las herramientas que ya usa el equipo.
+<relevo:denegar para="${executors[0]?.name ?? 'Ejecutor 1'}">por qué y qué hacer en su lugar</relevo:denegar>  si no debe hacerlo.
+<relevo:consultar para="${executors[0]?.name ?? 'Ejecutor 1'}">qué te preocupa</relevo:consultar>  se lo pasa al usuario: si sobrescribe o pierde datos, toca el sistema (instalar, configurar, registro, servicios), publica o envía algo fuera (git push a otro remoto, subidas), usa credenciales o dinero, o si no entiendes para qué lo necesita. Ante la duda, consulta.
+
 Cómo funciona la entrega: a un agente a mitad de un turno solo le llega lo urgente (y la respuesta a una duda suya); lo demás queda pendiente: cuando termine, te llega su informe con tu orden pendiente al lado, y si no le das otra en esa respuesta, Relevo se la entrega tal cual. Al final de cada mensaje que recibes, «Qué ha sido de tus mensajes» te dice si cada orden se entregó, está en cola o pendiente: no supongas que algo llegó sin verlo ahí. Relevo te enviará los informes, dudas y bloqueos de cada agente con su nombre delante («[${executors[0]?.name ?? 'Ejecutor 1'} · informe]», «… · pregunta») y al final el estado del equipo: de cada uno si trabaja (desde cuándo y en qué), espera un trabajo en segundo plano, está libre, BLOQUEADO esperando al usuario o SIN CUOTA (y cuándo retoma), y cuántos mensajes tuyos le esperan. A quien está SIN CUOTA o BLOQUEADO no le sirve una orden nueva: reparte su trabajo urgente a otro o espera. Reglas:
 - No acuses recibo ni contestes a informes de progreso («compilando…», «sigo con…»): si no hay nada nuevo que pedir, responde sin órdenes y espera.
 - No mandes nada a quien está a mitad de un turno salvo que sea urgente: espera a su informe (mira el estado del equipo). Quien solo espera un trabajo en segundo plano (una compilación, un emulador) sí recibe tus mensajes; si no tienes nada nuevo para él, deja que te informe cuando acabe.
@@ -292,7 +299,7 @@ export class Teams {
       team.pausedBy = /mensajes automáticos/.test(last?.text ?? '') ? 'limit' : /presupuesto/.test(last?.text ?? '') ? 'budget' : 'user';
     }
     this._watch = setInterval(() => {
-      try { this.watchBackground(); this._maybeSummary(); this.sweepUnreported(); this.watchIdle(); } catch (e) { host.log?.(`team watch: ${e.message}`); }
+      try { this.watchBackground(); this._maybeSummary(); this.sweepUnreported(); this.watchIdle(); this.watchPermits(); } catch (e) { host.log?.(`team watch: ${e.message}`); }
     }, Math.max(1, Math.min(60, BG_CHECK / 2, IDLE_NUDGE / 3)) * 1000);
     this._watch.unref?.();
   }
@@ -659,11 +666,11 @@ export class Teams {
    * the orchestrator and the researcher read and search without asking; an executor's question goes to the
    * orchestrator.
    */
-  onApproval(thread, item, req) {
+  onApproval(thread, item, req, held = null) {
     const team = this.of(thread);
     const member = this.memberOf(thread);
     if (!team || !member) return false;
-    const reads = READ_ONLY.has(req.toolName) || (req.toolName === 'commandExecution' && isReadOnlyCommand(req.command));
+    const reads = !held && (READ_ONLY.has(req.toolName) || (req.toolName === 'commandExecution' && isReadOnlyCommand(req.command)));
     if (member.role !== 'executor' && !item.questions?.length && reads) {
       const allow = (item.options ?? []).find((o) => o.isAllow);
       if (allow) { this.host._resolve(thread, item.id, allow.id, null); return true; }
@@ -674,7 +681,106 @@ export class Teams {
       this._toLead(team, member, 'pregunta', `${qs}\n\nEstá esperando: contéstale con una orden de respuesta para ${member.name} (el usuario también puede contestar en su hilo).`);
       return false; // the card stays in its thread too, for you to answer if you prefer
     }
-    return false;
+    if (item.questions?.length || member.role === 'orchestrator') return false;
+    return this._askLead(team, member, thread, item, req, held);
+  }
+
+  /**
+   * A member's permission goes to the orchestrator, with the whole command, why Relevo stopped it and what the
+   * member was doing. It approves, denies or passes it on to you; meanwhile the card stays in the member's thread
+   * for you to decide if you prefer. Not when the orchestrator can't answer (no quota, team paused) or you
+   * turned it off: then it's yours, as before.
+   */
+  _askLead(team, member, thread, item, req, held) {
+    const h = this.host;
+    const lead = team.members.find((m) => m.role === 'orchestrator');
+    const lt = lead && h.threads.get(lead.threadId);
+    if (!lt || team.leadApproves === false || team.status === 'paused' || team.status === 'done') return false;
+    const lr = h._rt(lt);
+    if (!lr.isRunning && (lr.limit || lr.resumeAt || lr.pendingRelay)) return false;
+    const r = h._rt(thread);
+    const input = req.input && typeof req.input === 'object' && !Array.isArray(req.input) ? req.input : {};
+    const command = req.command ?? input.command ?? null;
+    const file = input.file_path ?? input.notebook_path ?? input.path ?? null;
+    const what = command ?? [req.title, file && !String(req.title ?? '').includes(file) ? file : null, req.grantRoot ? `Carpeta: ${req.grantRoot}` : null, !req.title ? req.detail : null].filter(Boolean).join('\n');
+    const said = (r.turnItems ?? []).map((id) => h._item(thread, id)).filter((x) => x?.kind === 'assistant' && x.text?.trim()).at(-1)?.text;
+    const cwd = req.cwd ?? thread.worktree?.path ?? thread.projectPath;
+    const name = member.name;
+    const text = [
+      `${name} pide permiso para${command ? ' ejecutar' : ''}:`,
+      '```', clip(String(what).replace(/```/g, "'''"), 4000), '```',
+      cwd ? `Desde ${cwd}.` : null,
+      held ? `Relevo lo ha parado porque ${held.reason}.` : req.detail && req.title ? `El agente dice: ${clip(String(req.detail).replace(/\s+/g, ' '), 300)}` : null,
+      member.task?.text ? `Su tarea: ${clip(member.task.text.replace(/\s+/g, ' '), 300)}` : null,
+      said ? `Lo último que ha dicho: ${clip(withoutOrders(said).replace(/\s+/g, ' '), 400)}` : null,
+      '',
+      `Está parado hasta que decidas. Responde con una de estas órdenes (fuera de bloques de código):`,
+      '```',
+      `<relevo:aprobar para="${name}"/>`,
+      `<relevo:denegar para="${name}">por qué y qué hacer en su lugar</relevo:denegar>`,
+      `<relevo:consultar para="${name}">qué te preocupa</relevo:consultar>`,
+      '```',
+      'Apruébalo si encaja con su tarea y sus rutas son las del proyecto o las herramientas que ya usa el equipo. Consulta al usuario si sobrescribe o pierde datos, toca el sistema, publica o envía algo fuera, usa credenciales, o si no ves para qué lo necesita. Ante la duda, consulta.',
+    ].filter((x) => x !== null).join('\n');
+    // Marked first: the team's status that goes with it already reads «waiting for the orchestrator».
+    item.reviewBy = lead.name;
+    item.reviewAt = Date.now() / 1000;
+    const res = this._toLead(team, member, 'permiso', text);
+    if (res !== 'sent' && res !== 'queued') { delete item.reviewBy; delete item.reviewAt; return false; }
+    r.statusLine = `Esperando el permiso de ${lead.name}…`;
+    h._append(thread, { id: h._uuid(), kind: 'notice', text: `Permiso pedido a ${lead.name}: lo permite si encaja con la tarea o te lo pasa si es delicado. Puedes decidir tú aquí si prefieres.` });
+    h._changed(thread);
+    return true;
+  }
+
+  /** The permissions of a member that wait for the orchestrator (not yet decided, nor passed on to you). */
+  _permits(member) {
+    const h = this.host;
+    const t = h.threads.get(member.threadId);
+    if (!t) return [];
+    return [...h._rt(t).approvals.keys()].map((id) => h._item(t, id)).filter((it) => it?.reviewBy && !it.escalated && !it.resolution);
+  }
+
+  /** A permission the orchestrator passes on to you (or didn't decide in time): you get it as any other. */
+  _escalate(team, member, item, why) {
+    const h = this.host;
+    const t = h.threads.get(member.threadId);
+    if (!t) return;
+    item.escalated = why;
+    t.attention = { kind: 'guard', text: `${why}: ${clip(String(item.output || item.title || '').replace(/\s+/g, ' '), 160)}`, at: Date.now() / 1000 };
+    h._rt(t).statusLine = 'Esperando tu permiso…';
+    h._touch(t, item);
+    h._push(t, `${member.name} necesita tu permiso`, clip(`${why}. ${String(item.output || item.title || '').replace(/\s+/g, ' ')}`, 300), 'guard');
+    h._changed(t);
+    h._broadcastSnapshot();
+  }
+
+  /** Permissions the orchestrator hasn't decided in PERMIT_WAIT go to you. */
+  watchPermits(nowS = Date.now() / 1000) {
+    const h = this.host;
+    for (const team of this.list) {
+      const lead = team.members.find((m) => m.role === 'orchestrator');
+      for (const m of team.members) {
+        for (const it of this._permits(m)) {
+          if ((it.reviewAt ?? 0) > nowS - PERMIT_WAIT) continue;
+          const why = `${lead?.name ?? 'El orquestador'} no lo ha decidido en ${Math.round(PERMIT_WAIT / 60)} min`;
+          this._escalate(team, m, it, why);
+          const t = h.threads.get(m.threadId);
+          h._append(t, { id: h._uuid(), kind: 'notice', text: `${why}: te toca a ti` });
+          h._changed(t);
+        }
+      }
+    }
+  }
+
+  /** You turn on or off the orchestrator deciding the team's permissions (on unless you turn it off). */
+  setLeadApproves(teamId, on) {
+    const team = this.byId(teamId);
+    if (!team) throw new Error('Equipo desconocido');
+    team.leadApproves = !!on;
+    this.host._saveState();
+    this.host._broadcastSnapshot();
+    return {};
   }
 
   /** A turn ended in a team thread: deliver what the orchestrator ordered, or report a member's work to it. */
@@ -742,7 +848,9 @@ export class Teams {
     if (errors?.length) report.push(`Errores: ${errors.slice(-2).map((e) => clip(e, 300)).join(' · ')}`);
     const kind = member.role === 'researcher' ? 'informe de investigación' : errors?.length && !body ? 'error'
       : state === 'esperando' ? 'espera (no necesita respuesta)' : 'informe';
-    this._setTask(member, state === 'bloqueado' ? 'bloqueado' : state === 'esperando' ? 'esperando' : 'hecha');
+    // A turn without a status line (an answer to you, a quick check) leaves a blocked agent blocked.
+    const stuck = ['bloqueado', 'esperando'].includes(member.task?.state) ? member.task.state : null;
+    this._setTask(member, state === 'bloqueado' ? 'bloqueado' : state === 'esperando' ? 'esperando' : state ? 'hecha' : stuck ?? 'hecha');
     if (member.role === 'researcher' && body.trim()) {
       const found = this.addFinding(team, { topic: member.inquiry || clip(body.split('\n').find((l) => l.trim()) ?? '', 200), body, by: member.name });
       if (found) member.findingsSeen = found.id; // it wrote it: no need to tell it
@@ -1385,6 +1493,34 @@ export class Teams {
         if (res === 'sent' || res === 'queued') { researcher.findingsSeen = team.nextFinding ?? 0; this._setTask(researcher, 'en curso', clip(o.body.replace(/\s+/g, ' '), 140)); }
         return this._sent(team, 'investigar', researcher, o.body, res);
       }
+      case 'aprobar':
+      case 'denegar':
+      case 'consultar': {
+        // Without para=: whoever waits for one, if only one does.
+        const waiting = team.members.filter((m) => m.role !== 'orchestrator' && this._permits(m).length);
+        const to = o.to ? findMember(team, o.to) : waiting.length === 1 ? waiting[0] : null;
+        if (!to || to.role === 'orchestrator') { complain(`No sé de quién es el permiso${o.to ? ` «${o.to}»` : ''}: pon para="…".`); return; }
+        const t = h.threads.get(to.threadId);
+        const list = this._permits(to);
+        if (!t || !list.length) return this._sent(team, o.type, to, o.body || o.type, 'nothing');
+        const why = o.body ? clip(o.body.replace(/\s+/g, ' '), 400) : '';
+        for (const it of list) {
+          const opts = it.options ?? [];
+          const pick = o.type === 'aprobar'
+            ? opts.find((x) => x.isAllow && !/always|siempre|session|sesi[oó]n/i.test(`${x.id} ${x.label}`)) ?? opts.find((x) => x.isAllow)
+            : o.type === 'denegar' ? opts.find((x) => !x.isAllow) : null;
+          if (!pick) { this._escalate(team, to, it, o.type === 'consultar' ? `${lead.name} prefiere que lo decidas tú${why ? `: ${why}` : ''}` : `${lead.name} no ha podido responderlo`); continue; }
+          // Claude reads why in the denial itself; the others get it as a message when their turn ends.
+          const note = o.type === 'denegar' ? `${lead.name} (el orquestador) ha denegado esta acción${why ? `: ${why}` : '.'}` : null;
+          h._resolve(t, it.id, pick.id, null, note);
+          it.resolution = o.type === 'aprobar' ? `Permitido por ${lead.name}` : `Denegado por ${lead.name}`;
+          h._touch(t, it);
+          if (note && h.accountsById.get(t.accountId)?.kind !== 'claude') this._deliver(team, to, note, { ...from, label: 'permiso denegado' });
+        }
+        h._append(t, { id: h._uuid(), kind: 'notice', text: o.type === 'aprobar' ? `${lead.name} lo ha permitido${why ? `: ${why}` : ''}` : o.type === 'denegar' ? `${lead.name} lo ha denegado${why ? `: ${why}` : ''}` : `${lead.name} te pasa la decisión${why ? `: ${why}` : ''}` });
+        h._changed(t);
+        return this._sent(team, o.type, to, o.body || '(sin comentario)', o.type === 'aprobar' ? 'approved' : o.type === 'denegar' ? 'denied' : 'escalated');
+      }
       case 'respuesta': {
         // Without para=: whoever is waiting for an answer, if only one is; else the only executor.
         const asking = team.members.filter((m) => m.pendingQuestion && m.role !== 'orchestrator');
@@ -1400,7 +1536,8 @@ export class Teams {
           h._changed(t);
           return this._sent(team, 'respuesta', to, o.body, 'answered');
         }
-        if (to.awaitingAnswer) {
+        // A question, or a blocked or waiting agent: the answer is what it needs to go on, so it goes now.
+        if (to.awaitingAnswer || ['bloqueado', 'esperando'].includes(to.task?.state)) {
           const res = this._deliver(team, to, o.body, { ...from, label: 'respuesta' });
           to.awaitingAnswer = false;
           return this._sent(team, 'respuesta', to, o.body, res);
@@ -1530,7 +1667,7 @@ export class Teams {
       // An orchestrator only waiting on its own timer stops waiting when what it waits for arrives: a message
       // from the agent the timer names (any, if it names none), or anything that can't wait (a question, a
       // blocker, an error, Relevo).
-      const pressing = ['pregunta', 'error', 'aviso', 'urgente'].includes(from.label) || from.role === 'relevo' || /^\s*\**ESTADO:?\**\s*bloqueado/im.test(text);
+      const pressing = ['pregunta', 'permiso', 'error', 'aviso', 'urgente'].includes(from.label) || from.role === 'relevo' || /^\s*\**ESTADO:?\**\s*bloqueado/im.test(text);
       const awaited = !r.waitingFor?.length || r.waitingFor.includes(from.name);
       if (member.role === 'orchestrator' && r.waitingTimer && !r.approvals.size && (awaited || pressing)) {
         r.waitingTimer = false;
@@ -1687,7 +1824,9 @@ export class Teams {
     const at = (sec) => new Date(sec * 1000).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
     const nameOf = (id) => h.accountsById.get(id)?.name ?? 'otro modelo';
     let state;
-    if (r.approvals.size) state = 'BLOQUEADO esperando al usuario (una pregunta o un permiso)';
+    const asks = r.approvals.size ? [...r.approvals.keys()].map((id) => t.items?.find((i) => i.id === id)) : [];
+    if (asks.length && asks.every((i) => i?.reviewBy && !i.escalated && !i.resolution)) state = `BLOQUEADO esperando un permiso del orquestador («${clip(String(asks[0].output || asks[0].title || '').split('\n')[0], 80)}»)`;
+    else if (asks.length) state = 'BLOQUEADO esperando al usuario (una pregunta o un permiso)';
     else if (!r.isRunning && r.pendingRelay) state = `SIN CUOTA: pasa a ${nameOf(r.pendingRelay.accountId)} en unos segundos`;
     else if (!r.isRunning && r.resumeAt) state = r.resumeUnknown ? 'SIN CUOTA: retoma solo en cuanto vuelva (se comprueba cada pocos minutos)' : `SIN CUOTA: retoma solo hacia las ${at(r.resumeAt)}`;
     else if (!r.isRunning && r.limit) state = 'SIN CUOTA: parado hasta que el usuario decida';

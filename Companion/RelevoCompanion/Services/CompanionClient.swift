@@ -38,6 +38,8 @@ final class CompanionClient {
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var retryTask: Task<Void, Never>?
     @ObservationIgnored private var subscribed: UUID?
+    /// The host's last snapshot as JSON, which its patches apply to.
+    @ObservationIgnored private var snapshotJSON = SnapshotPatch.Tracker()
     @ObservationIgnored private var pendingCreations: [UUID: CheckedContinuation<UUID?, Never>] = [:]
     @ObservationIgnored private var pendingImages: [UUID: CheckedContinuation<Data?, Never>] = [:]
     @ObservationIgnored private let imageCache = NSCache<NSString, NSData>()
@@ -206,7 +208,8 @@ final class CompanionClient {
             self.fail("El Mac ha cerrado la conexión")
         }
         winner.onMessage = { [weak self] data in self?.receive(data) }
-        winner.send(ClientMessage.hello(device: UIDevice.current.name, version: CompanionCoding.version))
+        snapshotJSON.reset()
+        winner.send(ClientMessage.hello(device: UIDevice.current.name, version: CompanionCoding.version, features: [SnapshotPatch.feature]))
         if let subscribed { winner.send(ClientMessage.subscribe(threadId: subscribed)) }
     }
 
@@ -283,6 +286,7 @@ final class CompanionClient {
     // MARK: - Messages
 
     private func receive(_ data: Data) {
+        guard let data = snapshotJSON.resolve(data) else { return }
         guard let message = try? CompanionCoding.decode(ServerMessage.self, from: data) else { return }
         switch message {
         case .welcome:

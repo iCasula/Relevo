@@ -44,6 +44,7 @@ export function applyServerMessage(data, msg) {
   const a = msg?.[name] ?? {};
   switch (name) {
     case 'snapshot': data.snapshot = a._0; break;
+    case 'snapshotPatch': if (data.snapshot) data.snapshot = applySnapshotPatch(data.snapshot, a._0); break;
     case 'thread': data.threads.set(a._0.id, a._0); break;
     case 'threadPatch': {
       const t = data.threads.get(a._0.id);
@@ -54,6 +55,58 @@ export function applyServerMessage(data, msg) {
     default: break;
   }
   return name;
+}
+
+/** Snapshot lists whose entries go by id: only the entries (and the fields of them) that changed travel. */
+const SNAPSHOT_LISTS = ['threads', 'accounts', 'projects', 'hostTeams'];
+
+/**
+ * What changed from one snapshot to the next, or null if nothing did. Top-level values go whole (`set`);
+ * the lists go as their ids in order plus, per changed entry, only its changed fields (`$unset` names the
+ * fields it no longer has). A team's findings and decisions, most of the snapshot, then travel only when
+ * they change, not every few seconds with each preview or quota update.
+ */
+export function diffSnapshot(prev, next) {
+  const same = (x, y) => x === y || JSON.stringify(x) === JSON.stringify(y);
+  const set = {}, lists = {}, unset = [];
+  let changed = false;
+  for (const key of Object.keys(prev)) if (!(key in next)) { unset.push(key); changed = true; }
+  for (const [key, value] of Object.entries(next)) {
+    const old = prev[key];
+    if (SNAPSHOT_LISTS.includes(key) && Array.isArray(value) && Array.isArray(old) && value.every((x) => x?.id != null)) {
+      const before = new Map(old.map((x) => [x.id, x]));
+      const upsert = [];
+      for (const item of value) {
+        const was = before.get(item.id);
+        if (!was) { upsert.push(item); continue; }
+        const fields = {};
+        for (const [f, v] of Object.entries(item)) if (!same(v, was[f])) fields[f] = v;
+        const gone = Object.keys(was).filter((f) => !(f in item));
+        if (Object.keys(fields).length || gone.length) upsert.push({ ...fields, id: item.id, ...(gone.length ? { $unset: gone } : {}) });
+      }
+      const ids = value.map((x) => x.id);
+      if (upsert.length || !same(ids, old.map((x) => x.id))) { lists[key] = { ids, upsert }; changed = true; }
+    } else if (!same(value, old)) { set[key] = value; changed = true; }
+  }
+  if (!changed) return null;
+  return { ...(Object.keys(set).length ? { set } : {}), ...(Object.keys(lists).length ? { lists } : {}), ...(unset.length ? { unset } : {}) };
+}
+
+/** The snapshot a `snapshotPatch` describes, from the one before it. */
+export function applySnapshotPatch(prev, patch) {
+  const next = { ...prev, ...(patch.set ?? {}) };
+  for (const key of patch.unset ?? []) delete next[key];
+  for (const [key, { ids, upsert }] of Object.entries(patch.lists ?? {})) {
+    const before = new Map((prev[key] ?? []).map((x) => [x.id, x]));
+    for (const change of upsert) {
+      const { $unset, ...fields } = change;
+      const item = { ...(before.get(change.id) ?? {}), ...fields };
+      for (const f of $unset ?? []) delete item[f];
+      before.set(change.id, item);
+    }
+    next[key] = ids.map((id) => before.get(id)).filter(Boolean);
+  }
+  return next;
 }
 
 /** New or changed items replace theirs by id, in transcript order; title, count and live state follow. */
@@ -71,7 +124,8 @@ export function applyPatch(thread, patch) {
 
 /** Client messages (desktop → host), shaped as the host decodes them. */
 export const Client = {
-  hello: (device) => ({ hello: { device, version: PROTOCOL_VERSION } }),
+  // `snapshotPatch`: after the first snapshot the host may send only what changed (see diffSnapshot).
+  hello: (device) => ({ hello: { device, version: PROTOCOL_VERSION, features: ['snapshotPatch'] } }),
   subscribe: (threadId) => ({ subscribe: threadId ? { threadId } : {} }),
   send: (threadId, text) => ({ send: { threadId, text } }),
   sendNow: (threadId, text) => ({ sendNow: { threadId, text } }),
