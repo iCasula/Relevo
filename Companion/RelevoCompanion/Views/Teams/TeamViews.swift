@@ -65,6 +65,8 @@ struct AgentMessageRow: View {
     let expanded: Set<String>
     let toggle: (String) -> Void
     var roles: [String: RemoteTeamRole] = [:]
+    /// Sent by this thread's agent to `sender` (its report to the orchestrator), not received from it.
+    var outgoing = false
 
     /// Short messages show whole; longer ones fold to a few lines (tap to read them).
     private var isLong: Bool { item.text.count > 220 || item.text.split(whereSeparator: \.isNewline).count > 3 }
@@ -73,8 +75,9 @@ struct AgentMessageRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 5) {
-                Image(systemName: sender.role.symbol)
+                Image(systemName: outgoing ? "arrow.up.right" : sender.role.symbol)
                     .foregroundStyle(sender.role.color)
+                if outgoing { Text("Para") }
                 Text(sender.name)
                     .fontWeight(.semibold)
                     .foregroundStyle(.primary)

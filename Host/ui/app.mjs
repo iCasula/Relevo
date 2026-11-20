@@ -135,15 +135,18 @@ function threadRowHTML(hostId, s, t, nested = false) {
   const ran = !!t.preview;
   // The agent's provider, with its real logo (a hollow dot for a thread that hasn't run yet).
   const dot = acct && (ran || t.team) ? `<span class="prov" title="${esc(acct.name)}">${badge(acct, 13)}</span>` : '<span class="pdot empty"></span>';
-  const extra = t.worktree ? `<span title="Worktree propio · ${esc(t.worktree)}">${icon('square.stack.3d.down.right', { size: 10, cls: 'small' })}</span>` : '';
+  // Its own worktree, after the title: before it, it pushed the role chip out of line with the others.
+  const extra = t.worktree ? `<span class="wt" title="Worktree propio · rama ${esc(t.worktree)}">${icon('arrow.triangle.branch', { size: 10, cls: 'small' })}</span>` : '';
   const live = threadOf(hostId, t.id)?.runtime;
-  const status = t.attention ? `<span class="attn" title="${esc(t.attention.text)}">${icon('text.bubble.fill', { size: 11 })}</span>`
+  // Something for you, and whether it is working: both show (a bubble alone hid that it was running).
+  const attn = t.attention ? `<span class="attn" title="${esc(t.attention.text)}">${icon(t.attention.kind === 'guard' ? 'hand.raised.fill' : 'text.bubble.fill', { size: 11 })}</span>` : '';
+  const status = attn && t.isRunning ? `${attn}<span class="spinner"></span>` : attn ? attn
     : t.isRunning ? '<span class="spinner"></span>'
     : live?.limit ? `<span class="orange">${icon('hourglass', { size: 10 })}</span>`
       : t.isWaiting ? `<span class="muted" title="Esperando a una tarea en segundo plano">${icon('clock', { size: 10 })}</span>`
         : `<span class="when">${esc(relative(t.updatedAt))}</span>`;
   const chip = t.team ? `<span class="role-chip r-${esc(t.team.role)}" title="${esc(t.team.name)} de un equipo">${esc(t.team.role === 'executor' ? t.team.name.replace('Ejecutor', 'Ej.') : ROLE[t.team.role]?.short ?? '')}</span>` : '';
-  return `<button class="thread-row${selected ? ' selected' : ''}${nested ? ' nested' : ''}" data-thread="${esc(t.id)}" data-host="${esc(hostId)}" title="${esc(t.title)}">${dot}${extra}${chip}<span class="title">${esc(t.team ? t.title.replace(/^[^·]+·\s*/, '') : t.title)}</span>${status}</button>`;
+  return `<button class="thread-row${selected ? ' selected' : ''}${nested ? ' nested' : ''}" data-thread="${esc(t.id)}" data-host="${esc(hostId)}" title="${esc(t.title)}">${dot}${chip}<span class="title">${esc(t.team ? t.title.replace(/^[^·]+·\s*/, '') : t.title)}</span>${extra}${status}</button>`;
 }
 
 // MARK: - «Límites» footer (UsageFooter) — always visible
@@ -615,15 +618,11 @@ function itemHTML(hostId, it, header) {
   const open = app.expandedItems.has(it.id);
   switch (it.kind) {
     case 'user':
-      if (it.from) {
-        const role = ROLE[it.from.role] ?? ROLE.team;
-        const long = it.text.length > 220 || it.text.split('\n').length > 3;
-        const chev = long ? `<button class="from-chev" data-toggle-item="${esc(it.id)}" title="${open ? 'Plegar' : 'Desplegar'}">${icon(open ? 'chevron.down' : 'chevron.right', { size: 9 })}</button>` : '';
-        const body = long && !open ? `<button class="from-fold" data-toggle-item="${esc(it.id)}" title="Desplegar"><span>${esc(folded(it.text))}</span></button>` : replyHTML(it.text, it.id, teamRoles(hostId));
-        return `<div class="from-row r-${esc(it.from.role)}"><div class="from-head">${icon(role.icon, { size: 11 })}<b>${esc(it.from.name)}</b>${it.from.label ? `<span>· ${esc(it.from.label)}</span>` : ''}${timeHTML(it.date)}${it.from.threadId ? `<button class="btn link small" data-team-go="${esc(it.from.threadId)}">Ver hilo</button>` : ''}${chev}</div>${body}</div>`;
-      }
+      if (it.from) return agentRowHTML(hostId, it, it.from, false);
       return `<div class="user-row"><div class="bubble" title="${esc(fullDate(it.date))}">${esc(it.text)}</div></div>${imagesHTML(hostId, it.text).replace('class="thumbs"', 'class="thumbs" style="justify-content:flex-end"')}`;
     case 'assistant': {
+      const to = it.to ?? reportGuess(hostId, it);
+      if (to) return agentRowHTML(hostId, it, to, true);
       const acct = accountOf(hostId, it.accountId);
       const author = header && acct ? `<div class="author">${badge(acct, 14)}<b>${esc(acct.name)}</b><span class="m">${esc(modelName(acct, it.model))}</span>${timeHTML(it.date)}</div>` : '';
       return `${author}${replyHTML(it.text, it.id, teamRoles(hostId))}${imagesHTML(hostId, it.text)}`;
@@ -716,6 +715,30 @@ function replyHTML(text, id, roles) {
       + `${!open && x.body ? `<span class="pv">${esc(previewLine(x.body))}</span>` : '<span class="grow"></span>'}${x.body ? icon(open ? 'chevron.down' : 'chevron.right', { size: 9, cls: 'chev' }) : ''}</button>`;
     return `<div class="order ${cls}">${head}${open && x.body ? `<div class="md order-body">${markdown(x.body)}</div>` : ''}</div>`;
   }).join('')}</div>`;
+}
+
+/**
+ * A message between agents: one that arrived from another (who), or one this agent sent to the orchestrator
+ * (outgoing: its report or question, «Para Orquestador»). Long ones fold to two lines.
+ */
+function agentRowHTML(hostId, it, who, outgoing) {
+  const open = app.expandedItems.has(it.id);
+  const role = ROLE[who.role] ?? ROLE.team;
+  const long = it.text.length > 220 || it.text.split('\n').length > 3;
+  const chev = long ? `<button class="from-chev" data-toggle-item="${esc(it.id)}" title="${open ? 'Plegar' : 'Desplegar'}">${icon(open ? 'chevron.down' : 'chevron.right', { size: 9 })}</button>` : '';
+  const body = long && !open ? `<button class="from-fold" data-toggle-item="${esc(it.id)}" title="Desplegar"><span>${esc(folded(it.text))}</span></button>` : replyHTML(it.text, it.id, teamRoles(hostId));
+  const name = outgoing ? `<span class="to-label">Para</span><b>${esc(who.name)}</b>` : `<b>${esc(who.name)}</b>`;
+  return `<div class="from-row${outgoing ? ' to-row' : ''} r-${esc(who.role)}"><div class="from-head">${icon(outgoing ? 'arrow.up.right.square' : role.icon, { size: 11 })}${name}${who.label ? `<span>· ${esc(who.label)}</span>` : ''}${timeHTML(it.date)}${who.threadId ? `<button class="btn link small" data-team-go="${esc(who.threadId)}">Ver hilo</button>` : ''}${chev}</div>${body}</div>`;
+}
+
+/** Messages from before Relevo marked reports: an executor's «ESTADO: …» or a researcher's «Conclusión: …». */
+function reportGuess(hostId, it) {
+  const ref = summaryOf(hostId, current().threadId)?.team;
+  if (!ref || ref.role === 'orchestrator') return null;
+  const report = ref.role === 'researcher' ? /^\s*[*_#>\- ]*conclusi[oó]n\b/i : /^\s*\**ESTADO:?\**\s*(hecho|esperando|bloqueado)/i;
+  if (!report.test(it.text ?? '')) return null;
+  const lead = teamOf(hostId, ref.id)?.members.find((m) => m.role === 'orchestrator');
+  return lead ? { name: lead.name, role: 'orchestrator', label: 'informe', threadId: lead.threadId } : null;
 }
 
 /** When a message was sent: the time (the full date on hover). */

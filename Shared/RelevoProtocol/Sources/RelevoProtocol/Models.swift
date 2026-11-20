@@ -199,6 +199,13 @@ public struct RemoteSender: Codable, Hashable, Sendable {
     /// The sender's thread.
     public var threadId: UUID?
 
+    public init(name: String, role: RemoteTeamRole, label: String?, threadId: UUID?) {
+        self.name = name
+        self.role = role
+        self.label = label
+        self.threadId = threadId
+    }
+
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         name = try c.decode(String.self, forKey: .name)
@@ -391,6 +398,8 @@ public struct RemoteItem: Codable, Hashable, Identifiable, Sendable {
     public var usage: RemoteTurnUsage?
     /// A message from another agent of the team (or Relevo) instead of you (Relevo hosts only).
     public var from: RemoteSender?
+    /// What this agent sent to another of the team (its report or question to the orchestrator), not to you.
+    public var to: RemoteSender?
 
     public init(id: String, kind: Kind, text: String, title: String?, output: String?, toolName: String?, toolState: ToolState?,
                 accountId: UUID?, model: String?, date: Date, options: [RemoteOption]?, resolution: String?,

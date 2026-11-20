@@ -74,6 +74,14 @@ final class ThreadViewModel {
     var teamRoles: [String: RemoteTeamRole] {
         Dictionary((team?.members ?? []).map { ($0.name.lowercased(), $0.role) }, uniquingKeysWith: { a, _ in a })
     }
+    /// A report from before Relevo marked them: an executor's «ESTADO: …» or a researcher's «Conclusión: …».
+    func reportGuess(_ item: RemoteItem) -> RemoteSender? {
+        guard let ref = summary?.team, ref.role != .orchestrator,
+              let lead = team?.members.first(where: { $0.role == .orchestrator }) else { return nil }
+        let pattern = ref.role == .researcher ? #"^\s*[*_#>\- ]*conclusi[oó]n\b"# : #"^\s*\**ESTADO:?\**\s*(hecho|esperando|bloqueado)"#
+        guard item.text.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil else { return nil }
+        return RemoteSender(name: lead.name, role: .orchestrator, label: "informe", threadId: lead.threadId)
+    }
     var items: [RemoteItem] { thread?.items ?? [] }
     var runtime: RemoteRuntime? { thread?.runtime }
     var isLoading: Bool { thread == nil }

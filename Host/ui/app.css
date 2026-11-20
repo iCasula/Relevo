@@ -113,6 +113,7 @@ code, pre, .mono { font-family: var(--mono); }
 .badge-p.logo { color: var(--text); }
 .badge-p.logo svg { display: block; }
 .thread-row .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.thread-row .wt { display: inline-flex; flex: none; }
 .thread-row .when { color: var(--tertiary); font-size: 10px; flex: none; }
 .thread-row .ic.small { color: var(--secondary); }
 .thread-row.selected { background: var(--accent); color: #fff; }
@@ -553,6 +554,8 @@ input[type=checkbox].check { accent-color: var(--accent); width: 14px; height: 1
 .from-row .from-head { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--secondary); margin-bottom: 4px; }
 .from-row .from-head b { color: var(--text); }
 .from-row .from-head .btn { margin-left: 4px; }
+.from-row.to-row { background: color-mix(in srgb, var(--yellow) 6%, transparent); border-radius: 0 8px 8px 0; padding-top: 6px; padding-bottom: 6px; }
+.from-row .to-label { color: var(--secondary); }
 .team-form { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
 .team-line { display: flex; align-items: center; gap: 8px; }
 .team-role { width: 120px; flex: none; display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 500; }

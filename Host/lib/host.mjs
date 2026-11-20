@@ -1653,6 +1653,8 @@ export class Host {
       respond(optionId, null);
     }
     r.statusLine = 'Pensando…';
+    // The action Relevo stopped has been decided: the thread no longer waits for you.
+    if (t.attention?.kind === 'guard' && ![...r.approvals.keys()].some((id) => this._item(t, id)?.guard)) { delete t.attention; this._broadcastSnapshot(); }
     this._touch(t, it);
     this._changed(t);
   }

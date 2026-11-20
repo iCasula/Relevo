@@ -18,6 +18,10 @@ struct TranscriptItemView: View {
                 UserBubble(text: item.text)
             }
         case .assistant:
+            if let to = item.to ?? viewModel.reportGuess(item) {
+                AgentMessageRow(item: item, sender: to, currentThread: viewModel.threadId,
+                                expanded: viewModel.expanded, toggle: { viewModel.toggle(id: $0) }, roles: viewModel.teamRoles, outgoing: true)
+            } else {
             VStack(alignment: .leading, spacing: 6) {
                 if showsAuthor { AuthorLine(account: viewModel.account(item.accountId), model: item.model, date: item.date) }
                 ReplyWithOrders(text: item.text, itemId: item.id, expanded: viewModel.expanded, toggle: { viewModel.toggle(id: $0) }, roles: viewModel.teamRoles)
@@ -26,6 +30,7 @@ struct TranscriptItemView: View {
                     ImageStrip(paths: images, load: { await viewModel.thumbnail($0) }, open: { viewModel.open(path: $0) })
                 }
                 if showTurnUsage, let usage = item.usage { TurnUsageLine(usage: usage) }
+            }
             }
         case .reasoning:
             ReasoningRow(item: item, isExpanded: viewModel.expanded.contains(item.id)) { viewModel.toggle(item) }

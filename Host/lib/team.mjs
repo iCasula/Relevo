@@ -719,6 +719,7 @@ export class Teams {
       member.awaitingAnswer = true;
       this._setTask(member, 'bloqueado');
       this._toLead(team, member, 'pregunta', `${question.body}${body.trim() ? `\n\nSu informe:\n${compactReport(body)}` : ''}`);
+      this._markSent(team, thread, items, body, 'pregunta');
       return;
     }
     // A turn that ended with nothing new (no text, no error): nothing to report.
@@ -767,7 +768,29 @@ export class Teams {
       } else report.push(`(${target.name} está trabajando: no se le ha enviado. Pásale lo que le sirva junto con su siguiente tarea.)`);
     }
     this._toLead(team, member, kind, report.join('\n\n'));
+    this._markSent(team, thread, items, body, kind);
     this._maybeRefreshMember(team, member, thread);
+  }
+
+  /**
+   * The messages of a member's turn that went to the orchestrator (its report, its question) say so, with the
+   * same shape as a message that arrives from someone: in the window they read as for the orchestrator, not you.
+   */
+  _markSent(team, thread, items, body, label) {
+    const lead = team.members.find((m) => m.role === 'orchestrator');
+    if (!lead || !items?.length) return;
+    const h = this.host;
+    const r = h._rt(thread);
+    let marked = false;
+    for (const it of items) {
+      const said = withoutOrders(it.text ?? '').trim();
+      const asks = parseOrders(it.text ?? '').some((o) => o.type === 'pregunta');
+      if (!asks && !(said && body.includes(said.slice(0, 200)))) continue;
+      it.to = { threadId: lead.threadId, name: lead.name, role: 'orchestrator', label };
+      (r.dirty ??= new Set()).add(it.id);
+      marked = true;
+    }
+    if (marked) h._changed(thread, false);
   }
 
   /** The orders of the orchestrator's turn not sent yet (some may have gone when it started waiting on a timer). */
