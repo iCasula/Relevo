@@ -1517,9 +1517,9 @@ export class Host {
       });
       r.approvals.set(it.id, req.respond);
       r.statusLine = it.questions?.length ? 'Esperando tu respuesta…' : held ? 'Relevo ha detenido una acción: espera tu permiso' : 'Esperando tu aprobación…';
-      // In a team, the orchestrator decides first on what can be undone (a write outside the project, an ordinary
-      // permission); what can't be undone is always yours.
-      if (held && !held.critical && this.teams.onApproval(t, it, req, held)) { this._changed(t); return; }
+      // In a team, the orchestrator decides first, deletions included (what's clearly disposable it allows; else it
+      // sends the agent to another way or to note it for later). Disks and a forced push are always yours.
+      if (held && !held.userOnly && this.teams.onApproval(t, it, req, held)) { this._changed(t); return; }
       if (held) {
         t.attention = { kind: 'guard', text: `${held.reason}: ${String(req.command ?? req.title ?? '').slice(0, 160)}`, at: now() };
         this._push(t, `Relevo ha detenido una acción · ${t.team?.name ?? t.title}`, `${held.reason}. Decide tú si se hace.`, 'guard');

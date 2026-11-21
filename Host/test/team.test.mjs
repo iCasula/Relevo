@@ -489,7 +489,7 @@ test('a long background job gets its agent asked to check it, once per period', 
   assert.equal(sent.length, 2, 'again after another period');
 });
 
-test('the guard: in full access a safe step goes on by itself, a recursive deletion waits for you', async () => {
+test('the guard: in full access a safe step goes on by itself, a recursive deletion waits', async () => {
   const claude = snapshot.accounts.find((a) => a.kind === 'claude');
   const made = await request('createTeam', { team: { projectId: demo(), goal: 'Guardarraíl', orchestrator: { accountId: claude.id }, executors: [{ accountId: claude.id }], researcher: null, mode: 'full' } });
   assert.ok(made.ok, made.error);
@@ -615,4 +615,21 @@ test('a permission the guard holds goes to the orchestrator, which allows, denie
   const card = (await see(exec, (items) => items.some((i) => i.kind === 'approval' && !i.resolution && i.escalated))).thread._0.items.find((i) => i.kind === 'approval' && !i.resolution);
   peer.send(Client.approve(exec, card.id, 'deny'));
   await next((m) => m.snapshot?._0.threads?.some((x) => x.id === exec && !x.attention), 20_000);
+
+  // A deletion goes to it too: it allows what clearly isn't needed; otherwise the agent looks for another way or
+  // notes it in .relevo/borrados-pendientes.md for later.
+  inbox.length = 0;
+  peer.send(Client.send(exec, 'borra todo'));
+  const del = await see(boss, (items) => items.some((x) => x.kind === 'user' && x.from?.label === 'permiso' && /rm -rf build/.test(x.text)));
+  const ask = (del.thread?._0.items ?? del.threadPatch._0.upserts).filter((x) => x.kind === 'user' && x.from?.label === 'permiso').at(-1);
+  assert.match(ask.text, /no se puede deshacer \(borrado recursivo \(rm -r\)\)[\s\S]*no se lo pases al usuario[\s\S]*borrados-pendientes\.md/);
+  assert.doesNotMatch(ask.text, /relevo:consultar/);
+  await see(exec, (items) => items.some((i) => i.kind === 'notice' && /^Borrado pasado a Orquestador/.test(i.text ?? '')));
+  await bossIdle();
+  peer.send(Client.send(boss, '<relevo:denegar para="Ejecutor">build tiene los binarios de la última prueba</relevo:denegar>'));
+  const kept = await see(exec, (items) => /^Denegado/.test(lastTool(items)?.output ?? ''));
+  assert.match(lastTool(kept.thread?._0.items ?? kept.threadPatch._0.upserts).output, /binarios de la última prueba\. Busca otra forma[\s\S]*borrados-pendientes\.md/);
+  const project = snapshot.projects.find((p) => p.id === demo()).path;
+  assert.match(fs.readFileSync(path.join(project, '.relevo', 'borrados-pendientes.md'), 'utf8'), /^# Borrados pendientes/);
+  await bossIdle();
 });

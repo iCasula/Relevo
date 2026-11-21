@@ -41,6 +41,8 @@ const NOTE_MAX = 6_000, NOTE_TTL = 24 * 3600;
 const DECISIONS_MAX = 40;
 /** Where the team's decisions are written in full, inside the project (kept out of git). */
 export const DECISIONS_DIR = '.relevo';
+/** Where the agents note what they'd delete but the orchestrator didn't see clear: cleaned up later, by you. */
+export const PENDING_DELETES = 'borrados-pendientes.md';
 const DECISION_FULL_MAX = 8000;
 /** Research reports the team keeps, and how many the agents are reminded of. */
 const FINDINGS_MAX = 60, FINDINGS_SHOWN = 15;
@@ -232,10 +234,10 @@ ${executors.some((e) => host.threads.get(e.threadId)?.worktree) ? '<relevo:integ
 
 <relevo:urgente para="${executors[0]?.name ?? 'Ejecutor 1'}">…</relevo:urgente>  solo si lo que está haciendo ahora es claramente erróneo o ya no sirve: interrumpe su turno.
 
-Permisos: cuando un agente necesita permiso para algo que se puede deshacer (escribir fuera de la carpeta del proyecto, un comando que su modo no deja pasar), Relevo te lo pasa como «[${executors[0]?.name ?? 'Ejecutor 1'} · permiso]» con el comando entero, y el agente queda parado hasta que decidas. Lo irreversible (borrados, descartes de git, discos) va siempre directo al usuario.
+Permisos: cuando un agente necesita permiso (escribir fuera de la carpeta del proyecto, un comando que su modo no deja pasar, o un borrado o descarte de git que Relevo ha detenido), Relevo te lo pasa como «[${executors[0]?.name ?? 'Ejecutor 1'} · permiso]» con el comando entero, y el agente queda parado hasta que decidas. Los borrados apruébalos solo si tienes claro que lo que se pierde sobra (salidas de compilación, temporales, logs, copias que se regeneran, dentro del proyecto) y encaja con su tarea; si no lo ves claro, no se lo pases al usuario: deniégalo diciéndole que busque otra forma o que lo anote en ${DECISIONS_DIR}/${PENDING_DELETES} para limpiarlo en otro momento. Formatear discos, tocar la raíz de un disco o un git push --force van siempre directos al usuario.
 <relevo:aprobar para="${executors[0]?.name ?? 'Ejecutor 1'}"/>  si encaja con su tarea y sus rutas son las del proyecto o las herramientas que ya usa el equipo.
 <relevo:denegar para="${executors[0]?.name ?? 'Ejecutor 1'}">por qué y qué hacer en su lugar</relevo:denegar>  si no debe hacerlo.
-<relevo:consultar para="${executors[0]?.name ?? 'Ejecutor 1'}">qué te preocupa</relevo:consultar>  se lo pasa al usuario: si sobrescribe o pierde datos, toca el sistema (instalar, configurar, registro, servicios), publica o envía algo fuera (git push a otro remoto, subidas), usa credenciales o dinero, o si no entiendes para qué lo necesita. Ante la duda, consulta.
+<relevo:consultar para="${executors[0]?.name ?? 'Ejecutor 1'}">qué te preocupa</relevo:consultar>  se lo pasa al usuario: si sobrescribe o pierde datos, toca el sistema (instalar, configurar, registro, servicios), publica o envía algo fuera (git push a otro remoto, subidas), usa credenciales o dinero, o si no entiendes para qué lo necesita. Ante la duda, consulta (salvo los borrados: esos los resuelves tú, como se dice arriba).
 
 Cómo funciona la entrega: a un agente a mitad de un turno solo le llega lo urgente (y la respuesta a una duda suya); lo demás queda pendiente: cuando termine, te llega su informe con tu orden pendiente al lado, y si no le das otra en esa respuesta, Relevo se la entrega tal cual. Al final de cada mensaje que recibes, «Qué ha sido de tus mensajes» te dice si cada orden se entregó, está en cola o pendiente: no supongas que algo llegó sin verlo ahí. Relevo te enviará los informes, dudas y bloqueos de cada agente con su nombre delante («[${executors[0]?.name ?? 'Ejecutor 1'} · informe]», «… · pregunta») y al final el estado del equipo: de cada uno si trabaja (desde cuándo y en qué), espera un trabajo en segundo plano, está libre, BLOQUEADO esperando al usuario o SIN CUOTA (y cuándo retoma), y cuántos mensajes tuyos le esperan. A quien está SIN CUOTA o BLOQUEADO no le sirve una orden nueva: reparte su trabajo urgente a otro o espera. Reglas:
 - No acuses recibo ni contestes a informes de progreso («compilando…», «sigo con…»): si no hay nada nuevo que pedir, responde sin órdenes y espera.
@@ -714,7 +716,21 @@ export class Teams {
     const said = (r.turnItems ?? []).map((id) => h._item(thread, id)).filter((x) => x?.kind === 'assistant' && x.text?.trim()).at(-1)?.text;
     const cwd = req.cwd ?? thread.worktree?.path ?? thread.projectPath;
     const name = member.name;
-    const text = [
+    const pending = held?.critical ? this._pendingDeletesFile(team) : null;
+    if (held?.critical) item.critical = true;
+    const text = (held?.critical ? [
+      `${name} quiere hacer algo que no se puede deshacer (${held.reason}):`,
+      '```', clip(String(what).replace(/```/g, "'''"), 4000), '```',
+      cwd ? `Desde ${cwd}.` : null,
+      member.task?.text ? `Su tarea: ${clip(member.task.text.replace(/\s+/g, ' '), 300)}` : null,
+      said ? `Lo último que ha dicho: ${clip(withoutOrders(said).replace(/\s+/g, ' '), 400)}` : null,
+      '',
+      'Está parado hasta que decidas. Apruébalo solo si tienes claro que lo que se pierde sobra: salidas de compilación, temporales, logs o copias que se regeneran, dentro del proyecto, y que encaja con su tarea. Si no lo ves claro (código o datos que nadie más tiene, algo fuera del proyecto, rutas que no entiendes), no se lo pases al usuario: deniégalo y dile qué hacer en su lugar, por ejemplo otra carpeta de salida, sobrescribir en vez de borrar, o mover lo viejo a una carpeta de descartes dentro del proyecto' + (pending ? `; y si no hay otra forma, que lo anote en ${pending} (qué, ruta y por qué) para limpiarlo en otro momento y siga.` : '.'),
+      '```',
+      `<relevo:aprobar para="${name}"/>`,
+      `<relevo:denegar para="${name}">por qué y qué hacer en su lugar</relevo:denegar>`,
+      '```',
+    ] : [
       `${name} pide permiso para${command ? ' ejecutar' : ''}:`,
       '```', clip(String(what).replace(/```/g, "'''"), 4000), '```',
       cwd ? `Desde ${cwd}.` : null,
@@ -729,14 +745,16 @@ export class Teams {
       `<relevo:consultar para="${name}">qué te preocupa</relevo:consultar>`,
       '```',
       'Apruébalo si encaja con su tarea y sus rutas son las del proyecto o las herramientas que ya usa el equipo. Consulta al usuario si sobrescribe o pierde datos, toca el sistema, publica o envía algo fuera, usa credenciales, o si no ves para qué lo necesita. Ante la duda, consulta.',
-    ].filter((x) => x !== null).join('\n');
+    ]).filter((x) => x !== null).join('\n');
     // Marked first: the team's status that goes with it already reads «waiting for the orchestrator».
     item.reviewBy = lead.name;
     item.reviewAt = Date.now() / 1000;
     const res = this._toLead(team, member, 'permiso', text);
     if (res !== 'sent' && res !== 'queued') { delete item.reviewBy; delete item.reviewAt; return false; }
     r.statusLine = `Esperando el permiso de ${lead.name}…`;
-    h._append(thread, { id: h._uuid(), kind: 'notice', text: `Permiso pedido a ${lead.name}: lo permite si encaja con la tarea o te lo pasa si es delicado. Puedes decidir tú aquí si prefieres.` });
+    h._append(thread, { id: h._uuid(), kind: 'notice', text: held?.critical
+      ? `Borrado pasado a ${lead.name}: lo permite si lo que se pierde sobra claramente; si no, le dice que busque otra forma o que lo anote en ${DECISIONS_DIR}/${PENDING_DELETES}. Puedes decidir tú aquí si prefieres.`
+      : `Permiso pedido a ${lead.name}: lo permite si encaja con la tarea o te lo pasa si es delicado. Puedes decidir tú aquí si prefieres.` });
     h._changed(thread);
     return true;
   }
@@ -1031,6 +1049,19 @@ export class Teams {
       fs.writeFileSync(file, `# Decisiones del equipo\n\nObjetivo: ${clip(String(team.goal ?? '').split('\n')[0], 200)}\n\nLas escribe Relevo: no edites este fichero (cámbialas con órdenes de decisión o desde la app). Las antiguas y las retiradas están en decisiones-anteriores.md.\n\n${body}`);
       team.decisionsFile = file;
     } catch (e) { this.host.log?.(`decisiones a disco: ${e.message}`); }
+  }
+
+  /** The file where deletions left for later are noted (in the project's .relevo folder, out of git). */
+  _pendingDeletesFile(team) {
+    const dir = this._decisionsDir(team);
+    if (!dir) return null;
+    const file = path.join(dir, PENDING_DELETES);
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      this._ignoreInGit(path.dirname(dir));
+      if (!fs.existsSync(file)) fs.writeFileSync(file, '# Borrados pendientes\n\nLo que un agente quería borrar y el orquestador no vio claro: revísalo y límpialo cuando toque. Una línea por cosa: qué, ruta, por qué, quién y cuándo.\n\n');
+    } catch (e) { this.host.log?.(`borrados pendientes: ${e.message}`); }
+    return file;
   }
 
   /** Decisions that leave the list (too old, or withdrawn) are kept at the end of a second file. */
@@ -1592,7 +1623,8 @@ export class Teams {
             : o.type === 'denegar' ? opts.find((x) => !x.isAllow) : null;
           if (!pick) { this._escalate(team, to, it, o.type === 'consultar' ? `${lead.name} prefiere que lo decidas tú${why ? `: ${why}` : ''}` : `${lead.name} no ha podido responderlo`); continue; }
           // Claude reads why in the denial itself; the others get it as a message when their turn ends.
-          const note = o.type === 'denegar' ? `${lead.name} (el orquestador) ha denegado esta acción${why ? `: ${why}` : '.'}` : null;
+          const pending = it.critical ? this._pendingDeletesFile(team) : null;
+          const note = o.type === 'denegar' ? `${lead.name} (el orquestador) ha denegado esta acción${why ? `: ${why}${pending && !/[.!?…]$/.test(why) ? '.' : ''}` : '.'}${pending ? ` Busca otra forma de hacerlo; si no la hay, anótalo en ${pending} (qué borrarías, la ruta y por qué) para limpiarlo en otro momento, y sigue con tu tarea.` : ''}` : null;
           h._resolve(t, it.id, pick.id, null, note);
           it.resolution = o.type === 'aprobar' ? `Permitido por ${lead.name}` : `Denegado por ${lead.name}`;
           h._touch(t, it);

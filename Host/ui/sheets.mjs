@@ -6,7 +6,7 @@ import { esc, markdown } from './markdown.mjs';
 import { icon, badge } from './icons.mjs';
 import { showMenu, openPopover, closePopover, openSheet, alertSheet, toast, chooseFolder, linkify } from './kit.mjs';
 import {
-  app, post, sendTo, request, requester, createThread, Client, uuid, host, snap, nameOf, has, accountOf, modelOf, modelName, visibleModels,
+  app, hooks, post, sendTo, request, requester, createThread, Client, uuid, host, snap, nameOf, has, accountOf, modelOf, modelName, visibleModels,
   maxPercent, threadOf, summaryOf, projectOf, shortTokens, usd, pct, grouped, reset, relative, effortName, MODES, chartColor, providerOf, copyText,
 } from './core.mjs';
 import { usageBar, statusLabel, imageData, running } from './widgets.mjs';
@@ -75,6 +75,8 @@ export function openNewProject() {
 
 const TABS = [['accounts', 'Suscripciones', 'person.2.crop.square.stack'], ['general', 'General', 'gearshape'], ['iphone', 'iPhone', 'iphone.gen3'], ['integrations', 'Integraciones', 'puzzlepiece.extension']];
 let settingsOpen = null;
+// The update check answers when GitHub does (seconds, on a slow line): the panel shows it as it arrives.
+hooks.onUpdate = () => { if (settingsOpen?.tab?.() === 'integrations') settingsOpen.redraw(); };
 
 export function openSettings(tab = 'accounts', hostId) {
   if (tab === 'updates') tab = 'integrations';
@@ -84,6 +86,7 @@ export function openSettings(tab = 'accounts', hostId) {
   if (!hosts.some(([id]) => id === state.hostId)) state.hostId = hosts[0]?.[0];
   const s = openSheet({ className: 'settings-win', width: 680, focus: false, onClose: () => { settingsOpen = null; } });
   settingsOpen = s;
+  s.tab = () => state.tab;
   const draw = () => {
     // The refresh keeps where you were scrolled in the subscription's details.
     const scrolled = s.el.querySelector('.acct-detail')?.scrollTop ?? 0;
@@ -1067,7 +1070,7 @@ export function openTeamEditor(hostId, teamId) {
         ${allFallbackRow(hostId, sharedFallback())}
       </div>
       ${has(hostId, 'guard') ? `<div class="form-group" style="margin-top:12px"><div class="form-row"><label style="display:flex;gap:8px;align-items:center"><input type="checkbox" class="check" data-guard${st.guard ? ' checked' : ''}> Guardarraíl: Relevo detiene y te pregunta antes de borrados recursivos, descartes de git o escrituras fuera de la carpeta del proyecto (recomendado, también con acceso total)</label></div></div>` : ''}
-      ${has(hostId, 'leadApproves') ? `<div class="form-group" style="margin-top:12px"><div class="form-row"><label style="display:flex;gap:8px;align-items:center"><input type="checkbox" class="check" data-lead-approves${st.leadApproves ? ' checked' : ''}> El orquestador decide los permisos de los demás agentes: permite lo que encaja con su tarea y te pasa lo delicado. Lo irreversible (borrados, descartes de git, discos) te llega siempre a ti</label></div></div>` : ''}
+      ${has(hostId, 'leadApproves') ? `<div class="form-group" style="margin-top:12px"><div class="form-row"><label style="display:flex;gap:8px;align-items:center"><input type="checkbox" class="check" data-lead-approves${st.leadApproves ? ' checked' : ''}> El orquestador decide los permisos de los demás agentes: permite lo que encaja con su tarea y te pasa lo delicado. Los borrados también: permite los que sobran claramente y, si no lo ve claro, el agente busca otra forma o lo anota en .relevo/borrados-pendientes.md. Formatear discos, tocar la raíz de un disco o un push forzado te llegan siempre a ti</label></div></div>` : ''}
       ${has(hostId, 'teamBudget') ? `<div class="form-group" style="margin-top:12px"><div class="form-row"><span class="grow">Presupuesto diario <span class="caption">(${team.members.some((m) => m.today?.cost) ? `hoy van ${usd(team.members.reduce((n, m) => n + (m.today?.cost ?? 0), 0))}` : 'coste equivalente a la API'})</span></span><input class="field-input" data-budget type="number" min="0" step="1" placeholder="sin límite" style="width:110px" value="${st.budget.usd || ''}"> USD <select class="field" data-budget-action>${[['pause', 'y entonces pausar'], ['light', 'y entonces abaratar']].map(([v, l]) => `<option value="${v}"${st.budget.action === v ? ' selected' : ''}>${l}</option>`).join('')}</select></div><div class="caption" style="padding:0 10px 8px">Abaratar: el orquestador y el investigador pasan a modelos ligeros; los ejecutores siguen igual.</div></div>` : ''}
       ${st.adds.some((a) => a.role === 'executor') && has(hostId, 'worktrees') ? `<div class="form-group" style="margin-top:12px"><div class="form-row"><label style="display:flex;gap:8px;align-items:center"><input type="checkbox" class="check" data-wt${st.worktrees ? ' checked' : ''}> Los ejecutores nuevos, cada uno en su worktree (si el proyecto es un repositorio git)</label></div></div>` : ''}
       <div class="sheet-buttons"><button class="btn" data-no>Cancelar</button><span class="grow"></span><button class="btn primary" data-go>Guardar cambios</button></div>`;

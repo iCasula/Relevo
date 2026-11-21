@@ -529,7 +529,7 @@ export class FakeSession extends EventEmitter {
       this.emit('approval', {
         key: `tool${turn}`, title: 'Bash: rm -rf build', detail: null, questions: null, toolName: 'Bash', input: { command: 'rm -rf build' },
         options: [{ id: 'allow', label: 'Permitir', isAllow: true }, { id: 'deny', label: 'Denegar', isAllow: false }],
-        respond: (choice) => { this.emit('toolFinished', `tool${turn}`, choice === 'allow', choice === 'allow' ? 'borrado' : 'Denegado'); finish(); },
+        respond: (choice, answers, note) => { this.emit('toolFinished', `tool${turn}`, choice === 'allow', choice === 'allow' ? 'borrado' : `Denegado: ${note ?? ''}`); finish(); },
       });
       return;
     }

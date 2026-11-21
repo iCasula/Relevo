@@ -105,3 +105,30 @@ test('only what cannot be undone is critical: the rest can be approved by the or
   assert.equal(crit('echo x > D:\\notes.txt'), false);
   assert.equal(checkRequest({ toolName: 'Write', input: { file_path: 'D:\\otra\\x.c' } }, W).critical, undefined);
 });
+
+test('relative paths are judged from where the command\'s own cd left it', () => {
+  // TORRE: «borra fuera de la carpeta del proyecto (../padfix8-build.log)», but it was out/padfix8-build.log.
+  assert.equal(held("cd /v/masseffect/me1-sw2/out/scan; wsl -e bash -lc \"ps -ef | grep -c '[b]uild_padfix8'\"; rm -f ../padfix8-build.log; nohup wsl -e bash build_padfix8.sh >/dev/null 2>&1 & echo started"), null);
+  assert.equal(held('cd out\\scan && Remove-Item ..\\old.log'), null);
+  assert.equal(held('Set-Location -LiteralPath "V:\\masseffect\\me1-sw2\\out"; del ..\\notes.txt'), null);
+  assert.equal(held('cd /mnt/v/masseffect/me1-sw2/out/scan && rm ../x.log'), null);
+  // Still out of the project once you follow the cd.
+  assert.match(held('cd /v/masseffect/me1-sw2/out && rm -f ../../other.log'), /borra fuera de la carpeta del proyecto/);
+  assert.match(held('cd V:\\masseffect && rm notes.txt ..\\x.txt'), /fuera de la carpeta/);
+  // A wrapper's cd stays inside it; a folder that can't be known keeps the one before.
+  assert.match(held("bash -c 'cd /v/masseffect/me1-sw2/out/scan'; rm ../x.log"), /fuera de la carpeta/);
+  assert.equal(held("bash -lc 'cd out/scan && rm ../x.log'"), null);
+  assert.match(held('cd $BUILD; rm ../x.log'), /fuera de la carpeta/);
+  assert.equal(held('cd /home/u/proj/a/b && rm ../c.txt', U), null);
+  assert.match(held('cd /home/u/proj && rm ../c.txt', U), /fuera de la carpeta/);
+});
+
+test('only disks and a forced push are yours alone; other deletions can go to the orchestrator', () => {
+  const only = (cmd) => checkCommand(cmd, W)?.userOnly ?? false;
+  assert.equal(only('rm -rf build'), false);
+  assert.equal(only('git reset --hard HEAD~1'), false);
+  assert.equal(only('Remove-Item -Recurse C:\\otro'), false);
+  assert.equal(only('format D:'), true);
+  assert.equal(only('git push --force origin master'), true);
+  assert.equal(only('rm -rf V:\\'), true);
+});

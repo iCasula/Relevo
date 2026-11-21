@@ -7,15 +7,34 @@
 // - formatting disks;
 // - deleting, moving or writing outside the project folder (its worktrees and the temp folder are fine);
 // - deleting through a path held in a variable, which can't be checked before it expands.
-// Those come to you as a permission request, with the reason. In a team, only what can't be undone (deletions,
-// discarding work, disks) always waits for you: a write outside the project goes to the orchestrator first,
-// which approves it or passes it on to you (see Teams.onApproval).
+// Those come to you as a permission request, with the reason. In a team the orchestrator decides first, deletions
+// included: it allows what's clearly disposable, and otherwise tells the agent to find another way or to note it
+// for a later clean-up (see Teams.onApproval). Only disks (formatting, a drive's root) and a forced push always
+// wait for you (`userOnly`).
 
 import os from 'node:os';
 import path from 'node:path';
 
 // Commands are split on these so each part is judged alone ("cd x && rm -rf y").
 const SPLIT = /\s*(?:&&|\|\||;|\||\r?\n)\s*/;
+
+/** The command's parts, split on && || ; | and new lines outside quotes (a quoted «bash -c '…'» stays whole). */
+function splitCommand(cmd) {
+  const out = [];
+  let cur = '', quote = null;
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd[i];
+    if (quote) { if (c === quote) quote = null; cur += c; continue; }
+    if (c === '"' || c === "'") { quote = c; cur += c; continue; }
+    const two = cmd.slice(i, i + 2);
+    if (two === '&&' || two === '||') { out.push(cur); cur = ''; i++; continue; }
+    if (c === ';' || c === '|' || c === '\n') { out.push(cur); cur = ''; continue; }
+    cur += c;
+  }
+  out.push(cur);
+  // An unclosed quote: split it all the old way, so nothing hides behind it.
+  return (quote ? cmd.split(SPLIT) : out).map((p) => p.trim()).filter(Boolean);
+}
 
 const DESTRUCTIVE = [
   [/(?:^|[\s(])(?:sudo\s+)?rm\s+(?:[^\s]*\s+)*?(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)\b/, 'borrado recursivo (rm -r)'],
@@ -35,6 +54,9 @@ const DESTRUCTIVE = [
   [/(?:^|[\s(])robocopy\b[^\n]*\s\/(?:MIR|PURGE)\b/i, 'robocopy /MIR o /PURGE (borra en el destino)'],
   [/shutil\.rmtree|\brimraf\b|fs\.rm(?:Sync)?\([^)]*recursive|Directory\.Delete\([^)]*true/, 'borrado recursivo desde código'],
 ];
+
+/** What only you decide, even in a team: it reaches beyond the project (a whole disk, a shared remote). */
+const USER_ONLY = new Set(['formateo de disco', 'git push --force']);
 
 // Verbs that delete, move or write files: their path arguments must stay inside the allowed folders.
 const DELETE_VERB = /^(?:sudo\s+)?(?:rm|rmdir|del|erase|rd|Remove-Item|ri|unlink|shred|truncate)\b/i;
@@ -82,6 +104,22 @@ function resolveFrom(cwd, p) {
   return win ? path.win32.resolve(cwd, p) : path.posix.resolve(cwd ?? '/', p);
 }
 
+/**
+ * Where a «cd» (pushd, Set-Location) takes the command, or undefined if the part isn't one. A folder that can't be
+ * known before it runs (a variable, «cd -») keeps the one before: relative paths are judged from there, as before.
+ */
+function changeDir(part, from, platform) {
+  const m = /^(?:cd|chdir|pushd|Set-Location|sl)(?:\s+\/d)?(?:\s+-(?:LiteralPath|Path))?\s+("[^"]+"|'[^']+'|[^\s;&|<>]+)\s*$/i.exec(part);
+  if (!m) return /^(?:cd|chdir|pushd|Set-Location|sl)\s*$/i.test(part) ? from : undefined;
+  const dir = m[1].replace(/^["']|["']$/g, '');
+  if (/\$|%\w+%|^-$|^~/.test(dir)) return from;
+  if (/^(?:[A-Za-z]:[\\/]|\/)/.test(dir)) {
+    const n = normalize(dir, platform);
+    return /^[a-z]:\\/i.test(n) ? n : dir;   // /v/x on Windows and /mnt/v/x are V:\x
+  }
+  return from ? resolveFrom(from, dir) : from;
+}
+
 /** The arguments of a command, quotes respected. */
 function words(text) {
   return [...String(text).matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)].map((m) => m[1] ?? m[2] ?? m[3]);
@@ -103,13 +141,24 @@ export function checkCommand(command, { roots = [], cwd = null, platform = proce
   const cmd = String(command ?? '').replace(/<<-?[ \t]*(["']?)([A-Za-z_]\w*)\1([^\n]*)\n[\s\S]*?\n[ \t]*\2[ \t]*(?=\n|$)/g, '<<$1$2$1$3').trim();
   if (!cmd) return null;
   // A wrapper's inner command counts too: bash -lc '…', powershell -Command "…", wsl -- …, cmd /c …
-  const parts = cmd.split(SPLIT).flatMap((p) => {
+  // Each part is judged from the folder the command's own «cd» left it in (a wrapper's «cd» stays inside it).
+  let here = cwd;
+  const parts = splitCommand(cmd).flatMap((p) => {
     const inner = /(?:bash|sh|zsh)\s+(?:-\w+\s+)*-c\s+(["'])([\s\S]*)\1/.exec(p) ?? /(?:powershell(?:\.exe)?|pwsh)\b[^"']*?-(?:Command|c)\s+(["'])([\s\S]*)\1/i.exec(p) ?? /cmd(?:\.exe)?\s+\/[cCkK]\s+(["']?)([\s\S]*)\1/.exec(p);
-    return inner ? [p, ...inner[2].split(SPLIT)] : [p];
+    return inner ? [{ raw: p }, ...splitCommand(inner[2]).map((x, i) => ({ raw: x, inner: true, first: i === 0 }))] : [{ raw: p }];
   });
-  for (const raw of parts) {
+  let innerHere = cwd;
+  for (const { raw, inner, first } of parts) {
     const part = raw.replace(/^(?:wsl(?:\.exe)?\s+(?:-\S+\s+(?:\S+\s+)?)*--\s+|sudo\s+|env\s+(?:\S+=\S+\s+)*|exec\s+)/i, '').trim();
-    for (const [re, why] of DESTRUCTIVE) if (re.test(part)) return { reason: why, critical: true };
+    if (inner && first) innerHere = here;
+    const from = inner ? innerHere : here;
+    const moved = changeDir(part, from, platform);
+    if (moved !== undefined) { if (inner) innerHere = moved; else here = moved; continue; }
+    for (const [re, why] of DESTRUCTIVE) {
+      if (!re.test(part)) continue;
+      const root = absolutePaths(part).find((p) => isRoot(p, platform));
+      return root ? { reason: `${why} sobre la raíz de un disco (${root})`, critical: true, userOnly: true } : { reason: why, critical: true, userOnly: USER_ONLY.has(why) || undefined };
+    }
     const deletes = DELETE_VERB.test(part);
     const verb = deletes || WRITE_VERB.test(part);
     const redirects = [...part.matchAll(/(?:^|[^>&\d])\d?>{1,2}[ \t]*("[^"]+"|'[^']+'|[^\s;&|<>]+)/g)].map((m) => m[1].replace(/^["']|["']$/g, ''))
@@ -127,13 +176,13 @@ export function checkCommand(command, { roots = [], cwd = null, platform = proce
       checked = [...(dest && /^(?:[A-Za-z]:[\\/]|\\\\|~|\/)/.test(dest) ? [dest] : []), ...redirects];
     }
     for (const p of checked) {
-      if (isRoot(p, platform)) return { reason: `opera sobre la raíz de un disco (${p})`, critical: true };
+      if (isRoot(p, platform)) return { reason: `opera sobre la raíz de un disco (${p})`, critical: true, userOnly: true };
       if (!inside(p, roots, platform)) return { reason: `${deletes ? 'borra' : /^(?:mv|move|Move-Item|mi)\b/i.test(part) ? 'mueve' : 'escribe'} fuera de la carpeta del proyecto (${p})`, critical: deletes };
     }
     // ..\..\ out of the project from where it runs.
-    if (cwd && /(?:^|[\s"'])\.\.[\\/]/.test(part)) {
+    if (from && /(?:^|[\s"'])\.\.[\\/]/.test(part)) {
       for (const m of part.matchAll(/(?:^|[\s"'])((?:\.\.[\\/])+[^\s"'|;&<>]*)/g)) {
-        const abs = resolveFrom(cwd, m[1]);
+        const abs = resolveFrom(from, m[1]);
         if (!inside(abs, roots, platform)) return { reason: `${deletes ? 'borra' : 'escribe'} fuera de la carpeta del proyecto (${m[1]})`, critical: deletes };
       }
     }

@@ -40,7 +40,7 @@ export function save(key, value) {
 }
 
 /** Re-render hooks set by the main window (keeps modules free of import cycles at load time). */
-export const hooks = { render() {}, renderThread() {}, onServer() {}, onInit() {} };
+export const hooks = { render() {}, renderThread() {}, onServer() {}, onInit() {}, onUpdate() {} };
 
 // MARK: - Lookups
 
@@ -153,7 +153,7 @@ function onEvent(ev) {
     case 'hostAdded': adopt(ev.host); hooks.render(); break;
     case 'hostRemoved': app.hosts.delete(ev.host); hooks.render(); break;
     case 'toast': toast(ev.text); break;
-    case 'update': app.update = ev.update; hooks.render(); break;
+    case 'update': app.update = ev.update; hooks.render(); hooks.onUpdate(); break;
     case 'server': {
       const h = host(ev.host);
       if (!h) break;
