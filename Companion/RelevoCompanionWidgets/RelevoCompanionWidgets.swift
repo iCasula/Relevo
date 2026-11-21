@@ -25,7 +25,7 @@ struct RelevoLiveActivity: Widget {
                         .padding(.leading, 4)
                 }
                 DynamicIslandExpandedRegion(.trailing) {
-                    PhaseBadge(phase: state.phase, isStale: context.isStale)
+                    PhaseBadge(state: state, isStale: context.isStale)
                 }
                 DynamicIslandExpandedRegion(.center) {
                     VStack(spacing: 1) {
@@ -57,6 +57,9 @@ struct RelevoLiveActivity: Widget {
                                 .foregroundStyle(.secondary)
                                 .lineLimit(2)
                         }
+                        if let agents = state.agents, !agents.isEmpty, !context.isStale {
+                            AgentsRow(agents: agents, compact: true)
+                        }
                     }
                     .padding(.top, 4)
                 }
@@ -64,11 +67,11 @@ struct RelevoLiveActivity: Widget {
                 Image(systemName: state.symbol ?? "arrow.triangle.2.circlepath")
                     .foregroundStyle(state.tintColor)
             } compactTrailing: {
-                Image(systemName: context.isStale ? "clock.badge.questionmark" : state.phase.symbol)
-                    .foregroundStyle(context.isStale ? .gray : state.phase.color)
+                Image(systemName: context.isStale ? "clock.badge.questionmark" : state.phaseSymbol)
+                    .foregroundStyle(context.isStale ? .gray : state.phaseColor)
             } minimal: {
-                Image(systemName: state.phase == .needsYou ? state.phase.symbol : (state.symbol ?? state.phase.symbol))
-                    .foregroundStyle(state.phase == .needsYou ? state.phase.color : state.tintColor)
+                Image(systemName: state.phase == .needsYou || state.isReady ? state.phaseSymbol : (state.symbol ?? state.phase.symbol))
+                    .foregroundStyle(state.phase == .needsYou || state.isReady ? state.phaseColor : state.tintColor)
             }
             .widgetURL(DeepLink.thread(state.threadId))
             .keylineTint(state.phase == .needsYou ? .orange : state.tintColor)

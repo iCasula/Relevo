@@ -29,7 +29,30 @@ public struct RelevoActivityState: Codable, Hashable, Sendable {
         }
     }
 
+    /// One agent of a team, for the line of agents on the Lock Screen.
+    public struct Agent: Codable, Hashable, Sendable {
+        public var name: String
+        /// orchestrator, executor or researcher.
+        public var role: String
+        /// needsYou, working, background, reviewing (a permission the orchestrator is deciding), limit or free.
+        public var state: String
+
+        public init(name: String, role: String, state: String) {
+            self.name = name
+            self.role = role
+            self.state = state
+        }
+    }
+
     public var phase: Phase
+    /// (Relevo hosts) A `finished` that is the orchestrator talking to you: done for now, waiting for your answer.
+    public var ready: Bool?
+    /// (Relevo hosts) A team's line under its title: milestones, the goal, a pause.
+    public var detail: String?
+    /// (Relevo hosts) Each agent of the team shown and where it stands.
+    public var agents: [Agent]?
+    /// (Relevo hosts) Other teams or threads with something going on besides the one shown.
+    public var others: Int?
     public var threadId: UUID?
     public var threadTitle: String
     public var accountName: String?
@@ -45,8 +68,13 @@ public struct RelevoActivityState: Codable, Hashable, Sendable {
     public var updatedAt: Double
 
     public init(phase: Phase, threadId: UUID?, threadTitle: String, accountName: String?, symbol: String?, tint: String?,
-                model: String?, statusLine: String?, approval: Approval?, running: Int, waiting: Int, updatedAt: Double) {
+                model: String?, statusLine: String?, approval: Approval?, running: Int, waiting: Int, updatedAt: Double,
+                ready: Bool? = nil, detail: String? = nil, agents: [Agent]? = nil, others: Int? = nil) {
         self.phase = phase
+        self.ready = ready
+        self.detail = detail
+        self.agents = agents
+        self.others = others
         self.threadId = threadId
         self.threadTitle = threadTitle
         self.accountName = accountName

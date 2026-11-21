@@ -2059,25 +2059,100 @@ export class Host {
     return clean({ id: t.id, title: t.title, items: t.items.slice(-SENT_ITEMS), totalItems: t.totalItems, runtime: this._runtime(t), worktree: t.worktree ?? null });
   }
 
+  /**
+   * What the iPhone Live Activity shows: one view of the host, on what matters most right now. A team is one
+   * unit seen from its orchestrator (with a line per agent), not whichever of its agents happens to be
+   * working; a thread on its own is another. Most urgent first: something waits for you (a permission, a
+   * question, a held command), the orchestrator is done and talking to you, work going on, out of quota,
+   * finished a moment ago.
+   */
   _activity() {
-    const list = [...this.threads.values()];
-    const waiting = list.filter((t) => this._rt(t).approvals.size);
-    const running = list.filter((t) => this._rt(t).isRunning);
-    const recent = list.filter((t) => this._rt(t).finishedAt && Date.now() - this._rt(t).finishedAt < 10 * 60_000)
-      .sort((a, b) => this._rt(b).finishedAt - this._rt(a).finishedAt);
-    const focus = waiting[0] ?? running[0] ?? recent[0];
-    const phase = waiting.length ? 'needsYou' : running.length ? 'working' : recent.length ? 'finished' : 'idle';
-    let approval = null;
-    if (waiting[0]) {
-      const [itemId] = this._rt(waiting[0]).approvals.keys();
-      const it = this._item(waiting[0], itemId);
-      if (it) approval = clean({ itemId, title: it.title ?? it.text, detail: it.output, options: it.options ?? [] });
+    const RANK = { needsYou: 5, ready: 4, working: 3, limit: 2, finished: 1, idle: 0 };
+    const recent = (t) => this._rt(t).finishedAt && Date.now() - this._rt(t).finishedAt < 10 * 60_000;
+    // A permission the orchestrator is deciding isn't waiting for you (yet).
+    const asks = (t) => [...this._rt(t).approvals.keys()].map((id) => this._item(t, id))
+      .filter((i) => i && !(i.reviewBy && !i.escalated && !i.resolution));
+    const stateOf = (t) => {
+      const r = this._rt(t);
+      if (asks(t).length || t.attention?.kind === 'guard') return 'needsYou';
+      if (r.isRunning) return 'working';
+      if (r.backgroundTasks?.length) return 'background';
+      if (r.approvals.size) return 'reviewing';
+      if (r.limit || r.resumeAt || r.pendingRelay) return 'limit';
+      return 'free';
+    };
+    const plain = (s, n) => (s ? String(s).replace(/\s+/g, ' ').trim().slice(0, n) : null);
+    const lastSaid = (t) => { for (let i = t.items.length - 1; i >= 0; i--) if (t.items[i].kind === 'assistant' && t.items[i].text?.trim()) return t.items[i]; return null; };
+    const units = [];
+    const inTeam = new Set();
+    for (const team of this.teams.list) {
+      const members = team.members.map((m) => ({ m, t: this.threads.get(m.threadId) })).filter((x) => x.t);
+      if (!members.length) continue;
+      for (const { t } of members) inTeam.add(t.id);
+      const lead = members.find((x) => x.m.role === 'orchestrator') ?? members[0];
+      const states = members.map((x) => ({ ...x, state: stateOf(x.t) }));
+      const asking = states.find((x) => x.state === 'needsYou');
+      const busy = states.filter((x) => ['working', 'background', 'reviewing'].includes(x.state));
+      const talking = lead.t.attention && lead.t.attention.kind !== 'guard' ? lead.t.attention : null;
+      const phase = asking ? 'needsYou' : busy.length ? 'working' : talking ? 'ready'
+        : states.some((x) => x.state === 'limit') ? 'limit' : recent(lead.t) ? 'finished' : 'idle';
+      const focus = asking?.t ?? (busy.find((x) => x.m.role === 'orchestrator') ?? busy[0])?.t ?? lead.t;
+      let headline;
+      if (asking) {
+        const ask = asks(asking.t)[0];
+        headline = ask?.questions?.length ? `${asking.m.name} te pregunta` : ask ? `${asking.m.name} necesita tu permiso` : `${asking.m.name}: ${plain(asking.t.attention?.text, 140)}`;
+      } else if (phase === 'working') {
+        const r = this._rt(focus);
+        const who = team.members.find((m) => m.threadId === focus.id)?.name;
+        const doing = r.isRunning ? plain(r.statusLine, 140) : r.backgroundTasks?.length ? `esperando ${plain(r.backgroundTasks[0].description, 100) ?? 'un trabajo en segundo plano'}`
+          : `esperando que ${lead.m.name} decida un permiso`;
+        headline = `${who}: ${doing || 'trabajando'}`;
+      } else if (talking) headline = plain(talking.text, 160);
+      else if (phase === 'limit') headline = 'Sin cuota: sigue solo en cuanto vuelva';
+      else headline = plain(lastSaid(lead.t)?.text, 160);
+      const done = (team.milestones ?? []).filter((x) => x.done).length;
+      const project = this.projects().find((p) => p.id === team.projectId)?.name;
+      units.push({
+        phase, focus, lead: lead.t, headline, team,
+        title: `Equipo${project ? ` · ${project}` : ''}`,
+        detail: [team.status === 'paused' ? 'En pausa' : null, team.milestones?.length ? `Hitos ${done}/${team.milestones.length}` : null, plain(team.goal?.split('\n')[0], 60)].filter(Boolean).join(' · '),
+        agents: states.map((x) => ({ name: x.m.name, role: x.m.role, state: x.state })),
+        at: Math.max(...members.map((x) => x.t.updatedAt ?? 0)),
+      });
     }
-    const account = focus ? this._account(focus) : null;
+    for (const t of this.threads.values()) {
+      if (inTeam.has(t.id)) continue;
+      const state = stateOf(t);
+      const phase = state === 'needsYou' ? 'needsYou' : state === 'working' || state === 'background' ? 'working'
+        : state === 'limit' ? 'limit' : recent(t) ? 'finished' : 'idle';
+      if (phase === 'idle') continue;
+      const r = this._rt(t);
+      const headline = phase === 'working' ? (r.isRunning ? plain(r.statusLine, 140) : `Esperando ${plain(r.backgroundTasks?.[0]?.description, 100) ?? 'un trabajo en segundo plano'}`)
+        : phase === 'finished' ? plain(lastSaid(t)?.text, 160) : plain(r.statusLine, 140);
+      units.push({ phase, focus: t, lead: t, headline, title: t.title, at: t.updatedAt ?? 0 });
+    }
+    units.sort((a, b) => RANK[b.phase] - RANK[a.phase] || b.at - a.at);
+    const top = units.find((u) => u.phase !== 'idle');
+    const all = [...this.threads.values()];
+    const running = all.filter((t) => this._rt(t).isRunning).length;
+    const waiting = all.filter((t) => asks(t).length).length;
+    if (!top) return clean({ phase: 'idle', threadId: null, threadTitle: '', running, waiting, updatedAt: now() });
+    const focus = top.focus;
+    let approval = null;
+    const ask = asks(focus)[0];
+    if (top.phase === 'needsYou' && ask && !ask.questions?.length) approval = clean({ itemId: ask.id, title: ask.title ?? ask.text, detail: ask.output, options: ask.options ?? [] });
+    // The lead's model for a team (who you deal with), the thread's own otherwise.
+    const who = top.team ? top.lead : focus;
+    const account = this._account(who);
     return clean({
-      phase, threadId: focus?.id, threadTitle: focus?.title ?? '', accountName: account?.name,
-      symbol: account?.symbol, tint: account?.tint, model: focus?.model,
-      statusLine: focus ? this._rt(focus).statusLine : null, approval, running: running.length, waiting: waiting.length, updatedAt: now(),
+      // `ready` is new: older apps don't know it, so it travels as `finished` with the reason in `headline`.
+      phase: top.phase === 'ready' ? 'finished' : top.phase, ready: top.phase === 'ready' || undefined,
+      threadId: approval ? focus.id : top.team ? (top.phase === 'needsYou' ? focus.id : top.lead.id) : focus.id,
+      threadTitle: top.title ?? '', accountName: account?.name, symbol: account?.symbol, tint: account?.tint, model: who.model,
+      statusLine: top.headline ?? null, detail: top.detail || undefined, agents: top.agents,
+      // Other things going on besides the one shown.
+      others: units.filter((u) => u !== top && u.phase !== 'idle').length || undefined,
+      approval, running, waiting, updatedAt: now(),
     });
   }
 

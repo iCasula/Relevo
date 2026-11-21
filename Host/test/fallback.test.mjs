@@ -495,3 +495,47 @@ test('decisions are written whole in the project, out of git, and the old or wit
   assert.equal(old.decisions[0].full, 'La lista está muerta: nadie inserta y FIOS sí lee Core.xxx.');
   fs.rmSync(root, { recursive: true, force: true });
 });
+
+test('the Live Activity: a team is one, seen from its orchestrator, with a line per agent; you first', () => {
+  const lead = { id: 'L', title: 'Orquestador', items: [{ kind: 'assistant', text: 'Hecho el reparto.' }], updatedAt: 10, model: 'sonnet' };
+  const ex = { id: 'E', title: 'Ejecutor 1', items: [], updatedAt: 9 };
+  const solo = { id: 'S', title: 'Arreglar login', items: [], updatedAt: 8 };
+  const rts = new Map([['L', { approvals: new Map() }], ['E', { approvals: new Map(), isRunning: true, statusLine: 'make -j8' }], ['S', { approvals: new Map() }]]);
+  const team = { id: 'T', projectId: 'P', goal: 'Mass Effect en Switch 2\nfase 1', milestones: [{ done: true }, { done: false }],
+    members: [{ threadId: 'L', role: 'orchestrator', name: 'Orquestador' }, { threadId: 'E', role: 'executor', name: 'Ejecutor 1' }] };
+  const h = {
+    threads: new Map([['L', lead], ['E', ex], ['S', solo]]), teams: { list: [team] }, _rt: (t) => rts.get(t.id),
+    _item: (t, id) => t.items.find((i) => i.id === id), _account: () => ({ name: 'Claude', symbol: 'asterisk' }), projects: () => [{ id: 'P', name: 'masseffect' }],
+  };
+  let a = P._activity.call(h);
+  assert.equal(a.phase, 'working');
+  assert.equal(a.threadTitle, 'Equipo · masseffect');
+  assert.equal(a.threadId, 'L', 'tapping it opens the orchestrator');
+  assert.equal(a.statusLine, 'Ejecutor 1: make -j8');
+  assert.equal(a.detail, 'Hitos 1/2 · Mass Effect en Switch 2');
+  assert.deepEqual(a.agents, [{ name: 'Orquestador', role: 'orchestrator', state: 'free' }, { name: 'Ejecutor 1', role: 'executor', state: 'working' }]);
+  // A permission the orchestrator is deciding is not for you yet.
+  ex.items.push({ id: 'p1', kind: 'approval', title: 'cp a /opt', options: [{ id: 'allow', label: 'Permitir', isAllow: true }], reviewBy: 'L' });
+  rts.get('E').approvals.set('p1', {});
+  rts.get('E').isRunning = false;
+  a = P._activity.call(h);
+  assert.equal(a.phase, 'working');
+  assert.equal(a.agents[1].state, 'reviewing');
+  assert.equal(a.statusLine, 'Ejecutor 1: esperando que Orquestador decida un permiso');
+  // Passed on to you: you first, with its buttons, from the executor's thread.
+  ex.items[0].escalated = true;
+  a = P._activity.call(h);
+  assert.equal(a.phase, 'needsYou');
+  assert.equal(a.threadId, 'E');
+  assert.equal(a.statusLine, 'Ejecutor 1 necesita tu permiso');
+  assert.equal(a.approval.title, 'cp a /opt');
+  // Done and talking to you, while a thread of its own works: the orchestrator waiting is shown, the other counted.
+  ex.items[0].resolution = 'Permitido'; rts.get('E').approvals.clear();
+  lead.attention = { kind: 'orquestador', text: 'Fase 1 cerrada. ¿Empezamos la fase 2?' };
+  rts.get('S').isRunning = true;
+  a = P._activity.call(h);
+  assert.equal(a.phase, 'finished');
+  assert.equal(a.ready, true);
+  assert.equal(a.statusLine, 'Fase 1 cerrada. ¿Empezamos la fase 2?');
+  assert.equal(a.others, 1);
+});

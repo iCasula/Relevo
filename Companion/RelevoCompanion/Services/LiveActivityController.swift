@@ -36,7 +36,10 @@ final class LiveActivityController {
             deviceId = UUID().uuidString
             UserDefaults.standard.set(deviceId, forKey: Self.deviceKey)
         }
-        if let existing = Activity<RelevoActivityAttributes>.activities.first { adopt(existing) }
+        // One activity only: keep the live one (the newest), end any other left over (an older run, a push).
+        let live = Activity<RelevoActivityAttributes>.activities.filter { $0.activityState == .active || $0.activityState == .stale }
+        if let keep = live.last { adopt(keep) }
+        endOthers(than: live.last?.id)
         watchSystemActivities()
     }
 
@@ -66,7 +69,7 @@ final class LiveActivityController {
         defer { lastState = state }
         let content = ActivityContent(state: state,
                                       staleDate: state.phase == .working ? Date().addingTimeInterval(30 * 60) : nil,
-                                      relevanceScore: state.phase == .needsYou ? 100 : 50)
+                                      relevanceScore: state.phase == .needsYou ? 100 : state.ready == true ? 80 : 50)
         if let id = activity?.id {
             if state.phase == .idle {
                 let final = ActivityContent(state: lastState ?? state, staleDate: nil)
@@ -75,7 +78,9 @@ final class LiveActivityController {
             } else if lastState.map({ !$0.sameContent(as: state) }) ?? true {
                 Task { await ActivityUpdater.update(id: id, content: content) }
             }
-        } else if [.needsYou, .working, .limit].contains(state.phase) {
+        } else if [.needsYou, .working, .limit].contains(state.phase) || state.ready == true {
+            // A finished one may still be on screen until it is dismissed: it goes now, so there is never two.
+            endOthers(than: nil)
             do {
                 let new = try Activity.request(attributes: RelevoActivityAttributes(macName: macName), content: content, pushType: .token)
                 adopt(new)
@@ -97,6 +102,13 @@ final class LiveActivityController {
     /// Back in the app: the next state from the Mac rewrites the activity (and its stale date) even if unchanged.
     func appDidEnterForeground() {
         lastState = nil
+    }
+
+    /// Ends at once every activity but the one given (finished ones waiting to be dismissed included).
+    private func endOthers(than keep: String?) {
+        for id in Activity<RelevoActivityAttributes>.activities.map(\.id) where id != keep {
+            Task { await ActivityUpdater.end(id: id, content: nil, dismissal: .immediate) }
+        }
     }
 
     func endAll() {
@@ -144,6 +156,7 @@ final class LiveActivityController {
         Task { [weak self] in
             for await started in Activity<RelevoActivityAttributes>.activityUpdates {
                 guard let self, self.activity?.id != started.id else { continue }
+                self.endOthers(than: started.id)
                 self.adopt(started)
             }
         }
