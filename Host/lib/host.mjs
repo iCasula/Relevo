@@ -1353,7 +1353,9 @@ export class Host {
       t.title = first.length > 60 ? `${first.slice(0, 57)}…` : first;
     }
     let prompt = meta.prompt ?? text;
-    const teamPrefix = this.teams.promptPrefix(t, t.handoffPending);
+    // Back in its own session after a while on another model: what it knew is old, so a team member gets the
+    // team's memory again (decisions, library, board), as a fresh session would.
+    const teamPrefix = this.teams.promptPrefix(t, t.handoffPending || t.catchUpFrom != null);
     if (t.handoffPending) {
       const accounts = new Map(this.accounts.map((a) => [a.id, a]));
       const workState = gitops.workState(t.projectPath);
@@ -1366,7 +1368,10 @@ export class Host {
     } else if (t.catchUpFrom != null) {
       // Back in its own session: only what happened while it was away.
       const accounts = new Map(this.accounts.map((a) => [a.id, a]));
-      prompt = catchUpText({ items: t.items.slice(t.catchUpFrom), accounts, workState: gitops.workState(t.projectPath), pendingRequest }) + prompt;
+      const away = t.items.slice(t.catchUpFrom);
+      const workState = gitops.workState(t.projectPath);
+      const traceFile = saveTrace({ dir: this._traceDir(t), threadId: t.id, title: t.title, items: away, accounts, workState });
+      prompt = catchUpText({ items: away, accounts, workState, pendingRequest, traceFile }) + prompt;
       t.catchUpFrom = null;
     }
     if (t.restoreNote) { prompt = `${t.restoreNote}\n\n${prompt}`; t.restoreNote = null; }

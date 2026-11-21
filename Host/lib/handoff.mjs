@@ -174,13 +174,17 @@ function backgroundBlock(background) {
  * Back in its own earlier session (it kept everything it knew): only what other agents did in this thread
  * while it was away, and the git state now.
  */
-export function catchUpText({ items, accounts, workState = null, pendingRequest = false, budget = 6000 }) {
+/**
+ * Back in its own session after another model carried the thread: what happened meanwhile, newest turns
+ * first while they fit, and the whole stretch in a file for what doesn't.
+ */
+export function catchUpText({ items, accounts, workState = null, pendingRequest = false, traceFile = null, budget = BRIEF_BUDGET }) {
   const turns = turnsOf(items);
   const lines = [];
   let room = budget;
   for (let i = turns.length - 1; i >= 0; i--) {
     const line = turnLine(turns[i], i + 1, accounts, { isFirst: false });
-    if (line.length > room) { lines.unshift(`- (${i + 1} turno${i ? 's' : ''} anterior${i ? 'es' : ''} sin resumir aquí)`); break; }
+    if (line.length > room) { lines.unshift(`- (${i + 1} turno${i ? 's' : ''} anterior${i ? 'es' : ''} sin resumir aquí${traceFile ? ': léelos en la traza' : ''})`); break; }
     lines.unshift(line);
     room -= line.length + 1;
   }
@@ -188,7 +192,7 @@ export function catchUpText({ items, accounts, workState = null, pendingRequest 
   return `<relevo_mientras_tanto>
 Vuelves a este hilo en tu propia sesión: conservas todo lo que sabías. Mientras no estabas, ${agents || 'otro agente'} siguió con él (por cuota). Lo que hizo:
 ${lines.join('\n') || '- Nada que contar.'}
-${workState ? `\nEstado de git ahora:\n${clip(workState, STATE_MAX)}\n` : ''}Comprueba en disco lo que haya cambiado antes de seguir.
+${workState ? `\nEstado de git ahora:\n${clip(workState, STATE_MAX)}\n` : ''}${traceFile ? `\nLo que pasó mientras no estabas, entero, está en ${traceFile}: si el resumen no basta (te falta por qué se decidió algo, qué se descartó o en qué punto está una investigación), léelo antes de responder.\n` : ''}Comprueba en disco lo que haya cambiado antes de seguir.
 </relevo_mientras_tanto>
 
 ${pendingRequest ? 'La última petición del usuario quedó sin terminar. Continúa con ella desde donde se quedó:' : 'Nuevo mensaje del usuario:'}

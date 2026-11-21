@@ -104,6 +104,15 @@ test('back in its own session, an agent hears only what happened while it was aw
   assert.match(text, /quedó sin terminar/);
 });
 
+test('a long time away: the newest turns in the catch-up, the rest in the trace it is pointed to', () => {
+  const items = Array.from({ length: 60 }, (_, i) => [{ kind: 'user', text: `informe ${i} ${'dato '.repeat(60)}` }, { kind: 'assistant', text: `decido ${i} ${'paso '.repeat(80)}`, accountId: 'X' }]).flat();
+  const text = catchUpText({ items, accounts: new Map([['X', { name: 'DeepSeek', agentName: 'DeepSeek' }]]), traceFile: 'C:\\trazas\\orq.md' });
+  assert.match(text, /decido 59/, 'the latest turn is there');
+  assert.ok(text.length > 10_000, 'room for many turns, not a handful');
+  assert.match(text, /turnos anteriores sin resumir aquí: léelos en la traza/);
+  assert.match(text, /entero, está en C:\\trazas\\orq\.md/);
+});
+
 test("the day's summary: milestones, decisions, research and spend, without an AI", () => {
   const today = Date.now() / 1000;
   const host = { threads: new Map([['L', {}], ['E', {}]]), _spendToday: () => ({ tokens: 120_000, cost: 1.5, estimated: true }) };
@@ -454,4 +463,35 @@ test("the researcher's report reaches the orchestrator from its conclusion, and 
   assert.doesNotMatch(sent[0].text, /He revisado/);
   assert.equal(team.findings[0].topic, '¿Por qué Vulkan da 0 dispositivos?');
   assert.equal(inv.findingsSeen, 1);
+});
+
+test('decisions are written whole in the project, out of git, and the old or withdrawn ones kept apart', async () => {
+  const fs = await import('node:fs'); const os = await import('node:os'); const path = await import('node:path');
+  const { execFileSync } = await import('node:child_process');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relevo-dec-'));
+  execFileSync('git', ['init', '-q'], { cwd: root });
+  const teams = Object.create(Teams.prototype);
+  teams.host = { projects: () => [{ id: 'P', path: root }], _saveState() {}, _broadcastSnapshot() {}, threads: new Map() };
+  const team = { id: 'T', projectId: 'P', goal: 'Mass Effect', members: [] };
+  const long = `Comprobado 20-nov: ${'el gestor 0x2777c00 no se llena '.repeat(30)}FIN`;
+  const d = teams.addDecision(team, long, 'Orquestador');
+  assert.ok(d.text.length <= 402 && d.text.endsWith('…'), 'short in the state');
+  const file = path.join(root, '.relevo', 'decisiones.md');
+  assert.match(fs.readFileSync(file, 'utf8'), /## #1 · Orquestador[\s\S]*FIN/, 'whole on disk');
+  assert.equal(team.decisionsFile, file);
+  assert.match(fs.readFileSync(path.join(root, '.git', 'info', 'exclude'), 'utf8'), /^\/\.relevo\/$/m);
+  assert.equal(execFileSync('git', ['status', '--porcelain'], { cwd: root }).toString(), '', 'git does not see it');
+  teams.addDecision(team, 'Usar shadPS4 como referencia', 'usuario');
+  teams.dropDecisions(team, '2');
+  assert.doesNotMatch(fs.readFileSync(file, 'utf8'), /shadPS4/);
+  assert.match(fs.readFileSync(path.join(root, '.relevo', 'decisiones-anteriores.md'), 'utf8'), /#2 \(retirada\)[\s\S]*shadPS4/);
+  // An agent is told where they are.
+  const { decisionsBlock } = await import('../lib/team.mjs');
+  assert.match(decisionsBlock(team), new RegExp(`enteras .* están en ${file.replace(/[\\.]/g, '\\$&')}`));
+  // Saved cut by an older version: the whole text comes back from the orchestrator's message.
+  const old = { id: 'O', projectId: 'P', goal: 'x', decisions: [{ id: 5, text: 'La lista está muerta: nadie inserta y …', by: 'Orquestador', at: 1 }], members: [{ role: 'orchestrator', threadId: 'L' }] };
+  teams.host.threads.set('L', { items: [{ kind: 'assistant', text: 'Vale. <relevo:decision>La lista está muerta: nadie inserta y FIOS sí lee Core.xxx.</relevo:decision>' }] });
+  teams._recoverDecisions(old);
+  assert.equal(old.decisions[0].full, 'La lista está muerta: nadie inserta y FIOS sí lee Core.xxx.');
+  fs.rmSync(root, { recursive: true, force: true });
 });

@@ -12,6 +12,8 @@
 // It works with any agent (Claude, Codex, Antigravity, ACP): it only needs text in and text out. You can
 // talk to any of them at any time; automatic messages stop after a while without you (a loop guard).
 
+import fs from 'node:fs';
+import path from 'node:path';
 import * as gitops from './gitops.mjs';
 import { elideCode, clip, threadBrief } from './handoff.mjs';
 import { isReadOnlyCommand } from './codex.mjs';
@@ -37,6 +39,9 @@ export const REFRESH = { share: 0.75, cap: 400_000 };
 const NOTE_MAX = 6_000, NOTE_TTL = 24 * 3600;
 /** Decisions the team keeps (the oldest go first past this). */
 const DECISIONS_MAX = 40;
+/** Where the team's decisions are written in full, inside the project (kept out of git). */
+export const DECISIONS_DIR = '.relevo';
+const DECISION_FULL_MAX = 8000;
 /** Research reports the team keeps, and how many the agents are reminded of. */
 const FINDINGS_MAX = 60, FINDINGS_SHOWN = 15;
 /** A background job older than this (seconds) gets its agent asked to check it, then again every so often. */
@@ -146,7 +151,8 @@ const notesOf = (member) => (member.notes ? `\nIndicaciones del usuario para ti:
 export function decisionsBlock(team) {
   const list = team.decisions ?? [];
   if (!list.length) return '';
-  return `\nDecisiones del equipo (ya tomadas: síguelas y no las reabras salvo que aparezca evidencia nueva que las contradiga; en ese caso dilo antes de cambiar de rumbo):\n${list.map((d) => `#${d.id} ${d.text}`).join('\n')}\n`;
+  const where = team.decisionsFile ? `Aquí van resumidas; enteras (y las antiguas o retiradas) están en ${team.decisionsFile}: léelas ahí si te falta el detalle o no recuerdas una.\n` : '';
+  return `\nDecisiones del equipo (ya tomadas: síguelas y no las reabras salvo que aparezca evidencia nueva que las contradiga; en ese caso dilo antes de cambiar de rumbo). ${where}${list.map((d) => `#${d.id} ${d.text}`).join('\n')}\n`;
 }
 
 /** The goal's milestones: done, and the one in progress (the first not done). */
@@ -291,6 +297,8 @@ export class Teams {
     host.state.teams ??= [];
     this._dropOrphans();
     this._upgrade();
+    // Decisions on disk too (a one-off command such as `pair` only reads).
+    if (!host.config?.readOnly) for (const team of this.list) { this._recoverDecisions(team); this._writeDecisions(team); }
     // Teams paused by an older version: why, from the notice it left (the loop guard's pause ends when you write).
     for (const team of this.list) {
       if (team.status !== 'paused' || team.pausedBy !== undefined) continue;
@@ -985,17 +993,88 @@ export class Teams {
    */
   /** Keeps a decision for the whole team (from the orchestrator or you). Returns it, or null if it was already there. */
   addDecision(team, text, by) {
-    const clean = clip(String(text ?? '').replace(/\s+/g, ' ').trim(), 400);
+    const whole = String(text ?? '').trim();
+    const clean = clip(whole.replace(/\s+/g, ' '), 400);
     if (!clean) return null;
     team.decisions ??= [];
     if (team.decisions.some((d) => norm(d.text) === norm(clean))) return null;
     team.nextDecision = (team.nextDecision ?? 0) + 1;
-    const d = { id: team.nextDecision, text: clean, by, at: Date.now() / 1000 };
+    // The short text travels in every preamble and to the apps; the whole one goes to the file on disk.
+    const d = { id: team.nextDecision, text: clean, by, at: Date.now() / 1000, ...(clean !== whole.replace(/\s+/g, ' ') ? { full: clip(whole, DECISION_FULL_MAX) } : {}) };
     team.decisions.push(d);
-    if (team.decisions.length > DECISIONS_MAX) team.decisions.splice(0, team.decisions.length - DECISIONS_MAX);
+    if (team.decisions.length > DECISIONS_MAX) this._archiveDecisions(team, team.decisions.splice(0, team.decisions.length - DECISIONS_MAX), 'antigua');
+    this._writeDecisions(team);
     this.host._saveState();
     this.host._broadcastSnapshot();
     return d;
+  }
+
+  /** The project folder of a team, where its decisions are written. */
+  _decisionsDir(team) {
+    const root = this.host.projects?.().find((p) => p.id === team.projectId)?.path;
+    return root ? path.join(root, DECISIONS_DIR) : null;
+  }
+
+  /**
+   * The decisions, whole, in the project: an agent can read them back at any time (after a fresh session,
+   * after another model carried its thread), not only when Relevo hands them over. Kept out of git.
+   */
+  _writeDecisions(team) {
+    const dir = this._decisionsDir(team);
+    if (!dir || !team.decisions?.length) return;
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      this._ignoreInGit(path.dirname(dir));
+      const file = path.join(dir, 'decisiones.md');
+      const day = (at) => new Date(at * 1000).toISOString().slice(0, 16).replace('T', ' ');
+      const body = team.decisions.map((d) => `## #${d.id} · ${d.by ?? ''} · ${day(d.at)}\n\n${d.full ?? d.text}\n`).join('\n');
+      fs.writeFileSync(file, `# Decisiones del equipo\n\nObjetivo: ${clip(String(team.goal ?? '').split('\n')[0], 200)}\n\nLas escribe Relevo: no edites este fichero (cámbialas con órdenes de decisión o desde la app). Las antiguas y las retiradas están en decisiones-anteriores.md.\n\n${body}`);
+      team.decisionsFile = file;
+    } catch (e) { this.host.log?.(`decisiones a disco: ${e.message}`); }
+  }
+
+  /** Decisions that leave the list (too old, or withdrawn) are kept at the end of a second file. */
+  _archiveDecisions(team, list, why) {
+    const dir = this._decisionsDir(team);
+    if (!dir || !list.length) return;
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      const file = path.join(dir, 'decisiones-anteriores.md');
+      const head = fs.existsSync(file) ? '' : '# Decisiones anteriores del equipo\n\nYa no están en vigor como lista activa: las antiguas salieron por límite y las retiradas se anularon.\n\n';
+      fs.appendFileSync(file, head + list.map((d) => `## #${d.id} (${why}) · ${d.by ?? ''}\n\n${d.full ?? d.text}\n\n`).join(''));
+    } catch (e) { this.host.log?.(`decisiones a disco: ${e.message}`); }
+  }
+
+  /** The folder stays out of git (the agents' `git add -A` would otherwise pick it up). */
+  _ignoreInGit(root) {
+    const gitDir = path.join(root, '.git');
+    try {
+      if (!fs.statSync(gitDir).isDirectory()) return;
+      const exclude = path.join(gitDir, 'info', 'exclude');
+      const now = fs.existsSync(exclude) ? fs.readFileSync(exclude, 'utf8') : '';
+      if (now.split(/\r?\n/).some((l) => l.trim() === `/${DECISIONS_DIR}/`)) return;
+      fs.mkdirSync(path.dirname(exclude), { recursive: true });
+      fs.appendFileSync(exclude, `${now && !now.endsWith('\n') ? '\n' : ''}/${DECISIONS_DIR}/\n`);
+    } catch {}
+  }
+
+  /**
+   * Decisions saved before the whole text was kept (cut at 400 characters): the whole one is still in the
+   * orchestrator's messages.
+   */
+  _recoverDecisions(team) {
+    const cut = (team.decisions ?? []).filter((d) => !d.full && d.text.endsWith('…'));
+    if (!cut.length) return;
+    const bodies = [];
+    for (const it of this._lead(team)?.items ?? []) {
+      if (it.kind !== 'assistant') continue;
+      for (const m of String(it.text ?? '').matchAll(/<relevo:decisi[oó]n\b[^>]*>([\s\S]*?)<\/relevo:decisi[oó]n\s*>/gi)) bodies.push(m[1].trim());
+    }
+    for (const d of cut) {
+      const key = norm(d.text.slice(0, -1)).slice(0, 200);
+      const whole = bodies.find((b) => norm(b).startsWith(key));
+      if (whole) d.full = clip(whole, DECISION_FULL_MAX);
+    }
   }
 
   /** Withdraws decisions by number ("3", "#3, #5"). */
@@ -1004,6 +1083,8 @@ export class Teams {
     const gone = (team.decisions ?? []).filter((d) => ids.has(d.id));
     if (!gone.length) return [];
     team.decisions = team.decisions.filter((d) => !ids.has(d.id));
+    this._archiveDecisions(team, gone, 'retirada');
+    this._writeDecisions(team);
     this.host._saveState();
     this.host._broadcastSnapshot();
     return gone;
