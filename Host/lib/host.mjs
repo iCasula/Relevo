@@ -83,6 +83,18 @@ const uuidFrom = (s) => {
 };
 /** Drops null/undefined fields so optionals are simply absent, as Swift encodes them. */
 const clean = (o) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== null && v !== undefined));
+/** Antigravity's family for a model: Claude and GPT share a quota, Gemini (and the default) has its own. */
+export const quotaFamily = (model) => (/^(claude|gpt)/i.test(model || '') ? 'claude' : 'gemini');
+
+/** The quota windows that count for a model: on Antigravity only its family's (if agy names them). */
+export function windowsFor(a, model) {
+  const all = a?.status?.windows ?? [];
+  if (a?.kind !== 'gemini' || model === undefined) return all;
+  const re = quotaFamily(model) === 'claude' ? /claude|gpt/i : /gemini/i;
+  const mine = all.filter((w) => re.test(`${w.id} ${w.label}`));
+  return mine.length ? mine : all;
+}
+
 const remoteWindow = (w) => clean({ id: w.id, label: w.label, percent: w.percent, resetsAt: w.resetsAt, detail: w.detail });
 
 /** Private to this user: state.json holds the pairing secret and threads hold transcripts. */
@@ -799,14 +811,14 @@ export class Host {
       const heavy = /refactori|arquitect|rediseñ|migra|investiga|depura|debug|implementa|optimiza|seguridad|concurren|rendimiento|desde cero|diseña|architecture|refactor|migrate|implement|redesign/i;
       const light = /^(qué|que|cómo|como|dónde|donde|por qué|explica|resume|traduce|renombra|corrige (la |el )?(errata|texto|typo)|what|how|where|why|explain|rename|typo)\b/i;
       const level = draft.length > 700 || heavy.test(draft) ? 'heavy' : draft.length < 160 && light.test(draft) ? 'light' : 'normal';
-      const used = (a) => Math.max(0, ...(a.status?.windows ?? []).map((w) => w.percent));
+      const used = (a) => this._used(a);
       const usable = this.accounts.filter((a) => a.status?.loggedIn !== false && !this._exhausted(a) && used(a) < 97);
       const current = this._account(t);
       // Stay on the current subscription while it has room (switching costs context); else the one with most quota.
       const target = usable.includes(current) && used(current) < 85 ? current : [...usable].sort((x, y) => used(x) - used(y))[0];
       if (target) {
         const tier = { light: ['haiku', 'flash', 'mini'], normal: ['sonnet'], heavy: ['opus', 'pro', 'max'] }[level];
-        const pick = tier.map((k) => target.models.find((m) => m.id !== 'default' && m.id.toLowerCase().includes(k))?.id).find(Boolean);
+        const pick = tier.map((k) => target.models.find((m) => m.id !== 'default' && m.id.toLowerCase().includes(k) && !this._exhausted(target, m.id))?.id).find(Boolean);
         const model = pick ?? (target.id === t.accountId ? t.model : 'default');
         if (target.id !== t.accountId || model !== t.model) {
           const reasons = [{ light: 'tarea sencilla: basta un modelo rápido', normal: 'tarea normal', heavy: 'tarea compleja: mejor el modelo más capaz' }[level]];
@@ -1114,7 +1126,14 @@ export class Host {
     return this.accounts.find((a) => a.status?.loggedIn !== false && !this._exhausted(a)) ?? this.accounts[0];
   }
 
-  _exhausted(a) { return (a.status?.windows ?? []).some((w) => w.percent >= 99.5 && (w.resetsAt ?? Infinity) > now()); }
+  /**
+   * Out of quota for a model (or, without one, for every model of the account). Antigravity's model families
+   * run out apart (Gemini, and Claude/GPT): only the model's own family counts.
+   */
+  _exhausted(a, model) {
+    if (a?.kind === 'gemini' && model === undefined) return ['default', 'claude'].every((m) => this._exhausted(a, m));
+    return windowsFor(a, model).some((w) => w.percent >= 99.5 && (w.resetsAt ?? Infinity) > now());
+  }
 
   createThread(projectId) {
     const project = this.projects().find((p) => p.id === projectId);
@@ -1709,13 +1728,17 @@ export class Host {
     return until > now() ? until : 0;
   }
 
-  _used(a) { return Math.max(0, ...(a?.status?.windows ?? []).map((w) => w.percent)); }
+  /** How much quota is used for a model (without one, the account's family with most left). */
+  _used(a, model) {
+    if (a?.kind === 'gemini' && model === undefined) return Math.min(...['default', 'claude'].map((m) => this._used(a, m)));
+    return Math.max(0, ...windowsFor(a, model).map((w) => w.percent));
+  }
 
   /** A subscription and model a thread can move to now (signed in, with quota, under `maxUsed` %). */
   _usableTarget(accountId, model, maxUsed = 100) {
     const a = this.accountsById.get(accountId);
-    if (!a || a.status?.loggedIn === false || this._exhausted(a) || this._limitedUntil(a.id, model)) return false;
-    return this._used(a) < maxUsed;
+    if (!a || a.status?.loggedIn === false || this._exhausted(a, model) || this._limitedUntil(a.id, model)) return false;
+    return this._used(a, model) < maxUsed;
   }
 
   /** The best model with quota for a role: the strongest («heavy») or a cheap, able one («light»). */
@@ -1727,7 +1750,7 @@ export class Host {
         // The same account only for another model with its own quota (Antigravity's families).
         if (a.id === current?.id && (a.kind !== 'gemini' || (m.id || 'default') === (t.model || 'default'))) continue;
         if (!this._usableTarget(a.id, m.id)) continue;
-        const used = this._used(a);
+        const used = this._used(a, m.id);
         out.push({ accountId: a.id, model: m.id, score: modelScore(m, tier) - (used >= 90 ? 50 : used / 5) });
       }
     }
@@ -1800,7 +1823,7 @@ export class Host {
     try { await this._refreshAccount(account); } catch {}
     const s = account.status ?? {};
     // A balance says it plainly; otherwise the windows (and, with a reset time, the time itself).
-    const back = typeof s.balance === 'number' ? s.balance > 0.01 : !this._exhausted(account) && s.loggedIn !== false;
+    const back = typeof s.balance === 'number' ? s.balance > 0.01 : !this._exhausted(account, t.model || 'default') && s.loggedIn !== false;
     if (back || !r.resumeUnknown) {
       this.modelLimits?.delete(`${account.id}|${t.model || 'default'}`);
       this.modelLimits?.delete(`${account.id}|*`);
@@ -1847,7 +1870,7 @@ export class Host {
     }
     if (plan.mode === 'ask' || plan.mode === 'wait') return;
     const a = this._account(t);
-    const used = this._used(a);
+    const used = this._used(a, t.model || 'default');
     if (used < 97 && !this._limitedUntil(a?.id, t.model)) return;
     const target = this._planTarget(t, plan);
     if (!target) return;

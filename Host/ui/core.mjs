@@ -55,7 +55,18 @@ export function modelName(account, id) {
   return /^Predeterminado \((.+)\)$/.exec(name)?.[1] ?? name;
 }
 export const visibleModels = (account) => (account?.models ?? []).filter((m) => !m.hidden);
-export const maxPercent = (account) => Math.max(0, ...(account?.status?.windows ?? []).map((w) => w.percent));
+// Antigravity's families (Gemini, Claude/GPT) have their own quotas: the account has the room of the freest one.
+export const maxPercent = (account) => {
+  const ws = account?.status?.windows ?? [];
+  if (account?.kind === 'gemini' && ws.length > 1) return Math.max(0, Math.min(...ws.map((w) => w.percent)));
+  return Math.max(0, ...ws.map((w) => w.percent));
+};
+/** «40% usado», or per family on Antigravity («Gemini 0% · Claude/GPT 100%»). */
+export const usageText = (account) => {
+  const ws = account?.status?.windows ?? [];
+  if (account?.kind === 'gemini' && ws.length > 1) return ws.map((w) => `${w.label} ${Math.round(w.percent)}%`).join(' · ');
+  return `${Math.round(maxPercent(account))}% usado`;
+};
 export const threadOf = (hostId, threadId) => host(hostId)?.data.threads.get(threadId);
 export const summaryOf = (hostId, threadId) => snap(hostId)?.threads.find((t) => t.id === threadId);
 export const projectOf = (hostId, projectId) => snap(hostId)?.projects.find((p) => p.id === projectId);

@@ -5,7 +5,7 @@ import { esc, markdown, inline } from './markdown.mjs';
 import { icon, badge, toolSymbol } from './icons.mjs';
 import { showMenu, closeMenus, openPopover, alertSheet, promptSheet, toast } from './kit.mjs';
 import {
-  app, hooks, save, host, snap, nameOf, has, accountOf, modelOf, modelName, visibleModels, maxPercent, threadOf, summaryOf, projectOf,
+  app, hooks, save, host, snap, nameOf, has, accountOf, modelOf, modelName, visibleModels, maxPercent, usageText, threadOf, summaryOf, projectOf,
   connect, post, sendTo, request, createThread, Client, uuid, shortTokens, usd, pct, reset, relative, clock, fullDate, usageColor, effortName, MODES,
   PLAN_SUMMARY, copyText,
 } from './core.mjs';
@@ -1021,7 +1021,7 @@ function modelMenu(anchor) {
   const chosen = pending ? { acc: pending.accountId, model: pending.model } : { acc: rt?.selectedAccountId, model: rt?.selectedModel };
   for (const a of snap(hostId)?.accounts ?? []) {
     const s = a.status;
-    const state = s?.noPlan ? ' · plan sin acceso' : s?.exhausted ? ' · agotada' : s?.windows?.length ? ` · ${Math.round(maxPercent(a))}% usado` : '';
+    const state = s?.noPlan ? ' · plan sin acceso' : s?.exhausted ? ' · agotada' : s?.windows?.length ? ` · ${usageText(a)}` : '';
     items.push({ section: `${a.name} · ${s?.email ?? a.agentName}${state}${s?.loggedIn === false ? ' · sin sesión' : ''}` });
     for (const m of visibleModels(a)) items.push({ label: m.name, checked: a.id === chosen.acc && m.id === chosen.model, help: m.detail ?? '', action: () => pickModel(hostId, threadId, a.id, m.id) });
   }
@@ -1081,7 +1081,7 @@ function relayMenu(anchor) {
   const items = [{ section: 'Continuar la última petición con…' }];
   for (const a of snap(hostId)?.accounts ?? []) {
     let label = a.name;
-    if (a.status?.windows?.length) label += ` — ${Math.round(maxPercent(a))}% usado`;
+    if (a.status?.windows?.length) label += ` — ${usageText(a)}`;
     if (a.status?.exhausted) label += ' (agotada)';
     if (a.status?.noPlan) label += ' (sin plan)';
     items.push({ label, submenu: visibleModels(a).map((m) => ({ label: m.name, action: () => sendTo(hostId, Client.relay(threadId, a.id, m.id)) })) });

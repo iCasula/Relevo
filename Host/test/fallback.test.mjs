@@ -52,6 +52,31 @@ test('a chain skips subscriptions that are nearly used up, and limits are rememb
   assert.ok(h._usableTarget('AG', 'gemini-3-flash'), "Antigravity's Gemini still has its own quota");
 });
 
+test("Antigravity's families run out apart: Gemini Flash is usable with Claude/GPT used up", () => {
+  const agy = acct('AG', 'gemini', ['default', 'gemini-3.8-flash-medium', 'claude-sonnet-4-6', 'gpt-oss-120b-medium']);
+  agy.status.windows = [
+    { id: 'Gemini ModelsWeekly Limit Remaining', label: 'Gemini', percent: 0, resetsAt: nowS() + 600_000 },
+    { id: 'Claude and GPT modelsWeekly Limit Remaining', label: 'Claude/GPT', percent: 100, resetsAt: nowS() + 300_000 },
+  ];
+  const { h, notices, selects } = stand([acct('CL', 'claude', ['opus']), agy, acct('DS', 'api:deepseek', ['flash'])]);
+  assert.equal(h._exhausted(agy), false, 'the account still has Gemini');
+  assert.equal(h._exhausted(agy, 'gemini-3.8-flash-medium'), false);
+  assert.equal(h._exhausted(agy, 'default'), false);
+  assert.equal(h._exhausted(agy, 'claude-sonnet-4-6'), true);
+  assert.equal(h._exhausted(agy, 'gpt-oss-120b-medium'), true);
+  assert.ok(h._usableTarget('AG', 'gemini-3.8-flash-medium'));
+  assert.ok(!h._usableTarget('AG', 'claude-sonnet-4-6'));
+  assert.equal(h._used(agy, 'gemini-3.8-flash-medium'), 0);
+  // A thread on Gemini Flash isn't moved away before its turn because Claude/GPT is at 100 %.
+  const t = { id: 'T', accountId: 'AG', model: 'gemini-3.8-flash-medium', limitPlan: { mode: 'chain', targets: [{ accountId: 'DS', model: 'flash' }] } };
+  h._preTurnSwitch(t);
+  assert.deepEqual(selects, []);
+  assert.deepEqual(notices, []);
+  // Both used up: the account is.
+  agy.status.windows[0].percent = 100;
+  assert.equal(h._exhausted(agy), true);
+});
+
 test('nothing in the plan has quota: the same agent waits for the reset instead of stopping', () => {
   const { h, notices } = stand([acct('CL', 'claude', ['opus']), acct('CX', 'codex', ['terra'], 100)]);
   h.accounts[1].status.windows = [{ percent: 100, resetsAt: nowS() + 3600 }];
