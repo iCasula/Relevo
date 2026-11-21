@@ -21,7 +21,7 @@ function stand(accounts, extra = {}) {
     select(t, accountId, model, carryOn, auto) { selects.push({ accountId, model, auto }); t.accountId = accountId; t.model = model; },
     _clearLimitTimers() {}, ...extra,
   };
-  for (const k of ['_account', '_exhausted', '_used', '_usableTarget', '_limitedUntil', '_noteLimit', '_smartTarget', '_planTarget', '_onLimit', '_preTurnSwitch', '_relayNow', '_waitForQuota', '_checkQuotaBack', '_limitAction']) h[k] = P[k];
+  for (const k of ['_outOfQuota', '_account', '_exhausted', '_used', '_usableTarget', '_limitedUntil', '_noteLimit', '_smartTarget', '_planTarget', '_onLimit', '_preTurnSwitch', '_relayNow', '_waitForQuota', '_checkQuotaBack', '_limitAction']) h[k] = P[k];
   return { h, notices, selects };
 }
 const acct = (id, kind, models, percent = 10) => ({ id, kind, name: id, models: models.map((m) => ({ id: m, name: m })), defaultModel: models[0], status: { loggedIn: true, windows: [{ percent }] } });
@@ -75,6 +75,31 @@ test("Antigravity's families run out apart: Gemini Flash is usable with Claude/G
   // Both used up: the account is.
   agy.status.windows[0].percent = 100;
   assert.equal(h._exhausted(agy), true);
+});
+
+test('a switch you ask for while out of quota does not wait for what runs in the background', () => {
+  const { h, notices } = stand([acct('CL', 'claude', ['sonnet']), acct('DS', 'api:deepseek', ['deepseek-v4-pro'])]);
+  let closed = 0;
+  h.agents = new Map([['T', { close: () => { closed++; } }]]);
+  h._startTurn = () => {};
+  h.select = P.select;
+  const t = { id: 'T', accountId: 'CL', model: 'sonnet', items: [{ kind: 'user', text: 'hola' }] };
+  const r = h._rt(t);
+  r.backgroundTasks = [{ id: 'b1', description: 'find / -maxdepth 6 -name "flip*"', startedAt: nowS() - 60 }];
+  // With quota, it waits for the job (closing the agent would cut it).
+  h.select(t, 'DS', 'deepseek-v4-pro', false);
+  assert.equal(t.accountId, 'CL');
+  assert.ok(r.pendingSwitch);
+  // Out of quota: it switches now and says what it cut.
+  r.pendingSwitch = null;
+  r.limit = { accountId: 'CL', message: "You've hit your 5-hour limit", resetsAt: nowS() + 3600 };
+  h.select(t, 'DS', 'deepseek-v4-pro', false);
+  assert.equal(t.accountId, 'DS');
+  assert.equal(r.pendingSwitch ?? null, null);
+  assert.equal(closed, 1);
+  assert.deepEqual(r.backgroundTasks, []);
+  assert.ok(notices.some((n) => /sin esperar a lo que corría en segundo plano \(«find \/ -maxdepth 6/.test(n)), notices.join('\n'));
+  assert.ok(notices.some((n) => /^Relevo: CL/.test(n)));
 });
 
 test('nothing in the plan has quota: the same agent waits for the reset instead of stopping', () => {

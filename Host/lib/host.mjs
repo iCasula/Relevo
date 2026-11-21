@@ -1236,7 +1236,8 @@ export class Host {
     this._changed(t);
     r.switchTimer = setTimeout(() => {
       r.switchTimer = null;
-      if (!r.pendingSwitch || r.isRunning || r.approvals.size || r.backgroundTasks?.length) return;
+      if (!r.pendingSwitch || r.isRunning || r.approvals.size) return;
+      if (r.backgroundTasks?.length && (r.pendingSwitch.auto || !this._outOfQuota(t))) return;
       const last = t.items[t.items.length - 1];
       if ((last?.date ?? 0) > now() - wait + 0.5) { this._switchWhenIdle(t, wait); return; }
       if (t.team) { try { this.teams.flushUnreported(t); } catch (e) { this.log(`equipo: ${e.message}`); } }
@@ -1268,13 +1269,20 @@ export class Host {
       return;
     }
     // Closing the agent would kill what it left running in the background (a long build, an emulator): the
-    // switch waits for it, like it waits for a turn.
-    if (r.isRunning || r.backgroundTasks?.length) {
+    // switch waits for it, like it waits for a turn. Not when you change because it's out of quota: it couldn't
+    // pick up what that work gives anyway, and the switch would hang on it (a `find /` can take an hour).
+    const cut = !auto && !r.isRunning && r.backgroundTasks?.length && this._outOfQuota(t) ? r.backgroundTasks : null;
+    if (r.isRunning || (r.backgroundTasks?.length && !cut)) {
       r.pendingSwitch = { accountId: target.id, model, carryOn, auto };
       r.statusLine = r.isRunning ? `Cambiará a ${target.name} al terminar este turno` : `Cambiará a ${target.name} cuando termine lo que corre en segundo plano`;
       if (!r.isRunning) this._append(t, { id: uuid(), kind: 'notice', text: `El cambio a ${target.name} · ${this._modelName(target, model || 'default')} espera a que termine lo que corre en segundo plano (cambiar ahora lo cortaría)` });
       this._changed(t);
       return;
+    }
+    if (cut) {
+      const what = cut.map((b) => `«${String(b.description ?? 'tarea').split('\n')[0].slice(0, 80)}»`).join(', ');
+      this._append(t, { id: uuid(), kind: 'notice', text: `Cambio sin esperar a lo que corría en segundo plano (${what}): ${this._account(t)?.name ?? 'el agente'} está sin cuota y no podría recoger su resultado. Se ha cortado; el nuevo agente lo sabe por la traza.` });
+      r.backgroundTasks = [];
     }
     this.agents.get(t.id)?.close();
     this.agents.delete(t.id);
@@ -1720,6 +1728,14 @@ export class Host {
     this.modelLimits ??= new Map();
     const key = account.kind === 'gemini' ? `${account.id}|${model || 'default'}` : `${account.id}|*`;
     this.modelLimits.set(key, resetsAt ?? now() + 3600);
+  }
+
+  /** The thread's agent can't take a turn now: it hit its limit, or its model has no quota left. */
+  _outOfQuota(t) {
+    const r = this._rt(t);
+    const a = this._account(t);
+    if (r.limit && (!r.limit.accountId || r.limit.accountId === t.accountId)) return true;
+    return !!a && (this._exhausted(a, t.model || 'default') || !!this._limitedUntil(a.id, t.model));
   }
 
   _limitedUntil(accountId, model) {
