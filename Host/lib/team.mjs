@@ -450,7 +450,7 @@ export class Teams {
   /** A new thread for a member: its subscription, model and mode, titled with its role and the goal. */
   _newMember(team, role, name, pick, mode, worktree) {
     const h = this.host;
-    const t = worktree ? h.createWorktreeThread(team.projectId) : h.createThread(team.projectId);
+    const t = worktree ? h.createWorktreeThread(team.projectId, typeof worktree === 'object' ? worktree : null) : h.createThread(team.projectId);
     const account = h.accountsById.get(pick?.accountId) ?? h.accountsById.get(t.accountId);
     t.accountId = account?.id ?? t.accountId;
     t.model = pick?.model || 'default';
@@ -473,10 +473,22 @@ export class Teams {
    *            add?: { executors?: [{ accountId, model, notes }], researcher?: { accountId, model, notes } },
    *            worktrees?, mode? }
    */
-  update(teamId, changes = {}) {
+  async update(teamId, changes = {}) {
     const h = this.host;
     const team = this.byId(teamId);
     if (!team) throw new Error('Equipo desconocido');
+    // The new executors' worktrees first, before anything changes: in a big repository each checkout takes
+    // minutes, and the host keeps running its agents meanwhile. If one can't be made, nothing changes.
+    const room = Math.max(0, 4 - team.members.filter((x) => x.role === 'executor').length);
+    const wanted = (changes.add?.executors ?? []).slice(0, room);
+    const projectPath0 = h.projects().find((p) => p.id === team.projectId)?.path;
+    const ready = [];
+    if (wanted.length && changes.worktrees !== false && gitops.hasCommits(projectPath0)) {
+      try { for (const _ of wanted) ready.push(await h.prepareWorktree(team.projectId)); } catch (e) {
+        for (const wt of ready) { try { gitops.removeWorktree(wt, true); } catch {} }
+        throw e;
+      }
+    }
     const leadMember = team.members.find((m) => m.role === 'orchestrator');
     const news = [];
     // Names first, all of them checked before anything changes.
@@ -572,7 +584,7 @@ export class Teams {
         while (taken.has(`Ejecutor ${n}`) || (n === 1 && taken.has('Ejecutor'))) n++;
         const name = `Ejecutor ${n}`;
         taken.add(name);
-        const t = this._newMember(team, 'executor', name, e, mode, worktrees);
+        const t = this._newMember(team, 'executor', name, e, mode, worktrees && (ready.shift() ?? true));
         const a = h.accountsById.get(t.accountId);
         news.push(`Se une ${name} (${a?.name ?? 'agente'} · ${h._modelName(a, t.model)}${t.worktree ? `, en su worktree, rama ${t.worktree.branch}` : ', en la misma carpeta'})${noteOf(e.notes) ? ` con estas indicaciones: ${clip(e.notes.replace(/\s+/g, ' '), 300)}` : ''}`);
       }
@@ -1316,9 +1328,7 @@ export class Teams {
     const h = this.host;
     const r = h._rt(t);
     if (r.isRunning || r.approvals.size || r.backgroundTasks?.length || member.noteRequested) return;
-    const window = r.context?.window;
-    const limit = window ? Math.min(window * REFRESH.share, REFRESH.cap) : REFRESH.cap;
-    if ((r.context?.used ?? 0) <= limit) return;
+    if ((r.context?.used ?? 0) <= h._renewLimit(r)) return;
     member.noteRequested = true;
     h._append(t, { id: h._uuid(), kind: 'notice', text: 'Contexto casi lleno: antes de renovar la sesión, el agente escribe su nota de traspaso' });
     h._startTurn(t, 'Relevo va a renovar tu sesión: escribe tu nota de traspaso.', false, {

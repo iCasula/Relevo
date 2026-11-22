@@ -332,6 +332,16 @@ test('integrar merges an executor worktree without the orchestrator touching git
   peer.send(Client.send(boss, '<relevo:integrar de="Ejecutor 2"/>'));
   const done = await next((m) => m.threadPatch?._0.id === boss && m.threadPatch._0.upserts.some((i) => i.from?.label === 'integración'), 20_000);
   assert.match(done.threadPatch._0.upserts.find((i) => i.from?.label === 'integración').text, /Integrado: la rama relevo\/\w+ de Ejecutor 2/);
+
+  // One more executor later: its worktree is made without blocking the host, and it joins on its own branch.
+  const teamId = snapshot.hostTeams.find((x) => x.goal === 'Integrar')?.id ?? (await next((m) => m.snapshot?._0.hostTeams?.some((x) => x.goal === 'Integrar'))).snapshot._0.hostTeams.find((x) => x.goal === 'Integrar').id;
+  const u = await request('updateTeam', { teamId, changes: { worktrees: true, add: { executors: [{ accountId: claude.id }] } } });
+  assert.ok(u.ok, u.error);
+  const s3 = (await next((m) => m.snapshot?._0.hostTeams?.find((x) => x.id === teamId)?.members.length === 4)).snapshot._0;
+  const third = s3.hostTeams.find((x) => x.id === teamId).members[3];
+  assert.equal(third.name, 'Ejecutor 3');
+  const news = await next((m) => m.threadPatch?._0.id === boss && m.threadPatch._0.upserts.some((i) => i.from?.label === 'cambios en el equipo'), 20_000);
+  assert.match(news.threadPatch._0.upserts.find((i) => i.from?.label === 'cambios en el equipo').text, /Se une Ejecutor 3 \(.*en su worktree, rama relevo\/\w+\)/);
 });
 
 test("each role's fallback is its thread's out-of-quota plan, and the orchestrator talking to you is flagged", async () => {

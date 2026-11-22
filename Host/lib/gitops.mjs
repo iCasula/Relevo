@@ -233,6 +233,25 @@ export function addWorktree(repo, dir, branch) {
   return { path: dir, branch, base, repo };
 }
 
+/**
+ * The same, without blocking the host: in a big repository (a game's) the checkout takes minutes. What a failed
+ * or cut checkout left (its folder, its new branch) is taken away again: only what this call made.
+ */
+export async function addWorktreeAsync(repo, dir, branch, timeout = 20 * 60_000) {
+  if (!isRepo(repo)) throw new Error('El proyecto no es un repositorio git');
+  if (!git(repo, ['rev-parse', '--verify', 'HEAD']).ok) throw new Error('El repositorio aún no tiene ningún commit');
+  const base = currentBranch(repo);
+  fs.mkdirSync(path.dirname(dir), { recursive: true });
+  const r = await gitAsync(repo, ['worktree', 'add', '-b', branch, dir, 'HEAD'], timeout);
+  if (!r.ok) {
+    await gitAsync(repo, ['worktree', 'remove', '--force', dir], 5 * 60_000);
+    await gitAsync(repo, ['worktree', 'prune']);
+    await gitAsync(repo, ['branch', '-D', branch]);
+    throw new Error(`No se ha podido crear el worktree: ${r.out.split('\n').filter(Boolean).at(-1) ?? `git no respondió en ${Math.round(timeout / 60_000)} min`}`);
+  }
+  return { path: dir, branch, base, repo };
+}
+
 /** Commits what the worktree has and merges its branch into the base branch of the main folder. */
 export async function mergeWorktree(wt, message) {
   if (status(wt.path).files.length) {

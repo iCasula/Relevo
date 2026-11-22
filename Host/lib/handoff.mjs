@@ -200,7 +200,7 @@ ${pendingRequest ? 'La última petición del usuario quedó sin terminar. Contin
 `;
 }
 
-export function handoffText({ items, accounts, projectPath, target, pendingRequest, workState = null, traceFile = null, budget = BRIEF_BUDGET, fresh = false, background = [] }) {
+export function handoffText({ items, accounts, projectPath, target, pendingRequest, workState = null, traceFile = null, budget = BRIEF_BUDGET, fresh = false, background = [], note = null }) {
   const agents = [...new Set(items.filter((i) => i.kind === 'assistant').map((i) => accounts.get(i.accountId)?.agentName).filter(Boolean))].join(', ');
   const intro = fresh
     ? 'Sigues con tu propio trabajo en una sesión nueva: Relevo la ha renovado porque la anterior se había hecho muy larga. Esto es un resumen de lo que llevabas, no la conversación entera.'
@@ -209,7 +209,7 @@ export function handoffText({ items, accounts, projectPath, target, pendingReque
 ${intro}
 - Proyecto: ${projectPath}
 - El código y los cambios ya están en disco: léelos de los ficheros (git status, git diff), no esperes encontrarlos aquí.
-- Comprueba lo que quedó a medias antes de repetirlo y no rehagas lo que ya está hecho.${traceFile ? `\n- Si te falta algún detalle, la conversación completa está en ${traceFile} (léela solo si hace falta).` : ''}${backgroundBlock(background)}`;
+- Comprueba lo que quedó a medias antes de repetirlo y no rehagas lo que ya está hecho.${traceFile ? `\n- Si te falta algún detalle, la conversación completa está en ${traceFile} (léela solo si hace falta).` : ''}${backgroundBlock(background)}${note?.text ? `\n\nTu nota de traspaso (la escribiste tú justo antes de renovar la sesión; fíate de ella):\n${note.text}` : ''}`;
   const body = threadBrief({ items, accounts, pendingRequest, workState, traceFile, budget: budget - head.length });
   return `${head}
 

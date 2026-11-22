@@ -19,7 +19,7 @@ import { usageReport } from './usage.mjs';
 import { LoginSession } from './login.mjs';
 import { quickCompletion, cleanTitle } from './quick.mjs';
 import { buildAccount, API_PRESETS, ACP_PRESETS, TYPES } from './accounts.mjs';
-import { Teams, fallbackOf } from './team.mjs';
+import { Teams, fallbackOf, REFRESH } from './team.mjs';
 import { checkRequest, guardRoots } from './guard.mjs';
 import { APNs, validKey } from './apns.mjs';
 import { diffSnapshot } from '../ui/state.mjs';
@@ -60,7 +60,13 @@ export function modelScore(m, tier) {
 }
 /** What this host does beyond the shared protocol; clients show those controls only when listed. */
 export const HOST_FEATURES = ['teams', 'projects', 'threads', 'git', 'images', 'usage', 'login', 'settings', 'limitPlans', 'history', 'titles', 'accounts',
-  'turns', 'worktrees', 'pullRequests', 'suggest', 'quickActions', 'attachments', 'teamRename', 'teamDecisions', 'teamMemory', 'smartFallback', 'teamBudget', 'teamHeld', 'guard', 'push', 'waitHere', 'leadApproves'];
+  'turns', 'worktrees', 'pullRequests', 'suggest', 'quickActions', 'attachments', 'teamRename', 'teamDecisions', 'teamMemory', 'smartFallback', 'teamBudget', 'teamHeld', 'guard', 'push', 'waitHere', 'leadApproves', 'renewSessions', 'earlySwitch'];
+/**
+ * A long session rereads its whole context every turn (most of what a subscription spends): past this many tokens
+ * the agent writes a handoff note and goes on in a fresh session. 0: only when it's nearly full (REFRESH.cap).
+ */
+export const RENEW_DEFAULT = 150_000;
+export const RENEW_CHOICES = [0, 100_000, 150_000, 250_000, 400_000];
 const IMAGE_UPLOAD = /\.(png|jpe?g|gif|webp)$/i;
 
 /** Providers this host can run. Each account is one provider with its own CLI login on this machine. */
@@ -94,6 +100,9 @@ export function windowsFor(a, model) {
   const mine = all.filter((w) => re.test(`${w.id} ${w.label}`));
   return mine.length ? mine : all;
 }
+
+/** «18:40», or «mar 18:40» when it's not within the next day. */
+const clock = (sec) => new Date(sec * 1000).toLocaleString('es-ES', sec - Date.now() / 1000 > 20 * 3600 ? { weekday: 'short', hour: '2-digit', minute: '2-digit' } : { hour: '2-digit', minute: '2-digit' });
 
 const remoteWindow = (w) => clean({ id: w.id, label: w.label, percent: w.percent, resetsAt: w.resetsAt, detail: w.detail });
 
@@ -243,7 +252,7 @@ export class Host {
   get settings() {
     return {
       projectsRoot: this.config.projectsRoot, maxAgents: this.config.maxAgents, defaultMode: 'autoEdit', defaultAccountId: null,
-      limitPlan: { mode: 'ask', targets: [] }, guard: true, relayDelay: 10, aiTitles: true, suggest: true, suggestMode: 'suggest', probeMinutes: 10, ...this.state.settings,
+      limitPlan: { mode: 'ask', targets: [] }, guard: true, relayDelay: 10, aiTitles: true, suggest: true, suggestMode: 'suggest', probeMinutes: 10, renewAt: RENEW_DEFAULT, ...this.state.settings,
     };
   }
 
@@ -497,13 +506,14 @@ export class Host {
       }); break;
       case 'restoreTurn': if (t) run(() => this.restoreTurn(t, a.itemId)); break;
       case 'restoreTree': if (t) run(() => this.restoreTree(t, a.tree)); break;
-      case 'newWorktreeThread': run(() => ({ threadId: this.createWorktreeThread(String(a.projectId).toUpperCase()).id })); break;
+      case 'newWorktreeThread': run(async () => { const id = String(a.projectId).toUpperCase(); return { threadId: this.createWorktreeThread(id, await this.prepareWorktree(id)).id }; }); break;
       case 'mergeWorktree': if (t) run(() => this.mergeWorktree(t, a.message, a.remove !== false)); break;
       case 'removeWorktree': if (t) run(() => this.removeWorktree(t, !!a.deleteBranch)); break;
       case 'createTeam': run(() => this.teams.create(a.team ?? {})); break;
       case 'teamAction': run(() => this.teams.action(a.teamId, a.action)); break;
       case 'updateTeam': run(() => this.teams.update(String(a.teamId).toUpperCase(), a.changes ?? {})); break;
       case 'teamDecisions': run(() => this.teams.editDecisions(String(a.teamId).toUpperCase(), { add: a.add, remove: a.remove })); break;
+      case 'setEarlySwitch': if (t) run(() => { t.earlySwitch = a.on === false ? false : null; this._changed(t); this._saveThread(t); return {}; }); break;
       case 'setGuard': if (t) run(() => { this.setGuard(t, a.on); return {}; }); else if (a.teamId) run(() => this.teams.setGuard(String(a.teamId).toUpperCase(), a.on)); break;
       case 'setLeadApproves': run(() => this.teams.setLeadApproves(String(a.teamId).toUpperCase(), a.on)); break;
       case 'teamHeld': run(() => this.teams.reviewHeld(String(a.teamId).toUpperCase(), String(a.id ?? ''), a.action === 'send' ? 'send' : 'discard')); break;
@@ -598,6 +608,7 @@ export class Host {
     if ('suggest' in changes) next.suggest = !!changes.suggest;
     if ('suggestMode' in changes && ['off', 'suggest', 'auto'].includes(changes.suggestMode)) { next.suggestMode = changes.suggestMode; next.suggest = changes.suggestMode !== 'off'; }
     if ('probeMinutes' in changes && [5, 10, 15, 30, 60].includes(Number(changes.probeMinutes))) next.probeMinutes = Number(changes.probeMinutes);
+    if ('renewAt' in changes && RENEW_CHOICES.includes(Number(changes.renewAt))) next.renewAt = Number(changes.renewAt);
     if (changes.cliPaths && typeof changes.cliPaths === 'object') {
       const paths = { ...(next.cliPaths ?? {}) };
       for (const [k, v] of Object.entries(changes.cliPaths)) {
@@ -670,19 +681,27 @@ export class Host {
   }
 
   /** A thread in its own git worktree and branch, so its agent doesn't step on the main folder (as on the Mac). */
-  createWorktreeThread(projectId) {
+  createWorktreeThread(projectId, ready = null) {
     const project = this.projects().find((p) => p.id === projectId);
     if (!project) throw new Error('Proyecto desconocido');
     const short = crypto.randomBytes(3).toString('hex');
     const branch = `relevo/${short}`;
     const dir = path.join(this.config.dataDir, 'worktrees', `${path.basename(project.path)}-${short}`);
-    const wt = gitops.addWorktree(project.path, dir, branch);
+    const wt = ready ?? gitops.addWorktree(project.path, dir, branch);
     const t = this.createThread(projectId);
     t.projectPath = wt.path;
     t.worktree = wt;
     this._append(t, { id: uuid(), kind: 'notice', text: `Worktree en la rama ${branch} (desde ${wt.base ?? 'HEAD'}): los cambios no tocan la carpeta del proyecto hasta que fusiones` });
     this._changed(t);
     return t;
+  }
+
+  /** A worktree for a thread to come, made without blocking the host (see gitops.addWorktreeAsync). */
+  prepareWorktree(projectId) {
+    const project = this.projects().find((p) => p.id === projectId);
+    if (!project) throw new Error('Proyecto desconocido');
+    const short = crypto.randomBytes(3).toString('hex');
+    return gitops.addWorktreeAsync(project.path, path.join(this.config.dataDir, 'worktrees', `${path.basename(project.path)}-${short}`), `relevo/${short}`);
   }
 
   async mergeWorktree(t, message, remove) {
@@ -1388,8 +1407,10 @@ export class Host {
       const workState = gitops.workState(t.projectPath);
       const traceFile = saveTrace({ dir: this._traceDir(t), threadId: t.id, title: t.title, items: t.items, accounts, workState });
       const background = (t.bgLog ?? []).filter((b) => now() - (b.endedAt ?? now()) < 3 * 3600);
-      prompt = handoffText({ items: t.items, accounts, projectPath: t.projectPath, target: account, pendingRequest, workState, traceFile, fresh: !!t.freshSession, background }) + text;
+      const note = !t.team && t.freshSession ? t.handoffNote : null;
+      prompt = handoffText({ items: t.items, accounts, projectPath: t.projectPath, target: account, pendingRequest, workState, traceFile, fresh: !!t.freshSession, background, note }) + text;
       t.freshSession = false;
+      t.handoffNote = null;
       t.handoffPending = false;
       t.catchUpFrom = null;
     } else if (t.catchUpFrom != null) {
@@ -1658,10 +1679,12 @@ export class Host {
         this.select(t, accountId, model, carryOn, auto);
         if (r.pendingSwitch || r.isRunning) return; // still waiting for its background work, or carrying on
       }
+      if (!t.team && t.noteRequested) this._renewSolo(t, turn);
       if (r.sendNow) { const text = r.sendNow, meta = r.sendNowMeta ?? {}; r.sendNow = null; r.sendNowMeta = null; this._startTurn(t, text, false, meta); return; }
       this._checkRestart();
       if (r.limitHit) { r.limitHit = false; this._onLimit(t); return; }
       if (!t.aiTitled && t.items.some((i) => i.kind === 'assistant' && i.text)) this._aiTitle(t).catch(() => {});
+      if (this._maybeRenewSolo(t)) return;
       this._next(t);
       for (const other of this.threads.values()) if (other !== t && other.queued.length && !this._rt(other).isRunning && !other.queuePaused) this._next(other);
     });
@@ -1727,7 +1750,55 @@ export class Host {
   _noteLimit(account, model, resetsAt) {
     this.modelLimits ??= new Map();
     const key = account.kind === 'gemini' ? `${account.id}|${model || 'default'}` : `${account.id}|*`;
-    this.modelLimits.set(key, resetsAt ?? now() + 3600);
+    this.modelLimits.set(key, { until: resetsAt ?? now() + 3600, at: now() });
+  }
+
+  /** Context size past which a session is renewed (the setting; never past 75 % of the model's window). */
+  _renewLimit(r) {
+    const at = Number(this.settings.renewAt ?? RENEW_DEFAULT);
+    const cap = at > 0 ? at : REFRESH.cap;
+    const window = r.context?.window;
+    return window ? Math.min(window * REFRESH.share, cap) : cap;
+  }
+
+  /**
+   * A thread on its own (not in a team) whose session got long: it writes its handoff note in one short turn,
+   * then goes on in a fresh session that gets the note, a summary and the trace. Never while it works, waits for
+   * you or has something in the background. Off with «renewAt: 0» (then a team still renews near the full window).
+   */
+  _maybeRenewSolo(t) {
+    const r = this._rt(t);
+    if (t.team || t.noteRequested || !(Number(this.settings.renewAt ?? RENEW_DEFAULT) > 0)) return false;
+    if (r.isRunning || r.approvals.size || r.backgroundTasks?.length || r.pendingSwitch || r.limit || r.resumeAt) return false;
+    const used = r.context?.used ?? 0;
+    if (used <= this._renewLimit(r)) return false;
+    t.noteRequested = true;
+    this._append(t, { id: uuid(), kind: 'notice', text: `La sesión va por ${Math.round(used / 1000)} k tokens de contexto: antes de renovarla, el agente escribe su nota de traspaso` });
+    this._startTurn(t, 'Relevo va a renovar tu sesión: escribe tu nota de traspaso.', false, {
+      from: { name: 'Relevo', role: 'relevo', label: 'traspaso' },
+      prompt: '(Relevo va a renovar tu sesión porque se ha hecho muy larga y cada turno relee todo el contexto. Tu siguiente sesión NO recordará esta conversación: recibirá un resumen, la traza entera en un fichero, los últimos mensajes del usuario y ESTA nota.)\nEscribe ahora tu nota de traspaso: solo texto, sin usar herramientas, en menos de 40 líneas:\n1) Qué está ya comprobado y no hay que repetir (con fecha, commit o fichero).\n2) Qué estás esperando y de quién.\n3) Qué tienes a medias y cuál es tu siguiente paso.\n4) Avisos: trampas, rutas, comandos o acuerdos con el usuario que no se vean en el código.',
+    });
+    return true;
+  }
+
+  /** The note turn ended: keep the note and start over (the next message carries it). */
+  _renewSolo(t, turn) {
+    const r = this._rt(t);
+    t.noteRequested = false;
+    if (r.stopRequested || r.limitHit) return; // stopped or out of quota: no note, no renewal
+    const note = turn.filter((i) => i.kind === 'assistant' && i.text?.trim()).map((i) => i.text.trim()).at(-1);
+    if (note) t.handoffNote = { text: note.slice(0, 6000), at: now() };
+    const used = r.context?.used ?? 0;
+    this.agents.get(t.id)?.close();
+    this.agents.delete(t.id);
+    t.sessionId = null;
+    t.sessions = {}; // the older ones are longer still: none is resumed after this
+    t.handoffPending = true;
+    t.freshSession = true;
+    r.sessionTokens = 0;
+    r.context = null;
+    this._append(t, { id: uuid(), kind: 'notice', text: `Sesión renovada (iba por ${Math.round(used / 1000)} k tokens de contexto): el siguiente mensaje lleva ${note ? 'su nota de traspaso, ' : ''}un resumen y la traza` });
+    this._changed(t);
   }
 
   /** The thread's agent can't take a turn now: it hit its limit, or its model has no quota left. */
@@ -1738,10 +1809,25 @@ export class Host {
     return !!a && (this._exhausted(a, t.model || 'default') || !!this._limitedUntil(a.id, t.model));
   }
 
+  /**
+   * Until when a limit hit earlier still holds (0: it doesn't). A usage reading taken after the hit that shows
+   * room in the model's windows wins over it: the limit was a short one, or the quota came back early.
+   */
   _limitedUntil(accountId, model) {
-    const m = this.modelLimits ?? new Map();
-    const until = Math.max(m.get(`${accountId}|${model || 'default'}`) ?? 0, m.get(`${accountId}|*`) ?? 0);
-    return until > now() ? until : 0;
+    const m = this.modelLimits;
+    if (!m) return 0;
+    const a = this.accountsById.get(accountId);
+    let until = 0;
+    for (const key of [`${accountId}|${model || 'default'}`, `${accountId}|*`]) {
+      const raw = m.get(key);
+      if (!raw) continue;
+      const e = typeof raw === 'number' ? { until: raw, at: 0 } : raw;
+      if (e.until <= now()) { m.delete(key); continue; }
+      const read = a?.status?.updatedAt ?? 0;
+      if (read > e.at + 5 && windowsFor(a, key.endsWith('|*') ? undefined : model).length && !this._exhausted(a, key.endsWith('|*') ? undefined : model)) { m.delete(key); continue; }
+      until = Math.max(until, e.until);
+    }
+    return until;
   }
 
   /** How much quota is used for a model (without one, the account's family with most left). */
@@ -1884,15 +1970,17 @@ export class Host {
         return;
       }
     }
-    if (plan.mode === 'ask' || plan.mode === 'wait') return;
+    // Off for this agent: it uses its model to the end, and the plan applies when the quota actually runs out.
+    if (plan.mode === 'ask' || plan.mode === 'wait' || t.earlySwitch === false) return;
     const a = this._account(t);
     const used = this._used(a, t.model || 'default');
-    if (used < 97 && !this._limitedUntil(a?.id, t.model)) return;
+    const limited = this._limitedUntil(a?.id, t.model);
+    if (used < 97 && !limited) return;
     const target = this._planTarget(t, plan);
     if (!target) return;
     t.home ??= { accountId: a.id, model: t.model };
     const to = this.accountsById.get(target.accountId);
-    this._append(t, { id: uuid(), kind: 'notice', accountId: target.accountId, text: `Relevo preventivo a ${to.name} · ${this._modelName(to, target.model)}: ${a.name} está ${used >= 97 ? `al ${Math.round(used)} %` : 'sin cuota'} y el turno se cortaría a medias` });
+    this._append(t, { id: uuid(), kind: 'notice', accountId: target.accountId, text: `Relevo preventivo a ${to.name} · ${this._modelName(to, target.model)}: ${a.name} está ${used >= 97 ? `al ${Math.round(used)} %` : `sin cuota (le saltó el límite; hasta las ${clock(limited)})`} y el turno se cortaría a medias` });
     this.select(t, target.accountId, target.model, false, true);
   }
 
@@ -2087,6 +2175,7 @@ export class Host {
       usage: (account?.status?.windows ?? []).map(remoteWindow), backgroundTasks: (r.backgroundTasks ?? []).map((b) => ({ id: b.id, description: b.description, startedAt: b.startedAt })),
       limitPlan: t.limitPlan ? { ...t.limitPlan, summary: this._planSummary(t.limitPlan) } : null,
       defaultLimitPlan: { ...this.settings.limitPlan, summary: this._planSummary(this.settings.limitPlan) },
+      earlySwitch: t.earlySwitch !== false,
       pendingRelay: r.pendingRelay ?? null, resumeAt: r.resumeAt ?? null, resumeUnknown: r.resumeUnknown || undefined, canWait: true,
       // Where it goes back to once that quota returns (it is on a fallback now).
       home: t.home && this.accountsById.has(t.home.accountId) ? { accountId: t.home.accountId, model: t.home.model || 'default' } : undefined,

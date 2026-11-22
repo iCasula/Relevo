@@ -370,7 +370,7 @@ test('a session is renewed only when its context is really full, after the agent
     threads: new Map([['L', t]]), _rt: () => rt, _uuid: () => 'u', _append: (th, it) => { th.items.push({ ...it, date: Date.now() / 1000 }); notices.push(it.text); }, _changed() {}, _saveState() {},
     _startTurn: (th, text, p, meta) => { started.push(meta.prompt); th.items.push({ kind: 'user', text, from: meta.from, date: Date.now() / 1000 }); },
     agents: { get: () => ({ close: () => closed.push(1) }), delete() {} }, accountsById: new Map(), projects: () => [], _modelName: () => 'm',
-    teams: { _status: () => 'Estado del equipo: Ejecutor libre' },
+    teams: { _status: () => 'Estado del equipo: Ejecutor libre' }, settings: { renewAt: 0 }, _renewLimit: P._renewLimit,
   };
   const lead = { threadId: 'L', role: 'orchestrator', name: 'Orquestador' };
   const team = { id: 'T', goal: 'G', status: 'active', decisions: [], members: [lead] };
@@ -379,6 +379,12 @@ test('a session is renewed only when its context is really full, after the agent
 
   teams._maybeRefresh(team, lead, t);
   assert.equal(started.length, 0, '50 % of the window, however many tokens the session added up: not yet');
+  // With «renew at 150 k» a 1 M window renews at 150 k, not at 400 k.
+  teams.host.settings.renewAt = 150_000;
+  rt.context = { used: 149_000, window: 1_000_000 };
+  teams._maybeRefresh(team, lead, t);
+  assert.equal(started.length, 0, 'under 150 k');
+  teams.host.settings.renewAt = 0;
   rt.context = { used: 372_000, window: null };
   teams._maybeRefresh(team, lead, t);
   assert.equal(started.length, 0, `unknown window: only past ${REFRESH.cap}`);
@@ -398,6 +404,43 @@ test('a session is renewed only when its context is really full, after the agent
   assert.match(fresh, /Tu nota de traspaso[\s\S]*Vulkan enumera 1 dispositivo/);
   assert.match(fresh, /Lo último que te ha dicho el usuario[\s\S]*El probe ya enumera Vulkan/);
   assert.doesNotMatch(preamble(teams.host, team, lead, false), /nota de traspaso \(/);
+});
+
+test('a thread on its own renews its long session too: a short note turn, then a fresh session with the note', async () => {
+  const { handoffText } = await import('../lib/handoff.mjs');
+  const started = [], notices = [], closed = [];
+  const { h } = stand([acct('CX', 'codex', ['terra'])], {
+    _startTurn: (th, text, p, meta) => { started.push(meta); th.items.push({ kind: 'user', text, from: meta.from }); },
+    _append: (th, it) => { notices.push(it.text); },
+  });
+  h.settings = { renewAt: 150_000 };
+  h._renewLimit = P._renewLimit; h._maybeRenewSolo = P._maybeRenewSolo; h._renewSolo = P._renewSolo;
+  h.agents = new Map([['S', { close: () => closed.push(1) }]]);
+  const t = { id: 'S', accountId: 'CX', model: 'terra', items: [], queued: [] };
+  const r = h._rt(t);
+  r.context = { used: 120_000, window: 400_000 };
+  assert.equal(h._maybeRenewSolo(t), false, 'under 150 k');
+  r.context = { used: 180_000, window: 400_000 };
+  r.backgroundTasks = [{ id: 'b' }];
+  assert.equal(h._maybeRenewSolo(t), false, 'not with a job in the background');
+  r.backgroundTasks = [];
+  assert.equal(h._maybeRenewSolo(t), true);
+  assert.match(started[0].prompt, /nota de traspaso[\s\S]*comprobado/);
+  assert.equal(started[0].from.label, 'traspaso');
+  assert.match(notices.at(-1), /180 k tokens de contexto/);
+  h._renewSolo(t, [{ kind: 'assistant', text: 'Comprobado: el parche 8 arranca en consola. Siguiente: medir el decodificador.' }]);
+  assert.equal(closed.length, 1);
+  assert.equal(t.sessionId, null);
+  assert.equal(t.freshSession, true);
+  assert.equal(t.handoffPending, true);
+  assert.match(t.handoffNote.text, /parche 8 arranca/);
+  const brief = handoffText({ items: [], accounts: new Map(), projectPath: '/p', target: { agentName: 'Codex' }, fresh: true, note: t.handoffNote });
+  assert.match(brief, /sesión nueva[\s\S]*Tu nota de traspaso[\s\S]*parche 8 arranca/);
+  // Off: never for a thread on its own.
+  h.settings.renewAt = 0;
+  t.noteRequested = false;
+  r.context = { used: 390_000, window: 1_000_000 };
+  assert.equal(h._maybeRenewSolo(t), false);
 });
 
 test("waiting here: the thread stays on its model and carries on when the balance is back", async () => {
@@ -588,4 +631,37 @@ test('the Live Activity: a team is one, seen from its orchestrator, with a line 
   assert.equal(a.ready, true);
   assert.equal(a.statusLine, 'Fase 1 cerrada. ¿Empezamos la fase 2?');
   assert.equal(a.others, 1);
+});
+
+test('a limit hit earlier gives way to a later reading with room, and an agent can be told not to switch early', () => {
+  const { h, selects, notices } = stand([acct('CL', 'claude', ['default']), acct('DS', 'api:deepseek', ['deepseek-v4-flash'])]);
+  const claude = h.accounts[0];
+  const t = { id: 'T', accountId: 'CL', model: 'default', limitPlan: { mode: 'chain', targets: [{ accountId: 'DS', model: 'deepseek-v4-flash' }] } };
+  // The limit hit, with the week's reset as its end (as TORRE had it): Claude counts as out of quota.
+  h._noteLimit(claude, 'default', nowS() + 3 * 86400);
+  // The last reading is older than the hit: it can't say the limit is over.
+  claude.status = { loggedIn: true, windows: [{ id: 'five_hour', percent: 79 }], updatedAt: nowS() - 60 };
+  assert.ok(h._limitedUntil('CL', 'default'));
+  h._preTurnSwitch(t);
+  assert.equal(t.accountId, 'DS');
+  assert.match(notices.pop(), /Relevo preventivo .*sin cuota \(le saltó el límite; hasta las/);
+  // A later reading: the 5 h window at 79 %. The remembered limit no longer holds: you can go back and stay.
+  claude.status = { loggedIn: true, windows: [{ id: 'five_hour', percent: 79 }, { id: 'seven_day', percent: 38 }], updatedAt: nowS() + 60 };
+  assert.equal(h._limitedUntil('CL', 'default'), 0);
+  assert.equal(h.modelLimits.size, 0, 'forgotten');
+  t.accountId = 'CL'; t.home = null; selects.length = 0;
+  h._preTurnSwitch(t);
+  assert.equal(selects.length, 0, 'stays on Claude');
+  // A pay-per-use account has no windows to read: its limit is kept until it ends.
+  h._noteLimit(h.accounts[1], 'deepseek-v4-flash', nowS() + 600);
+  assert.ok(h._limitedUntil('DS', 'deepseek-v4-flash'));
+  h.modelLimits.clear();
+  // Early switch off for this agent: at 98 % it keeps going on Claude; the plan applies when it really runs out.
+  claude.status.windows = [{ id: 'five_hour', percent: 98 }];
+  t.earlySwitch = false;
+  h._preTurnSwitch(t);
+  assert.equal(selects.length, 0);
+  t.earlySwitch = null;
+  h._preTurnSwitch(t);
+  assert.equal(selects.pop().accountId, 'DS', 'on again: it moves first');
 });

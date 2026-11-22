@@ -294,6 +294,7 @@ function drawGeneral(body, state, redraw) {
     <div class="form-group">
       <div class="form-row"><div class="l">Permisos por defecto</div><select class="field" data-set="defaultMode">${MODES.map(([id, label]) => opt(id, label, st.defaultMode)).join('')}</select></div>
       <div class="form-row"><div class="l">Actualizar límites cada</div><select class="field" data-set="probeMinutes">${[5, 10, 15, 30, 60].map((m) => opt(m, `${m} min`, st.probeMinutes ?? 10)).join('')}</select></div>
+      ${has(state.hostId, 'renewSessions') ? `<div class="form-row"><div class="l">Renovar la sesión al llegar a<span class="cap">Cada turno relee todo el contexto de la sesión, y eso es casi todo lo que gasta una suscripción. Al pasar de aquí, el agente escribe una nota de traspaso y sigue en una sesión nueva con la nota, un resumen y la traza entera en un fichero. Nunca a mitad de un turno ni con algo en segundo plano.</span></div><select class="field" data-set="renewAt">${[[0, 'Solo cuando esté casi llena'], [100000, '100 k tokens'], [150000, '150 k tokens'], [250000, '250 k tokens'], [400000, '400 k tokens']].map(([v, l]) => opt(v, l, st.renewAt ?? 150000)).join('')}</select></div>` : ''}
       <div class="form-row"><div class="l">Agentes trabajando a la vez</div><input type="number" class="field-input" style="width:70px" min="1" max="8" data-set="maxAgents" value="${st.maxAgents ?? 2}"></div>
     </div>
     <div class="form-section">Proyectos</div>
@@ -309,7 +310,7 @@ function drawGeneral(body, state, redraw) {
         save({ limitPlan: { mode: el.value, targets: [] } });
       } else if (k === 'aiTitles') save({ aiTitles: el.checked });
       else if (k === 'defaultAccountId') save({ defaultAccountId: el.value || null });
-      else save({ [k]: el.type === 'number' || k === 'probeMinutes' ? Number(el.value) : el.value });
+      else save({ [k]: el.type === 'number' || k === 'probeMinutes' || k === 'renewAt' ? Number(el.value) : el.value });
     };
   });
   body.querySelector('[data-edit-chain]')?.addEventListener('click', () => openLimitPlanEditor(hostId, null));
@@ -1107,10 +1108,11 @@ export function openTeamEditor(hostId, teamId) {
         budget: has(hostId, 'teamBudget') && (String(st.budget.usd ?? '') !== String(team.budget?.usd ?? '') || st.budget.action !== (team.budget?.action ?? 'pause')) ? { usd: Number(st.budget.usd) || 0, action: st.budget.action } : undefined,
       };
       $('[data-go]').disabled = true;
-      $('[data-go]').innerHTML = '<span class="spinner"></span> Guardando…';
+      const making = st.adds.some((x) => x.role === 'executor') && st.worktrees !== false;
+      $('[data-go]').innerHTML = `<span class="spinner"></span> ${making ? 'Creando su worktree… (en un repositorio grande tarda unos minutos)' : 'Guardando…'}`;
       if (has(hostId, 'guard') && st.guard !== (team.guard !== false)) { const g = await request(hostId, { setGuard: { teamId, on: st.guard } }); if (!g.ok) toast(g.error); }
       if (has(hostId, 'leadApproves') && st.leadApproves !== (team.leadApproves !== false)) { const g = await request(hostId, { setLeadApproves: { teamId, on: st.leadApproves } }); if (!g.ok) toast(g.error); }
-      const r = await request(hostId, { updateTeam: { teamId, changes } });
+      const r = await request(hostId, { updateTeam: { teamId, changes } }, making ? 25 * 60_000 : undefined);
       if (!r.ok) { toast(r.error); $('[data-go]').disabled = false; $('[data-go]').textContent = 'Guardar cambios'; return; }
       s.close();
       toast('Equipo actualizado');

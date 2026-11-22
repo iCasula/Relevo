@@ -485,6 +485,17 @@ export class FakeSession extends EventEmitter {
       }, 12_000);
       return;
     }
+    // «contexto grande»: a turn that leaves the session at 200 k tokens of context (for session renewal).
+    if (/^contexto grande/i.test(text)) {
+      setTimeout(() => {
+        this.emit('context', 200_000, 1_000_000);
+        this.emit('textDelta', `t${turn}`, 'Hecho, con mucho contexto.');
+        this.emit('tokens', { tokens: 200_000, cacheShare: 0.9, cost: 0 });
+        this.turnActive = false;
+        this.emit('turnFinished');
+      }, 100);
+      return;
+    }
     // «segundo plano»: leaves a job running and ends the turn; when it ends, wakes up and reports.
     if (/^segundo plano/i.test(text)) {
       setTimeout(() => {

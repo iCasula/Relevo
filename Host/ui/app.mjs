@@ -1026,6 +1026,10 @@ function modelMenu(anchor) {
     for (const m of visibleModels(a)) items.push({ label: m.name, checked: a.id === chosen.acc && m.id === chosen.model, help: m.detail ?? '', action: () => pickModel(hostId, threadId, a.id, m.id) });
   }
   if (rt?.defaultLimitPlan) items.push('-', { label: `Si se acaba la cuota: ${planSummary(hostId, rt.limitPlan ?? rt.defaultLimitPlan)}`, submenu: limitPlanItems(hostId, threadId, rt) });
+  if (rt && has(hostId, 'earlySwitch')) {
+    const on = rt.earlySwitch !== false;
+    items.push({ label: 'Cambiar antes de que se agote', checked: on, help: 'Con un plan que pasa a otro modelo: si el modelo está al 97 % o le ha saltado el límite, el agente cambia antes de empezar el turno, para que no se corte a medias. Desactívalo para que use su modelo hasta el final.', action: () => request(hostId, { setEarlySwitch: { threadId, on: !on } }).then((r) => { if (!r.ok) toast(r.error); else toast(on ? 'Este agente seguirá en su modelo hasta agotarlo' : 'Este agente cambiará antes de agotar su modelo'); }) });
+  }
   items.push('-', { label: 'Gestionar suscripciones…', action: () => sheets.openSettings('accounts', hostId) });
   showMenu(anchor, items);
 }
