@@ -10,7 +10,7 @@
 //   shorten the way, so an executor doesn't spend the night reinventing what is already solved.
 //
 // It works with any agent (Claude, Codex, Antigravity, ACP): it only needs text in and text out. You can
-// talk to any of them at any time; automatic messages stop after a while without you (a loop guard).
+// talk to any of them at any time; automatic messages go on until the goal is met, you pause the team or its daily budget runs out.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -52,8 +52,6 @@ export const BG_CHECK = Number(process.env.RELEVO_BG_CHECK ?? 1800);
 const SUMMARY_HOUR = 21;
 
 
-/** Automatic messages in a row (with no message from you) before the team pauses itself. */
-export const AUTO_LIMIT = 60;
 /** The whole team idle this long (seconds) wakes the orchestrator; an order «en curso» never received, after STUCK_AFTER. */
 export const IDLE_NUDGE = Number(process.env.RELEVO_IDLE_NUDGE ?? 900);
 const STUCK_AFTER = Math.min(600, IDLE_NUDGE);
@@ -307,6 +305,11 @@ export class Teams {
       const lead = this._lead(team);
       const last = [...(lead?.items ?? [])].reverse().find((i) => i.kind === 'notice' && /^Equipo (en pausa|reanudado)/.test(i.text ?? ''));
       team.pausedBy = /mensajes automáticos/.test(last?.text ?? '') ? 'limit' : /presupuesto/.test(last?.text ?? '') ? 'budget' : 'user';
+    }
+    // The loop guard is gone: a team it paused carries on (what it held stays for you to review).
+    // Once the host is up (this runs while it starts).
+    if (!host.config?.readOnly && this.list.some((x) => x.status === 'paused' && x.pausedBy === 'limit')) {
+      setTimeout(() => { for (const team of this.list) if (team.status === 'paused' && team.pausedBy === 'limit') { this._reactivate(team, 'Equipo reactivado: Relevo ya no pausa el equipo por llevar muchos mensajes sin ti'); this.host._saveState(); this.host._broadcastSnapshot(); } }, 0);
     }
     this._watch = setInterval(() => {
       try { this.watchBackground(); this._maybeSummary(); this.sweepUnreported(); this.watchIdle(); this.watchPermits(); } catch (e) { host.log?.(`team watch: ${e.message}`); }
@@ -652,7 +655,7 @@ export class Teams {
     if (lead) h._changed(lead);
   }
 
-  /** You wrote in one of the team's threads: the loop guard starts over, and a pause it caused ends. */
+  /** You wrote in one of the team's threads: a pause from an older version's loop guard ends. */
   userSpoke(thread) {
     const team = this.of(thread);
     if (!team) return;
@@ -1741,21 +1744,9 @@ export class Teams {
     if (midTurn && !urgent && !answer && !handoff && member.role !== 'orchestrator' && (from.role === 'orchestrator' || from.role === 'researcher')) {
       return this._bounce(team, member, text, from);
     }
+    // No pause for «too many messages without you»: a team working through the night is the point. Your brakes
+    // are the daily budget and the Pausar button.
     if (team.status === 'paused' && !resumed) { this._hold(team, member, text, from); return 'held'; }
-    team.auto += 1;
-    if (team.auto > AUTO_LIMIT && team.status === 'active') {
-      team.status = 'paused';
-      team.pausedBy = 'limit';
-      const lead = this._lead(team);
-      if (lead) {
-        h._append(lead, { id: h._uuid(), kind: 'notice', text: `Equipo en pausa tras ${AUTO_LIMIT} mensajes automáticos seguidos sin ti. Tu próximo mensaje lo reactiva; lo retenido queda para que lo revises uno a uno.` });
-        this._attention(lead, 'pausa', `Equipo en pausa tras ${AUTO_LIMIT} mensajes automáticos seguidos sin ti`);
-        h._changed(lead);
-      }
-      this._hold(team, member, text, from);
-      h._broadcastSnapshot();
-      return 'held';
-    }
     const t = h.threads.get(member.threadId);
     if (!t) return 'gone';
     if (member.role === 'orchestrator' && team.notes?.length) {
