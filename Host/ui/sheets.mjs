@@ -357,7 +357,7 @@ function drawPush(body) {
   if (!hosts.length) return;
   const section = document.createElement('div');
   section.innerHTML = `<div class="form-section">Notificaciones en el iPhone</div>
-    <div class="form-group"><div class="form-row"><div class="caption">Con tu clave de APNs, cada host avisa a tu iPhone cuando un agente te pregunta algo, necesita tu permiso, el guardarraíl detiene un comando o se consigue un hito, aunque la app esté cerrada. La clave se crea en developer.apple.com › Certificates, IDs &amp; Profiles › Keys › «+» con «Apple Push Notifications service (APNs)». Se descarga una sola vez (un fichero .p8). El iPhone se registra solo al abrir la app conectada al host.</div></div></div>
+    <div class="form-group"><div class="form-row"><div class="caption">Con tu clave de APNs, cada host avisa a tu iPhone cuando el orquestador te pide algo, un agente te pregunta o necesita tu permiso, o el guardarraíl detiene un comando, aunque la app esté cerrada o el móvil bloqueado. La clave se crea en developer.apple.com › Certificates, IDs &amp; Profiles › Keys › «+» con «Apple Push Notifications service (APNs)». Se descarga una sola vez (un fichero .p8). El iPhone se registra solo al abrir la app conectada al host.</div></div></div>
     ${hosts.map((id) => {
       const p = snap(id)?.hostPush ?? {};
       return `<div class="form-group" data-push-host="${esc(id)}">

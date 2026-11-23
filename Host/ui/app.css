@@ -605,7 +605,7 @@ input[type=checkbox].check { accent-color: var(--accent); width: 14px; height: 1
 .reply { display: flex; flex-direction: column; gap: 8px; }
 .order { --tint: var(--secondary); border-radius: 10px; overflow: hidden; }
 .order.msg { --tint: var(--accent); border: 1px solid color-mix(in srgb, var(--tint) 30%, transparent); border-left: 3px solid var(--tint); background: color-mix(in srgb, var(--tint) 11%, transparent); }
-.order.msg.r-orchestrator { --tint: var(--orange); } .order.msg.r-researcher { --tint: var(--green); } .order.msg.urgent { --tint: var(--red); }
+.order.msg.r-orchestrator { --tint: var(--orange); } .order.msg.r-researcher { --tint: var(--green); } .order.msg.urgent { --tint: var(--red); } .order.msg.ask { --tint: var(--purple); }
 .order.memo { border: 1px dashed var(--tertiary); background: var(--fill-quaternary); }
 .order.memo .order-head b { font-weight: 500; color: var(--secondary); }
 .order-head { display: flex; align-items: center; gap: 7px; width: 100%; background: none; border: 0; padding: 7px 10px; text-align: left; font-size: 12px; color: var(--text); cursor: pointer; }

@@ -656,6 +656,7 @@ const ORDER = {
   fin: ['Fin', 'checkmark.circle', true], decision: ['Decisión', 'checkmark.seal', true],
   descartar: ['Descartar', 'xmark.circle', true], hito: ['Hito', 'checklist', true], hecho: ['Hecho', 'checkmark.circle.fill', true],
   aprobar: ['Permitir', 'checkmark.shield'], denegar: ['Denegar', 'xmark.octagon'], consultar: ['Consultar al usuario', 'hand.raised'],
+  pedir: ['Te pide', 'hand.raised.fill'],
 };
 /** The role of whoever an order goes to: from the team when the name is known, else from the name or the kind. */
 function recipientRole(o, roles) {
@@ -667,7 +668,7 @@ const teamRoles = (hostId) => {
   const team = id && teamOf(hostId, id);
   return team ? new Map(team.members.map((m) => [m.name.toLowerCase(), m.role])) : null;
 };
-const ORDER_TAG = /<relevo:(tarea|urgente|investigar|respuesta|pregunta|integrar|fin|decisi[oó]n|descartar|hito|hecho|aprobar|denegar|consultar)\b([^>]*?)(?:\/>|>([\s\S]*?)<\/relevo:\1\s*>)/gi;
+const ORDER_TAG = /<relevo:(tarea|urgente|investigar|respuesta|pregunta|integrar|fin|decisi[oó]n|descartar|hito|hecho|aprobar|denegar|consultar|pedir)\b([^>]*?)(?:\/>|>([\s\S]*?)<\/relevo:\1\s*>)/gi;
 const ORDER_TO = /\b(?:para|de)\s*=\s*(?:["“']([^"”']+)["”']|([^\s"”'>/]+))/i;
 
 /** The reply cut into prose and orders, in order; tags inside code blocks stay text (as the host reads them). */
@@ -709,11 +710,13 @@ function replyHTML(text, id, roles) {
   return `<div class="reply">${segs.map((x, i) => {
     if (!x.type) return `<div class="md">${markdown(x.text)}</div>`;
     const key = `${id}#order${i}`;
-    const open = app.expandedItems.has(key);
+    // What it asks you is for you to read: always open, in its own colour.
+    const ask = x.type === 'pedir';
+    const open = ask || app.expandedItems.has(key);
     const [label, sym, memo] = ORDER[x.type] ?? [x.type, 'text.bubble'];
-    const cls = memo ? 'memo' : x.type === 'urgente' ? 'msg urgent' : `msg r-${recipientRole(x, roles)}`;
-    const head = `<button class="order-head" data-toggle-item="${esc(key)}"${x.body ? '' : ' disabled'}>${icon(sym, { size: 12, cls: 'sym' })}<b>${esc(label)}${x.to ? ` → ${esc(x.to)}` : ''}</b>`
-      + `${!open && x.body ? `<span class="pv">${esc(previewLine(x.body))}</span>` : '<span class="grow"></span>'}${x.body ? icon(open ? 'chevron.down' : 'chevron.right', { size: 9, cls: 'chev' }) : ''}</button>`;
+    const cls = memo ? 'memo' : ask ? 'msg ask' : x.type === 'urgente' ? 'msg urgent' : `msg r-${recipientRole(x, roles)}`;
+    const head = `<button class="order-head" data-toggle-item="${esc(key)}"${x.body && !ask ? '' : ' disabled'}>${icon(sym, { size: 12, cls: 'sym' })}<b>${esc(label)}${x.to ? ` → ${esc(x.to)}` : ''}</b>`
+      + `${!open && x.body ? `<span class="pv">${esc(previewLine(x.body))}</span>` : '<span class="grow"></span>'}${x.body && !ask ? icon(open ? 'chevron.down' : 'chevron.right', { size: 9, cls: 'chev' }) : ''}</button>`;
     return `<div class="order ${cls}">${head}${open && x.body ? `<div class="md order-body">${markdown(x.body)}</div>` : ''}</div>`;
   }).join('')}</div>`;
 }
