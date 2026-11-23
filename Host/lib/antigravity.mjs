@@ -144,9 +144,13 @@ export class AntigravitySession extends EventEmitter {
     if (this.mode === 'plan') args.push('--mode', 'plan');
     if (skipPermissions) args.push('--dangerously-skip-permissions');
     if (this.conversationId) args.push('--conversation', this.conversationId);
-    args.push(`-p=${prompt}`);
-    const p = spawnCLI(this.bin, args, { cwd: this.cwd, env: this.env, stdio: ['ignore', 'pipe', 'pipe'] });
+    // The message goes in on stdin, not as an argument: a handoff or a team brief (tens of thousands of
+    // characters) is longer than a Windows command line takes (32,767; 8,191 through cmd.exe).
+    args.push('--input-format', 'stream-json');
+    const p = spawnCLI(this.bin, args, { cwd: this.cwd, env: this.env, stdio: ['pipe', 'pipe', 'pipe'] });
     this.proc = p;
+    p.stdin.on('error', () => {}); // it may exit before reading it all (a bad flag, no quota): its exit says why
+    p.stdin.end(`${JSON.stringify({ event: 'user', message: { content: prompt } })}\n`);
     let tail = '';
     p.stderr.on('data', (d) => { tail = (tail + d).slice(-4000); });
     readline.createInterface({ input: p.stdout }).on('line', (line) => this._line(line));
