@@ -1409,7 +1409,7 @@ document.addEventListener('keydown', (e) => {
 // Inside the native Mac app (window.webkit.messageHandlers.relevo) the notifications are the system's.
 
 const native = () => window.webkit?.messageHandlers?.relevo;
-const ATTENTION = { orquestador: 'El orquestador te escribe', fin: 'Objetivo cumplido', pausa: 'Equipo en pausa', presupuesto: 'Presupuesto del equipo superado', resumen: 'Resumen del día del equipo' };
+const ATTENTION = { pedir: 'El orquestador te pide algo', orquestador: 'El orquestador te escribe', fin: 'Objetivo cumplido', pausa: 'Equipo en pausa', presupuesto: 'Presupuesto del equipo superado', resumen: 'Resumen del día del equipo' };
 
 function notifyChanges(hostId) {
   for (const t of snap(hostId)?.threads ?? []) {

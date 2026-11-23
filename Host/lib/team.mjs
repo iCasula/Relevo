@@ -64,7 +64,7 @@ export const PERMIT_WAIT = Number(process.env.RELEVO_PERMIT_WAIT ?? 600);
 
 // MARK: - Orders in the agents' replies
 
-const TAG = /<relevo:(tarea|urgente|investigar|respuesta|pregunta|integrar|fin|decisi[oó]n|descartar|hito|hecho|aprobar|denegar|consultar)\b([^>]*?)(?:\/>|>([\s\S]*?)<\/relevo:\1\s*>)/gi;
+const TAG = /<relevo:(tarea|urgente|investigar|respuesta|pregunta|integrar|fin|decisi[oó]n|descartar|hito|hecho|aprobar|denegar|consultar|pedir)\b([^>]*?)(?:\/>|>([\s\S]*?)<\/relevo:\1\s*>)/gi;
 const FENCED = /```[\s\S]*?(?:```|$)/g;
 const orderSig = (o) => `${o.type}|${o.to ?? ''}|${o.body}`;
 /** What became of a message, as the orchestrator and you read it. */
@@ -106,6 +106,8 @@ export function findMember(team, name) {
 export function memberName(s) {
   return String(s ?? '').replace(/["“”'<>]/g, '').replace(/\s+/g, ' ').trim().slice(0, 32);
 }
+/** An orchestrator's untagged comment that looks addressed to you (a question, a request, waiting for you). */
+const ASKS_USER = /\?|\b(usuario|necesito que|necesitamos que|puedes|podr[ií]as|confirma|conf[ií]rmame|decide|elige|dime|ind[ií]came|pru[eé]balo|esperando (al usuario|tu|a que))\b/i;
 const RESERVED = new Set(['relevo', 'usuario', 'tu', 'yo', 'todos', 'equipo']);
 
 // MARK: - What each role is told
@@ -227,6 +229,7 @@ Para dar órdenes, escríbelas tal cual en tu respuesta (fuera de bloques de có
 <relevo:tarea para="${executors[0]?.name ?? 'Ejecutor 1'}">qué hacer, criterio de terminado, ficheros o pistas</relevo:tarea>
 ${researcher ? `<relevo:investigar para="${executors[0]?.name ?? 'Ejecutor 1'}">qué averiguar y para qué</relevo:investigar>  (para= es opcional: a quién más le llega el informe)\n` : ''}<relevo:respuesta para="${executors[0]?.name ?? 'Ejecutor 1'}">respuesta a su duda o cómo desbloquearse</relevo:respuesta>
 ${executors.some((e) => host.threads.get(e.threadId)?.worktree) ? '<relevo:integrar de="Ejecutor 2"/>  fusiona en la rama principal el worktree de un ejecutor que ha terminado (lo hace Relevo, sin que tú toques git).\n' : ''}<relevo:fin>resumen para el usuario</relevo:fin>  cuando el objetivo esté cumplido y revisado.
+<relevo:pedir>qué necesitas que haga el usuario y por qué, en una o dos frases</relevo:pedir>  la única forma de que al usuario le llegue un aviso: úsala solo cuando necesites que haga algo (decidir entre opciones, probar en la consola, darte un acceso o un archivo, desbloquear lo que el equipo no puede). No la uses para informar ni para resúmenes: lo que escribas sin ella lo lee cuando entre, sin aviso.
 <relevo:hito>un paso comprobable hacia el objetivo</relevo:hito>  añade un hito (en orden); <relevo:hecho>2</relevo:hecho> marca el #2 como conseguido cuando lo hayas comprobado. Relevo los muestra al usuario como progreso y te los recuerda siempre.
 <relevo:decision>una decisión firme, en una línea (qué y por qué)</relevo:decision>  Relevo la guarda y se la recuerda a todo el equipo, también a ti en tus sesiones nuevas. Úsala para lo que no debe reabrirse: tecnologías y proyectos elegidos (p. ej. «usamos shadPS4 como referencia para GNM»), enfoques descartados y por qué, criterios del usuario, y TODO resultado ya comprobado (en la consola, en tests o por el usuario), con fecha: «Comprobado 19-nov: Vulkan enumera 1 dispositivo en la consola sin consoleInit; no repetir la prueba». Un diagnóstico guardado no dice que el arreglo funcione: cuando se compruebe, guárdalo. <relevo:descartar>3</relevo:descartar> retira la decisión #3 si deja de valer.
 
@@ -246,7 +249,7 @@ Cómo funciona la entrega: a un agente a mitad de un turno solo le llega lo urge
 - No hagas tú el trabajo de los ejecutores (depurar, compilar, hacer commits o merges): pídeselo a ellos${executors.some((e) => host.threads.get(e.threadId)?.worktree) ? ' o usa integrar' : ''}.
 - Toda respuesta y tarea lleva para="…". No existen otras órdenes ni opciones («force», «redirect»…) aparte de las de arriba.
 - Tareas pequeñas y comprobables. No des a dos ejecutores los mismos ficheros a la vez.
-${researcher ? `- Antes de que un ejecutor construya algo que ya puede existir (una librería, un proyecto open source, un ejemplo), o en cuanto lleve dos intentos fallidos con el mismo problema, pide al ${researcher.name} que lo busque, y pasa al ejecutor la recomendación concreta.\n` : '- Si un ejecutor lleva dos intentos fallidos con el mismo problema, para y busca otro enfoque (librerías o proyectos open source que ya lo resuelvan) antes de insistir.\n'}- Responde tú las dudas que puedas. Si solo el usuario puede decidir, pregúntaselo en tu respuesta sin dar órdenes y espera.
+${researcher ? `- Antes de que un ejecutor construya algo que ya puede existir (una librería, un proyecto open source, un ejemplo), o en cuanto lleve dos intentos fallidos con el mismo problema, pide al ${researcher.name} que lo busque, y pasa al ejecutor la recomendación concreta.\n` : '- Si un ejecutor lleva dos intentos fallidos con el mismo problema, para y busca otro enfoque (librerías o proyectos open source que ya lo resuelvan) antes de insistir.\n'}- Responde tú las dudas que puedas. Si solo el usuario puede decidir o hacer algo, pídeselo con <relevo:pedir> y espera.
 - Sé breve y gasta poco: todos ven el código en disco, no lo copies en los mensajes; no leas el proyecto entero, apóyate en los informes y lee solo lo que necesites para decidir.
 ${notesOf(member)}${milestonesBlock(team, true)}${decisionsBlock(team)}${findingsBlock(team)}${fresh ? boardBlock(host, team, member) : ''}${carried}
 Objetivo del usuario:
@@ -662,6 +665,7 @@ export class Teams {
     if (team.status === 'paused' && team.pausedBy === 'limit') this._reactivate(team, 'Equipo reactivado por tu mensaje');
     team.auto = 0;
     team.nudges = 0;
+    team.askHinted = false;
     if (team.status === 'done') team.status = 'active'; // you asked for more
   }
 
@@ -849,9 +853,14 @@ export class Teams {
       const sent = this._dispatch(team, member, thread, orders, items);
       this._offerParked(team, sent);
       this._receipt(team, thread, sent);
-      // A turn with no orders is the orchestrator talking to you (a question, a decision, a summary).
+      // Only <relevo:pedir> tells you (see _order). A turn with no orders that seems to ask you something gets
+      // the tag recalled once, until it uses it or you write: without it you'd get no notice.
       const said = withoutOrders(text).trim();
-      if (!orders.some((o) => !['decision', 'descartar', 'hito', 'hecho'].includes(o.type)) && said && team.status !== 'done') this._attention(thread, 'orquestador', said);
+      if (orders.some((o) => o.type === 'pedir')) team.askHinted = false;
+      else if (!orders.some((o) => !['decision', 'descartar', 'hito', 'hecho'].includes(o.type)) && said && team.status !== 'done' && !team.askHinted && ASKS_USER.test(said)) {
+        team.askHinted = true;
+        this._deliver(team, member, 'Si eso era para el usuario y necesitas que haga algo, pídeselo con <relevo:pedir>qué y por qué</relevo:pedir>: sin la etiqueta no le llega ningún aviso. Si no lo era, sigue sin más.', { name: 'Relevo', role: 'relevo', label: 'aviso' });
+      }
       team.leadTurns = (team.leadTurns ?? 0) + 1;
       this._maybeRefreshLead(team, thread);
       h._saveState();
@@ -1005,8 +1014,8 @@ export class Teams {
     t.attention = { kind, text: clip(text.replace(/\s+/g, ' '), 240), at: Date.now() / 1000 };
     this.host._changed(t);
     this.host._broadcastSnapshot();
-    const title = { orquestador: 'El orquestador te escribe', fin: 'Objetivo cumplido', pausa: 'Equipo en pausa', presupuesto: 'Presupuesto del equipo superado', resumen: 'Resumen del día del equipo' }[kind] ?? 'El equipo te necesita';
-    this.host._push?.(t, title, t.attention.text, kind);
+    // Only a request from the orchestrator reaches your phone; the rest you see when you come in.
+    if (kind === 'pedir') this.host._push?.(t, `${this.memberOf(t)?.name ?? 'El orquestador'} te pide algo`, t.attention.text, kind);
   }
 
   /** Working, waiting for an answer, or waiting for something it left running in the background. */
@@ -1696,7 +1705,6 @@ export class Teams {
       case 'hecho': {
         const done = this.setMilestones(team, o.body || o.to, true);
         for (const m of done) h._append(leadThread, { id: h._uuid(), kind: 'notice', text: `Hito conseguido: #${m.id} ${clip(m.text, 200)} (${team.milestones.filter((x) => x.done).length}/${team.milestones.length})` });
-        for (const m of done) h._push?.(leadThread, `Hito conseguido (${team.milestones.filter((x) => x.done).length}/${team.milestones.length})`, m.text, `hito${m.id}`);
         if (done.length) h._changed(leadThread);
         return;
       }
@@ -1715,6 +1723,10 @@ export class Teams {
           h._append(leadThread, { id: h._uuid(), kind: 'notice', text: `Decisión retirada: ${gone.map((d) => `#${d.id}`).join(', ')}` });
           h._changed(leadThread);
         }
+        return;
+      }
+      case 'pedir': {
+        if (o.body) this._attention(leadThread, 'pedir', o.body);
         return;
       }
       case 'fin': {

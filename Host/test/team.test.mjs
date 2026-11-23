@@ -344,7 +344,7 @@ test('integrar merges an executor worktree without the orchestrator touching git
   assert.match(news.threadPatch._0.upserts.find((i) => i.from?.label === 'cambios en el equipo').text, /Se une Ejecutor 3 \(.*en su worktree, rama relevo\/\w+\)/);
 });
 
-test("each role's fallback is its thread's out-of-quota plan, and the orchestrator talking to you is flagged", async () => {
+test("each role's fallback is its thread's out-of-quota plan, and only the orchestrator asking you something is flagged", async () => {
   const claude = snapshot.accounts.find((a) => a.kind === 'claude'), codex = snapshot.accounts.find((a) => a.kind === 'codex');
   const r = await request('createTeam', { team: {
     projectId: demo(), goal: 'Fallbacks', researcher: null,
@@ -355,11 +355,17 @@ test("each role's fallback is its thread's out-of-quota plan, and the orchestrat
   const members = snap.hostTeams.find((x) => x.goal === 'Fallbacks').members;
   assert.equal(members[0].fallback, `${codex.id}|default`);
   assert.equal(members[1].fallback, 'wait');
-  // The echo orchestrator's first turn gives no orders: that's it talking to you.
-  const flagged = (await next((m) => m.snapshot?._0.threads.find((t) => t.id === r.threadId)?.attention, 20_000)).snapshot._0;
+  // Talking to you without the tag notifies nothing: Relevo recalls <relevo:pedir> (once) instead.
+  peer.send(Client.subscribe(r.threadId));
+  peer.send(Client.send(r.threadId, '¿Seguimos con la fase 2?'));
+  const hint = await next((m) => m.threadPatch?._0.id === r.threadId && m.threadPatch._0.upserts.some((i) => i.from?.label === 'aviso' && /relevo:pedir/.test(i.text)), 20_000);
+  assert.ok(hint);
+  // With the tag it is flagged for you, with what it asks.
+  peer.send(Client.send(r.threadId, '<relevo:pedir>Prueba el build en la consola</relevo:pedir>'));
+  const flagged = (await next((m) => m.snapshot?._0.threads.find((t) => t.id === r.threadId)?.attention?.text === 'Prueba el build en la consola', 20_000)).snapshot._0;
   const first = flagged.threads.find((t) => t.id === r.threadId).attention;
-  assert.equal(first.kind, 'orquestador');
-  // You answer: the flag goes (or, with the quick echo agent, is replaced by its next message).
+  assert.equal(first.kind, 'pedir');
+  // You answer: the flag goes.
   peer.send(Client.send(r.threadId, 'vale'));
   await next((m) => { const t = m.snapshot?._0.threads.find((x) => x.id === r.threadId); return t && (!t.attention || t.attention.at !== first.at); });
   // Edited afterwards.
