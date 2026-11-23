@@ -390,7 +390,7 @@ test('a session is renewed only when its context is really full, after the agent
     threads: new Map([['L', t]]), _rt: () => rt, _uuid: () => 'u', _append: (th, it) => { th.items.push({ ...it, date: Date.now() / 1000 }); notices.push(it.text); }, _changed() {}, _saveState() {},
     _startTurn: (th, text, p, meta) => { started.push(meta.prompt); th.items.push({ kind: 'user', text, from: meta.from, date: Date.now() / 1000 }); },
     agents: { get: () => ({ close: () => closed.push(1) }), delete() {} }, accountsById: new Map(), projects: () => [], _modelName: () => 'm',
-    teams: { _status: () => 'Estado del equipo: Ejecutor libre' }, settings: { renewAt: 0 }, _renewLimit: P._renewLimit,
+    teams: { _status: () => 'Estado del equipo: Ejecutor libre' }, settings: { renewAt: 0 }, _renewLimit: P._renewLimit, _renewAt: P._renewAt,
   };
   const lead = { threadId: 'L', role: 'orchestrator', name: 'Orquestador' };
   const team = { id: 'T', goal: 'G', status: 'active', decisions: [], members: [lead] };
@@ -434,7 +434,7 @@ test('a thread on its own renews its long session too: a short note turn, then a
     _append: (th, it) => { notices.push(it.text); },
   });
   h.settings = { renewAt: 150_000 };
-  h._renewLimit = P._renewLimit; h._maybeRenewSolo = P._maybeRenewSolo; h._renewSolo = P._renewSolo;
+  h._renewLimit = P._renewLimit; h._renewAt = P._renewAt; h._maybeRenewSolo = P._maybeRenewSolo; h._renewSolo = P._renewSolo;
   h.agents = new Map([['S', { close: () => closed.push(1) }]]);
   const t = { id: 'S', accountId: 'CX', model: 'terra', items: [], queued: [] };
   const r = h._rt(t);
@@ -456,11 +456,25 @@ test('a thread on its own renews its long session too: a short note turn, then a
   assert.match(t.handoffNote.text, /parche 8 arranca/);
   const brief = handoffText({ items: [], accounts: new Map(), projectPath: '/p', target: { agentName: 'Codex' }, fresh: true, note: t.handoffNote });
   assert.match(brief, /sesión nueva[\s\S]*Tu nota de traspaso[\s\S]*parche 8 arranca/);
-  // Off: never for a thread on its own.
+  // «Only when nearly full»: a 1 M window keeps going until 750 k.
   h.settings.renewAt = 0;
   t.noteRequested = false;
   r.context = { used: 390_000, window: 1_000_000 };
   assert.equal(h._maybeRenewSolo(t), false);
+  r.context = { used: 760_000, window: 1_000_000 };
+  assert.equal(h._maybeRenewSolo(t), true);
+  // Each agent can have its own: 400 k for one that needs its context, whatever the host's says.
+  t.noteRequested = false;
+  h.settings.renewAt = 150_000;
+  t.renewAt = 400_000;
+  r.context = { used: 390_000, window: 1_000_000 };
+  assert.equal(h._maybeRenewSolo(t), false, 'its own 400 k, not the host 150 k');
+  r.context = { used: 410_000, window: 1_000_000 };
+  assert.equal(h._maybeRenewSolo(t), true);
+  // Never past 75 % of the window, whatever it chose.
+  t.noteRequested = false;
+  r.context = { used: 160_000, window: 200_000 };
+  assert.equal(h._maybeRenewSolo(t), true);
 });
 
 test("waiting here: the thread stays on its model and carries on when the balance is back", async () => {

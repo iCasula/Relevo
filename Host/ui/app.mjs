@@ -1033,6 +1033,15 @@ function modelMenu(anchor) {
     const on = rt.earlySwitch !== false;
     items.push({ label: 'Cambiar antes de que se agote', checked: on, help: 'Con un plan que pasa a otro modelo: si el modelo está al 97 % o le ha saltado el límite, el agente cambia antes de empezar el turno, para que no se corte a medias. Desactívalo para que use su modelo hasta el final.', action: () => request(hostId, { setEarlySwitch: { threadId, on: !on } }).then((r) => { if (!r.ok) toast(r.error); else toast(on ? 'Este agente seguirá en su modelo hasta agotarlo' : 'Este agente cambiará antes de agotar su modelo'); }) });
   }
+  if (rt && has(hostId, 'renewPerAgent')) {
+    const name = (v) => (v > 0 ? `${v / 1000} k tokens` : 'solo cuando esté casi llena');
+    const set = (at) => request(hostId, { setRenewAt: { threadId, at } }).then((r) => { if (!r.ok) toast(r.error); });
+    const own = rt.renewAt;
+    items.push({ label: `Renovar la sesión: ${own == null ? `como en Ajustes (${name(rt.hostRenewAt)})` : name(own)}`, submenu: [
+      { label: `Como en Ajustes (${name(rt.hostRenewAt)})`, checked: own == null, action: () => set(null) },
+      ...[100_000, 150_000, 250_000, 400_000, 0].map((v) => ({ label: v > 0 ? `Al llegar a ${name(v)}` : 'Solo cuando esté casi llena', checked: own === v, action: () => set(v) })),
+    ] });
+  }
   items.push('-', { label: 'Gestionar suscripciones…', action: () => sheets.openSettings('accounts', hostId) });
   showMenu(anchor, items);
 }

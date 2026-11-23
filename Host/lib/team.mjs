@@ -1340,7 +1340,7 @@ export class Teams {
     const h = this.host;
     const r = h._rt(t);
     if (r.isRunning || r.approvals.size || r.backgroundTasks?.length || member.noteRequested) return;
-    if ((r.context?.used ?? 0) <= h._renewLimit(r)) return;
+    if ((r.context?.used ?? 0) <= h._renewLimit(r, t)) return;
     member.noteRequested = true;
     h._append(t, { id: h._uuid(), kind: 'notice', text: 'Contexto casi lleno: antes de renovar la sesión, el agente escribe su nota de traspaso' });
     h._startTurn(t, 'Relevo va a renovar tu sesión: escribe tu nota de traspaso.', false, {

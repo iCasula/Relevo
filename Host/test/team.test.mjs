@@ -572,6 +572,11 @@ test('after running out of quota and waiting, what an executor reports still rea
   const exec = team.members[1].threadId;
   peer.send(Client.send(boss, '<relevo:tarea para="Ejecutor">agota la cuota</relevo:tarea>'));
   await new Promise((res) => setTimeout(res, 1500)); // its turn ends at once on the limit
+  // It never read the team's instructions that went with that first order: the next message carries them again.
+  peer.send(Client.subscribe(exec));
+  const lost = await next((m) => m.thread?._0.id === exec, 20_000);
+  assert.ok(lost.thread._0.items.some((i) => i.kind === 'notice' && /No le han llegado las instrucciones del equipo/.test(i.text ?? '')));
+  peer.send(Client.subscribe(boss)); // one thread at a time: back to the orchestrator's
   // The quota is back: it carries on by itself, and that turn is a report like any other.
   peer.send(Client.limitAction(exec, 'resumeNow'));
   await next((m) => m.threadPatch?._0.id === boss && m.threadPatch._0.upserts.some((i) => i.kind === 'user' && /Sigue con la tarea/.test(i.text ?? '')), 20_000);

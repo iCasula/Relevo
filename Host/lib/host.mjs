@@ -60,12 +60,12 @@ export function modelScore(m, tier) {
 }
 /** What this host does beyond the shared protocol; clients show those controls only when listed. */
 export const HOST_FEATURES = ['askUser', 'teams', 'projects', 'threads', 'git', 'images', 'usage', 'login', 'settings', 'limitPlans', 'history', 'titles', 'accounts',
-  'turns', 'worktrees', 'pullRequests', 'suggest', 'quickActions', 'attachments', 'teamRename', 'teamDecisions', 'teamMemory', 'smartFallback', 'teamBudget', 'teamHeld', 'guard', 'push', 'waitHere', 'leadApproves', 'renewSessions', 'earlySwitch'];
+  'turns', 'worktrees', 'pullRequests', 'suggest', 'quickActions', 'attachments', 'teamRename', 'teamDecisions', 'teamMemory', 'smartFallback', 'teamBudget', 'teamHeld', 'guard', 'push', 'waitHere', 'leadApproves', 'renewSessions', 'earlySwitch', 'renewPerAgent'];
 /**
  * A long session rereads its whole context every turn (most of what a subscription spends): past this many tokens
  * the agent writes a handoff note and goes on in a fresh session. 0: only when it's nearly full (REFRESH.cap).
  */
-export const RENEW_DEFAULT = 150_000;
+export const RENEW_DEFAULT = 400_000;
 export const RENEW_CHOICES = [0, 100_000, 150_000, 250_000, 400_000];
 const IMAGE_UPLOAD = /\.(png|jpe?g|gif|webp)$/i;
 
@@ -513,6 +513,12 @@ export class Host {
       case 'teamAction': run(() => this.teams.action(a.teamId, a.action)); break;
       case 'updateTeam': run(() => this.teams.update(String(a.teamId).toUpperCase(), a.changes ?? {})); break;
       case 'teamDecisions': run(() => this.teams.editDecisions(String(a.teamId).toUpperCase(), { add: a.add, remove: a.remove })); break;
+      case 'setRenewAt': if (t) run(() => {
+        const at = a.at == null ? null : Number(a.at);
+        if (at != null && !RENEW_CHOICES.includes(at)) throw new Error('Umbral de renovación no válido');
+        t.renewAt = at; // null: as in the host's settings
+        this._changed(t); this._saveThread(t); return {};
+      }); break;
       case 'setEarlySwitch': if (t) run(() => { t.earlySwitch = a.on === false ? false : null; this._changed(t); this._saveThread(t); return {}; }); break;
       case 'setGuard': if (t) run(() => { this.setGuard(t, a.on); return {}; }); else if (a.teamId) run(() => this.teams.setGuard(String(a.teamId).toUpperCase(), a.on)); break;
       case 'setLeadApproves': run(() => this.teams.setLeadApproves(String(a.teamId).toUpperCase(), a.on)); break;
@@ -1399,6 +1405,9 @@ export class Host {
       t.title = first.length > 60 ? `${first.slice(0, 57)}…` : first;
     }
     let prompt = meta.prompt ?? text;
+    // What this message carries only once (the handoff, the team's instructions): if the agent never gets to read
+    // it (it fails to start, or has no quota), the next message carries it again (see «carry» in _agent).
+    const carry = { handoffPending: !!t.handoffPending, freshSession: !!t.freshSession, handoffNote: t.handoffNote ?? null, catchUpFrom: t.catchUpFrom ?? null, unprimed: !!t.team && !t.teamPrimed };
     // Back in its own session after a while on another model: what it knew is old, so a team member gets the
     // team's memory again (decisions, library, board), as a fresh session would.
     const teamPrefix = this.teams.promptPrefix(t, t.handoffPending || t.catchUpFrom != null);
@@ -1439,6 +1448,7 @@ export class Host {
     r.limit = null;
     r.turnItems = [];
     r.statusLine = t.items.filter((i) => i.kind === 'user').length > 1 ? 'Pensando…' : `Iniciando ${account.agentName}…`;
+    r.carry = carry.handoffPending || carry.catchUpFrom != null || carry.unprimed ? carry : null;
     t.updatedAt = now();
     this._agent(t).send(prompt);
     this._changed(t);
@@ -1488,9 +1498,11 @@ export class Host {
     s.on('session', (id) => { t.sessionId = id; this._saveThread(t); });
     s.on('models', (models) => { account.models = models; this._saveState(); this._broadcastSnapshot(); });
     s.on('status', (text) => { r.statusLine = text; this._changed(t, false); });
-    s.on('textDelta', (key, text) => { r.waitingTimer = false; const it = item(`a:${key}`, assistant); it.text += text; this._touch(t, it); this._changed(t, false); });
-    s.on('textFinal', (key, text) => { const it = item(`a:${key}`, assistant); it.text = text; this._touch(t, it); this._changed(t, false); });
+    const read = () => { r.carry = null; }; // the agent is answering: it got what this turn carried
+    s.on('textDelta', (key, text) => { read(); r.waitingTimer = false; const it = item(`a:${key}`, assistant); it.text += text; this._touch(t, it); this._changed(t, false); });
+    s.on('textFinal', (key, text) => { read(); const it = item(`a:${key}`, assistant); it.text = text; this._touch(t, it); this._changed(t, false); });
     s.on('reasoningDelta', (key, text) => {
+      read();
       const it = item(`r:${key}`, () => ({ id: uuid(), kind: 'reasoning', text: '' }));
       it.text += text; this._touch(t, it); this._changed(t, false);
     });
@@ -1499,6 +1511,7 @@ export class Host {
       it.text = text; this._touch(t, it); this._changed(t, false);
     });
     s.on('toolStarted', (key, name, title, input) => {
+      read();
       const it = item(`t:${key}`, () => ({ id: uuid(), kind: 'tool', text: title, title, toolName: name, toolState: 'running' }));
       // Some agents (Antigravity) announce a tool before its parameters: the real title comes later.
       if (title && title !== name && it.title !== title) { it.title = title; it.text = title; }
@@ -1614,6 +1627,16 @@ export class Host {
       this._changed(t);
     });
     s.on('turnFinished', () => {
+      // It never got to read the handoff or the team's instructions: they go again with the next message.
+      if (r.carry) {
+        const c = r.carry;
+        r.carry = null;
+        if (c.handoffPending) { t.handoffPending = true; t.freshSession ||= c.freshSession; t.handoffNote ??= c.handoffNote; }
+        if (c.catchUpFrom != null && t.catchUpFrom == null && !t.handoffPending) t.catchUpFrom = c.catchUpFrom;
+        if (c.unprimed) t.teamPrimed = false;
+        const what = c.handoffPending ? 'No le ha llegado el traspaso' : c.catchUpFrom != null ? 'No le ha llegado lo que pasó mientras no estaba' : 'No le han llegado las instrucciones del equipo';
+        this._append(t, { id: uuid(), kind: 'notice', text: `${what}: el siguiente mensaje se lo vuelve a mandar` });
+      }
       // A turn that ran means the account is signed in, whatever the last probe said.
       if (account.status?.loggedIn === false && !r.limit) this._refreshAccount(account);
       r.isRunning = false;
@@ -1753,12 +1776,20 @@ export class Host {
     this.modelLimits.set(key, { until: resetsAt ?? now() + 3600, at: now() });
   }
 
-  /** Context size past which a session is renewed (the setting; never past 75 % of the model's window). */
-  _renewLimit(r) {
-    const at = Number(this.settings.renewAt ?? RENEW_DEFAULT);
-    const cap = at > 0 ? at : REFRESH.cap;
+  /** Where this agent's session is renewed: its own choice, else the host's (0: only when nearly full). */
+  _renewAt(t) {
+    return Number(t?.renewAt ?? this.settings.renewAt ?? RENEW_DEFAULT);
+  }
+
+  /**
+   * Context size past which a session is renewed: the agent's or the host's choice, never past 75 % of the
+   * model's window. «Only when nearly full» is that 75 % (a 1M model keeps 750 k), or 400 k with no window known.
+   */
+  _renewLimit(r, t = null) {
+    const at = this._renewAt(t);
     const window = r.context?.window;
-    return window ? Math.min(window * REFRESH.share, cap) : cap;
+    if (!(at > 0)) return window ? window * REFRESH.share : REFRESH.cap;
+    return window ? Math.min(window * REFRESH.share, at) : at;
   }
 
   /**
@@ -1768,10 +1799,10 @@ export class Host {
    */
   _maybeRenewSolo(t) {
     const r = this._rt(t);
-    if (t.team || t.noteRequested || !(Number(this.settings.renewAt ?? RENEW_DEFAULT) > 0)) return false;
+    if (t.team || t.noteRequested) return false;
     if (r.isRunning || r.approvals.size || r.backgroundTasks?.length || r.pendingSwitch || r.limit || r.resumeAt) return false;
     const used = r.context?.used ?? 0;
-    if (used <= this._renewLimit(r)) return false;
+    if (used <= this._renewLimit(r, t)) return false;
     t.noteRequested = true;
     this._append(t, { id: uuid(), kind: 'notice', text: `La sesión va por ${Math.round(used / 1000)} k tokens de contexto: antes de renovarla, el agente escribe su nota de traspaso` });
     this._startTurn(t, 'Relevo va a renovar tu sesión: escribe tu nota de traspaso.', false, {
@@ -2175,7 +2206,7 @@ export class Host {
       usage: (account?.status?.windows ?? []).map(remoteWindow), backgroundTasks: (r.backgroundTasks ?? []).map((b) => ({ id: b.id, description: b.description, startedAt: b.startedAt })),
       limitPlan: t.limitPlan ? { ...t.limitPlan, summary: this._planSummary(t.limitPlan) } : null,
       defaultLimitPlan: { ...this.settings.limitPlan, summary: this._planSummary(this.settings.limitPlan) },
-      earlySwitch: t.earlySwitch !== false,
+      earlySwitch: t.earlySwitch !== false, renewAt: t.renewAt ?? null, hostRenewAt: Number(this.settings.renewAt ?? RENEW_DEFAULT),
       pendingRelay: r.pendingRelay ?? null, resumeAt: r.resumeAt ?? null, resumeUnknown: r.resumeUnknown || undefined, canWait: true,
       // Where it goes back to once that quota returns (it is on a fallback now).
       home: t.home && this.accountsById.has(t.home.accountId) ? { accountId: t.home.accountId, model: t.home.model || 'default' } : undefined,
