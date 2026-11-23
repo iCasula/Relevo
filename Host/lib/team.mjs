@@ -918,7 +918,7 @@ export class Teams {
     const forName = member.role === 'researcher' ? member.reportFor : null;
     member.reportFor = null;
     const target = forName && findMember(team, forName);
-    if (target && target.role !== 'orchestrator') {
+    if (target && target.role === 'executor') {
       const tt = h.threads.get(target.threadId);
       if (tt && !this._busy(tt)) {
         this._deliver(team, target, report.join('\n\n'), { threadId: thread.id, name: member.name, role: member.role, label: 'informe para ti' });
@@ -1616,7 +1616,10 @@ export class Teams {
       }
       case 'investigar': {
         if (!researcher) { complain('Este equipo no tiene investigador: busca tú o pide al usuario que lo añada.'); return; }
-        researcher.reportFor = o.to && findMember(team, o.to)?.name || null;
+        // para= names who else gets the report: an executor. Naming the researcher itself (or you) adds no one,
+        // or its own report would come back to it and cost a turn.
+        const forWhom = o.to ? findMember(team, o.to) : null;
+        researcher.reportFor = forWhom?.role === 'executor' ? forWhom.name : null;
         researcher.inquiry = clip(o.body.replace(/\s+/g, ' '), 300);
         // The list of what is already researched goes once, with its instructions when a session starts. An
         // order only adds what this agent hasn't been given since (usually nothing: it wrote those reports).

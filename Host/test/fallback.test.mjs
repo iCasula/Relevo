@@ -317,6 +317,26 @@ test("the orchestrator's orders that never went out are sent by the sweep, and o
   assert.equal(delivered.length, 1, 'once');
 });
 
+test("a research order's para= adds only an executor: naming the researcher itself sends its report back to no one", () => {
+  const L = { id: 'L', title: 'Orquestador', queued: [], items: [] };
+  const R = { id: 'R', title: 'Investigador', queued: [], items: [] };
+  const E = { id: 'E', title: 'Ejecutor 1', queued: [], items: [] };
+  const teams = Object.create(Teams.prototype);
+  teams.host = { threads: new Map([['L', L], ['R', R], ['E', E]]), _rt: () => ({ isRunning: false, approvals: new Map(), backgroundTasks: [] }), _append() {}, _changed() {}, _uuid: () => 'u', log() {}, _saveState() {} };
+  const researcher = { threadId: 'R', role: 'researcher', name: 'Investigador' };
+  const team = { status: 'active', auto: 0, held: [], findings: [], members: [{ threadId: 'L', role: 'orchestrator', name: 'Orquestador' }, researcher, { threadId: 'E', role: 'executor', name: 'Ejecutor 1' }] };
+  const labels = [];
+  teams._deliver = (tm, m, text, from) => { labels.push(from.label); return 'sent'; };
+  teams._order(team, team.members[0], { type: 'investigar', to: 'Investigador', body: 'busca algo' });
+  assert.equal(researcher.reportFor, null);
+  assert.equal(labels.at(-1), 'investigación');
+  teams._order(team, team.members[0], { type: 'investigar', to: 'Orquestador', body: 'busca algo' });
+  assert.equal(researcher.reportFor, null);
+  teams._order(team, team.members[0], { type: 'investigar', to: 'Ejecutor 1', body: 'busca algo' });
+  assert.equal(researcher.reportFor, 'Ejecutor 1');
+  assert.equal(labels.at(-1), 'investigación para Ejecutor 1');
+});
+
 test('the watchdog: a team idle for a while wakes the orchestrator once, then tells you; a question for you is waiting, not stuck', () => {
   const delivered = [], notices = [];
   const L = { id: 'L', title: 'Orquestador', queued: [], items: [{ kind: 'assistant', text: '<relevo:tarea para="Ejecutor 1">x</relevo:tarea>', date: 100 }] };
