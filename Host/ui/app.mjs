@@ -77,7 +77,7 @@ hooks.onInit = () => {
   if (app.sel) sendTo(app.sel.host, Client.subscribe(app.sel.thread));
 };
 hooks.onServer = (hostId, name, a) => {
-  if (name === 'snapshot') { notifyChanges(hostId); render(); }
+  if (name === 'snapshot' || name === 'snapshotPatch') { notifyChanges(hostId); render(); }
   else if ((name === 'thread' || name === 'threadPatch') && app.sel?.host === hostId && app.sel.thread === a._0?.id) renderThread();
   else if (name === 'activity') {}
 };
@@ -1412,9 +1412,12 @@ document.addEventListener('keydown', (e) => {
 // Inside the native Mac app (window.webkit.messageHandlers.relevo) the notifications are the system's.
 
 const native = () => window.webkit?.messageHandlers?.relevo;
-const ATTENTION = { pedir: 'El orquestador te pide algo', orquestador: 'El orquestador te escribe', fin: 'Objetivo cumplido', pausa: 'Equipo en pausa', presupuesto: 'Presupuesto del equipo superado', resumen: 'Resumen del día del equipo' };
+const ATTENTION = { pedir: 'El orquestador te pide algo', guard: 'Un permiso espera tu decisión', orquestador: 'El orquestador te escribe', fin: 'Objetivo cumplido', pausa: 'Equipo en pausa', presupuesto: 'Presupuesto del equipo superado', resumen: 'Resumen del día del equipo' };
 
 function notifyChanges(hostId) {
+  // A host that knows <relevo:pedir> says when you're needed: only that and the permissions that reach you
+  // (a member's own permission goes to the orchestrator first). Older hosts: everything, as before.
+  const asks = (snap(hostId)?.hostFeatures ?? []).includes('askUser');
   for (const t of snap(hostId)?.threads ?? []) {
     const key = `${hostId}/${t.id}`;
     const prev = app.notified.get(key);
@@ -1424,10 +1427,11 @@ function notifyChanges(hostId) {
     if (here) continue;
     const role = t.team?.role;
     const who = t.team ? `${t.team.name} · ` : '';
-    if (!prev.approval && t.needsApproval) notify(hostId, t, `${who}Necesita tu respuesta`, t.title);
-    else if (t.attention && t.attention.at !== prev.attention) notify(hostId, t, ATTENTION[t.attention.kind] ?? 'El equipo te necesita', t.attention.text);
-    else if (!role && prev.running && !t.isRunning && !t.needsApproval) notify(hostId, t, t.title, (t.preview ?? '').slice(0, 140));
+    if (!prev.approval && t.needsApproval && (!asks || !role || role === 'orchestrator')) notify(hostId, t, `${who}Necesita tu respuesta`, t.title);
+    else if (t.attention && t.attention.at !== prev.attention && (!asks || ['pedir', 'guard'].includes(t.attention.kind))) notify(hostId, t, ATTENTION[t.attention.kind] ?? 'El equipo te necesita', t.attention.text);
+    else if (!asks && !role && prev.running && !t.isRunning && !t.needsApproval) notify(hostId, t, t.title, (t.preview ?? '').slice(0, 140));
   }
+  if (asks) { reportStatus(); return; }
   // A milestone reached: good news worth a notification.
   for (const team of snap(hostId)?.hostTeams ?? []) {
     const key = `${hostId}/team/${team.id}`;
