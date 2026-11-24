@@ -265,7 +265,7 @@ test("an order for a busy executor waits as pending, comes back with its report,
 });
 
 test('orders: para= among other attributes, and integrar de=', () => {
-  assert.deepEqual(parseOrders('<relevo:respuesta para="Ejecutor 1" force="true">x</relevo:respuesta>'), [{ type: 'respuesta', to: 'Ejecutor 1', body: 'x' }]);
+  assert.deepEqual(parseOrders('<relevo:respuesta para="Ejecutor 1" force="true">x</relevo:respuesta>'), [{ type: 'respuesta', to: 'Ejecutor 1', body: 'x', attrs: { para: 'Ejecutor 1', force: 'true' } }]);
   assert.deepEqual(parseOrders('<relevo:integrar de="Ejecutor 2"/>'), [{ type: 'integrar', to: 'Ejecutor 2', body: '' }]);
 });
 
@@ -355,11 +355,8 @@ test("each role's fallback is its thread's out-of-quota plan, and only the orche
   const members = snap.hostTeams.find((x) => x.goal === 'Fallbacks').members;
   assert.equal(members[0].fallback, `${codex.id}|default`);
   assert.equal(members[1].fallback, 'wait');
-  // Talking to you without the tag notifies nothing: Relevo recalls <relevo:pedir> (once) instead.
+  // Talking to you without the tag notifies nothing, and Relevo doesn't nag it about the tag either.
   peer.send(Client.subscribe(r.threadId));
-  peer.send(Client.send(r.threadId, '¿Seguimos con la fase 2?'));
-  const hint = await next((m) => m.threadPatch?._0.id === r.threadId && m.threadPatch._0.upserts.some((i) => i.from?.label === 'aviso' && /relevo:pedir/.test(i.text)), 20_000);
-  assert.ok(hint);
   // With the tag it is flagged for you, with what it asks.
   peer.send(Client.send(r.threadId, '<relevo:pedir>Prueba el build en la consola</relevo:pedir>'));
   const flagged = (await next((m) => m.snapshot?._0.threads.find((t) => t.id === r.threadId)?.attention?.text === 'Prueba el build en la consola', 20_000)).snapshot._0;
@@ -449,7 +446,7 @@ test('a fresh orchestrator session gets the decisions, the board and the last re
   const host = {
     threads: new Map([['L', { projectPath: '/p' }], ['E', { projectPath: '/p' }]]),
     accountsById: new Map(), projects: () => [], _modelName: () => 'm', _rt: () => ({ approvals: new Map() }),
-    teams: { _status: () => 'Estado del equipo: Ejecutor libre' },
+    teams: { _status: () => 'Estado del equipo: Ejecutor libre', boardText: () => 'Tablero, tareas abiertas (1):\n- T3 Ejecutor · en curso: menú\n', logText: () => '', lastAuditText: () => '' },
   };
   const team = { goal: 'G', decisions: [{ id: 1, text: 'Usamos shadPS4' }], members: [
     { threadId: 'L', role: 'orchestrator', name: 'Orquestador' },
@@ -458,6 +455,7 @@ test('a fresh orchestrator session gets the decisions, the board and the last re
   const fresh = preamble(host, team, team.members[0], true);
   assert.match(fresh, /#1 Usamos shadPS4/);
   assert.match(fresh, /Estado del equipo: Ejecutor libre/);
+  assert.match(fresh, /T3 Ejecutor · en curso/);
   assert.match(fresh, /Ejecutor \(.*\): ESTADO: hecho, menú carga/);
   assert.doesNotMatch(preamble(host, team, team.members[0], false), /Último informe/);
   assert.match(preamble(host, team, team.members[1]), /#1 Usamos shadPS4/);

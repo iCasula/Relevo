@@ -312,3 +312,128 @@ export async function createPullRequest(cwd) {
   if (!r.ok) throw new Error(r.err || r.out);
   return r.out.split('\n').find((l) => l.startsWith('http')) ?? r.out;
 }
+
+/** The repository's worktrees (the main checkout included): [{ path, branch }]. */
+export function worktrees(cwd) {
+  if (!cwd || !isRepo(cwd)) return [];
+  const out = git(cwd, ['worktree', 'list', '--porcelain']).out;
+  const list = [];
+  for (const block of out.split(/\n\n+/)) {
+    const p = /^worktree (.+)$/m.exec(block)?.[1];
+    if (!p) continue;
+    list.push({ path: p, branch: /^branch refs\/heads\/(.+)$/m.exec(block)?.[1] ?? (/^detached$/m.test(block) ? '(detached)' : null) });
+  }
+  return list;
+}
+
+// MARK: - A team's task branches and worktrees
+
+/**
+ * The repository's branches and worktrees, for the team's tidy-up: the main checkout and its branch (`base`, where
+ * work is integrated) and, for each local branch or worktree that `pick(branch, worktreePath|null)` accepts, how many commits it has
+ * that the base hasn't (`ahead`), its worktree's folder if it has one (`missing` if that folder is gone) and when
+ * it last changed. Only reads.
+ */
+export function taskRefs(cwd, pick) {
+  if (!cwd || !isRepo(cwd)) return null;
+  const out = git(cwd, ['worktree', 'list', '--porcelain']).out;
+  const wts = [];
+  for (const block of out.split(/\n\n+/)) {
+    const p = /^worktree (.+)$/m.exec(block)?.[1];
+    if (!p) continue;
+    wts.push({ path: p, branch: /^branch refs\/heads\/(.+)$/m.exec(block)?.[1] ?? null, missing: /^prunable/m.test(block) });
+  }
+  const main = wts[0];
+  if (!main) return null;
+  const base = main.branch;
+  const items = new Map();
+  for (const line of git(cwd, ['for-each-ref', 'refs/heads', '--format=%(refname:short)%09%(committerdate:unix)']).out.split('\n')) {
+    const [branch, when] = line.split('\t');
+    if (!branch || branch === base || !pick(branch, null)) continue;
+    items.set(branch, { branch, path: null, when: Number(when) || null });
+  }
+  for (const w of wts.slice(1)) {
+    if (!pick(w.branch ?? '', w.path)) continue;
+    const key = w.branch ?? `@${w.path}`;
+    items.set(key, { ...(items.get(key) ?? { branch: w.branch, when: null }), path: w.path, missing: w.missing || undefined });
+  }
+  for (const it of items.values()) {
+    if (!it.branch || !base) continue;
+    const n = git(cwd, ['rev-list', '--count', `${base}..${it.branch}`]);
+    it.ahead = n.ok ? Number(n.out.trim()) || 0 : null;
+  }
+  return { repo: main.path, base, items: [...items.values()] };
+}
+
+/** How many files a worktree has changed and not committed (null if git can't tell). */
+export async function dirtyCount(dir) {
+  return (await leftovers(dir)).dirty;
+}
+
+/**
+ * What a worktree has besides its commits: files changed or new (`dirty`, null if git can't tell) and what git
+ * ignores (build outputs…), which `git worktree remove` would take away with the folder without asking.
+ */
+export async function leftovers(dir) {
+  if (!dir || !fs.existsSync(dir)) return { dirty: 0, ignored: [] };
+  const r = await gitAsync(dir, ['status', '--porcelain', '--ignored'], 5 * 60_000);
+  if (!r.ok) return { dirty: null, ignored: [] };
+  const lines = r.out.split('\n').filter(Boolean);
+  return { dirty: lines.filter((l) => !l.startsWith('!! ')).length, ignored: lines.filter((l) => l.startsWith('!! ')).map((l) => l.slice(3)) };
+}
+
+/** A folder before taking it away: how many files, how big, the first and last ones (up to `cap` files). */
+export async function folderStats(dir, cap = 300_000) {
+  let files = 0, bytes = 0, capped = false;
+  const all = [];
+  const walk = async (d) => {
+    let list = [];
+    try { list = await fs.promises.readdir(d, { withFileTypes: true }); } catch { return; }
+    list.sort((a, b) => a.name.localeCompare(b.name));
+    for (const e of list) {
+      if (files >= cap) { capped = true; return; }
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) { await walk(p); continue; }
+      files++;
+      try { bytes += (await fs.promises.lstat(p)).size; } catch {}
+      if (all.length < 5) all.push(p); else { all.push(p); if (all.length > 10) all.splice(5, 1); }
+    }
+  };
+  await walk(dir);
+  return { files, bytes, capped, first: all.slice(0, 5), last: files > 5 ? all.slice(5) : [] };
+}
+
+/**
+ * Takes away a task's worktree and branch. Without `force`, only what git can take away without losing anything:
+ * a clean worktree (git refuses otherwise) and a branch already merged (`branch -d`).
+ */
+export async function removeTaskRef(repo, { path: dir, branch }, { force = false } = {}) {
+  const done = [];
+  if (dir) {
+    // Never the main checkout, a disk's root or a relative path: only a worktree git listed elsewhere.
+    const abs = path.resolve(dir);
+    if (!path.isAbsolute(dir) || abs === path.parse(abs).root || abs === path.resolve(repo) || /^\/(mnt\/[a-z]|home|Users)\/?$/i.test(abs)) return { ok: false, done, out: `No retiro ${dir}: no es un worktree` };
+    const r = await gitAsync(repo, ['worktree', 'remove', ...(force ? ['--force'] : []), dir], 10 * 60_000);
+    if (!r.ok && fs.existsSync(dir)) return { ok: false, done, out: r.out };
+    await gitAsync(repo, ['worktree', 'prune']);
+    done.push(`worktree ${dir}`);
+  }
+  if (branch) {
+    const r = await gitAsync(repo, ['branch', force ? '-D' : '-d', branch]);
+    if (!r.ok) return { ok: false, done, out: r.out };
+    done.push(`rama ${branch}`);
+  }
+  return { ok: true, done };
+}
+
+/** Merges a branch into the base branch of the main checkout (which must be on it), without fast-forward. */
+export async function mergeBranch(repo, base, branch, message) {
+  const head = currentBranch(repo);
+  if (head !== base) throw new Error(`La carpeta principal está en «${head}», no en «${base}»: cámbiala de rama antes de integrar`);
+  const m = await gitAsync(repo, ['merge', '--no-ff', '-m', message || `Integra ${branch}`, branch]);
+  if (!m.ok) {
+    git(repo, ['merge', '--abort']);
+    throw new Error(`No se ha podido fusionar (conflictos o cambios sin commit en la carpeta principal):\n${m.out}`);
+  }
+  return m.out;
+}

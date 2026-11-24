@@ -1043,6 +1043,7 @@ export function openTeamEditor(hostId, teamId) {
     goal: team.goal,
     members: team.members.map((m) => ({ ...m, accountId: m.accountId ?? usable[0]?.id, model: m.model ?? 'default', effort: m.effort ?? '', daybreak: !!m.daybreak, notes: m.notes ?? '', fallback: m.fallback ?? '', remove: false })),
     workDirs: (team.workDirs ?? []).join('\n'),
+    audit: { accountId: team.audit?.accountId ?? '', model: team.audit?.model ?? 'default', effort: team.audit?.effort ?? '', every: team.audit?.every ?? 0 },
     allFallback: null, // the "for everyone" picker, until a member's own differs
     adds: [], // { role, accountId, model, notes }
     budget: { usd: team.budget?.usd ?? '', action: team.budget?.action ?? 'pause' },
@@ -1098,6 +1099,8 @@ export function openTeamEditor(hostId, teamId) {
       </div>
       ${has(hostId, 'guard') ? `<div class="form-group" style="margin-top:12px"><div class="form-row"><label style="display:flex;gap:8px;align-items:center"><input type="checkbox" class="check" data-guard${st.guard ? ' checked' : ''}> Guardarraíl: Relevo detiene y te pregunta antes de borrados recursivos, descartes de git o escrituras fuera de la carpeta del proyecto (recomendado, también con acceso total)</label></div></div>` : ''}
       ${has(hostId, 'teamWorkDirs') ? `<div class="form-group" style="margin-top:12px"><div class="form-row" style="align-items:flex-start"><span class="grow">Carpetas de trabajo además del proyecto<div class="caption">Una por línea, p. ej. sus copias en WSL (/home/usuario). El guardarraíl deja escribir en ellas como en el proyecto; los borrados recursivos siguen pasando por el orquestador y borrar una carpeta entera te llega siempre a ti. Nunca la raíz de un disco, /, /home ni /mnt/x.</div></span><textarea class="field" data-workdirs spellcheck="false" placeholder="/home/usuario" style="width:260px;min-height:44px;font-family:var(--mono, monospace);font-size:12px">${esc(st.workDirs)}</textarea></div></div>` : ''}
+      ${has(hostId, 'teamAudit') ? `<div class="form-group" style="margin-top:12px"><div class="form-row" style="align-items:flex-start"><span class="grow">Auditor<div class="caption">Cada cierto tiempo, un modelo con ojos frescos y solo lectura revisa si el equipo avanza hacia el objetivo y le pasa al orquestador prioridades y desvíos (lo que haces a mano con una IA externa). Mejor de otra familia que el orquestador. Solo audita si el equipo ha trabajado desde la última vez.</div></span></div>
+        <div class="team-line" style="padding:0 10px 8px"><select class="field" style="width:190px" data-audit-acc><option value="">Sin auditor</option>${usable.map((x) => `<option value="${esc(x.id)}"${x.id === st.audit.accountId ? ' selected' : ''}>${esc(x.name)}</option>`).join('')}</select>${st.audit.accountId ? `<select class="field grow" data-audit-model>${visibleModels(accountOf(hostId, st.audit.accountId)).map((m) => `<option value="${esc(m.id)}"${m.id === st.audit.model ? ' selected' : ''}>${esc(m.name)}</option>`).join('')}</select>${efforts ? effortSelect(hostId, st.audit.accountId, st.audit.model, st.audit.effort, 'data-audit-effort', 'Esfuerzo del auditor') : ''}<select class="field" style="width:130px" data-audit-every>${[[0, 'Solo a mano'], [2, 'Cada 2 h'], [3, 'Cada 3 h'], [4, 'Cada 4 h'], [6, 'Cada 6 h'], [8, 'Cada 8 h'], [12, 'Cada 12 h'], [24, 'Cada 24 h']].map(([v, l]) => `<option value="${v}"${v === Number(st.audit.every) ? ' selected' : ''}>${l}</option>`).join('')}</select>` : '<span class="grow"></span>'}</div></div>` : ''}
       ${has(hostId, 'leadApproves') ? `<div class="form-group" style="margin-top:12px"><div class="form-row"><label style="display:flex;gap:8px;align-items:center"><input type="checkbox" class="check" data-lead-approves${st.leadApproves ? ' checked' : ''}> El orquestador decide los permisos de los demás agentes: permite lo que encaja con su tarea y te pasa lo delicado. Los borrados también: permite los que sobran claramente y, si no lo ve claro, el agente busca otra forma o lo anota en .relevo/borrados-pendientes.md. Formatear discos, tocar la raíz de un disco o un push forzado te llegan siempre a ti</label></div></div>` : ''}
       ${has(hostId, 'teamBudget') ? `<div class="form-group" style="margin-top:12px"><div class="form-row"><span class="grow">Presupuesto diario <span class="caption">(${team.members.some((m) => m.today?.cost) ? `hoy van ${usd(team.members.reduce((n, m) => n + (m.today?.cost ?? 0), 0))}` : 'coste equivalente a la API'})</span></span><input class="field-input" data-budget type="number" min="0" step="1" placeholder="sin límite" style="width:110px" value="${st.budget.usd || ''}"> USD <select class="field" data-budget-action>${[['pause', 'y entonces pausar'], ['light', 'y entonces abaratar']].map(([v, l]) => `<option value="${v}"${st.budget.action === v ? ' selected' : ''}>${l}</option>`).join('')}</select></div><div class="caption" style="padding:0 10px 8px">Abaratar: el orquestador y el investigador pasan a modelos ligeros; los ejecutores siguen igual.</div></div>` : ''}
       ${st.adds.some((a) => a.role === 'executor') && has(hostId, 'worktrees') ? `<div class="form-group" style="margin-top:12px"><div class="form-row"><label style="display:flex;gap:8px;align-items:center"><input type="checkbox" class="check" data-wt${st.worktrees ? ' checked' : ''}> Los ejecutores nuevos, cada uno en su worktree (si el proyecto es un repositorio git)</label></div></div>` : ''}
@@ -1108,6 +1111,10 @@ export function openTeamEditor(hostId, teamId) {
     s.el.querySelectorAll('[data-acc]').forEach((el) => { el.onchange = () => { const r = target(el.dataset.acc); r.accountId = el.value; r.model = visibleModels(accountOf(hostId, el.value))[0]?.id ?? 'default'; r.effort = ''; keep(); draw(); }; });
     s.el.querySelectorAll('[data-model]').forEach((el) => { el.onchange = () => { const r = target(el.dataset.model); r.model = el.value; if (!(modelOf(accountOf(hostId, r.accountId), r.model)?.efforts ?? []).includes(r.effort)) r.effort = ''; keep(); draw(); }; });
     s.el.querySelectorAll('[data-effort]').forEach((el) => { el.onchange = () => { target(el.dataset.effort).effort = el.value; }; });
+    $('[data-audit-acc]')?.addEventListener('change', (e) => { st.audit.accountId = e.target.value; st.audit.model = visibleModels(accountOf(hostId, e.target.value))[0]?.id ?? 'default'; st.audit.effort = ''; if (e.target.value && !st.audit.every) st.audit.every = 4; keep(); draw(); });
+    $('[data-audit-model]')?.addEventListener('change', (e) => { st.audit.model = e.target.value; if (!(modelOf(accountOf(hostId, st.audit.accountId), st.audit.model)?.efforts ?? []).includes(st.audit.effort)) st.audit.effort = ''; keep(); draw(); });
+    $('[data-audit-effort]')?.addEventListener('change', (e) => { st.audit.effort = e.target.value; });
+    $('[data-audit-every]')?.addEventListener('change', (e) => { st.audit.every = Number(e.target.value); });
     s.el.querySelectorAll('[data-daybreak]').forEach((el) => { el.onchange = () => { target(el.dataset.daybreak).daybreak = el.checked; }; });
     s.el.querySelectorAll('[data-fb-effort]').forEach((el) => { el.onchange = () => { const r = target(el.dataset.fbEffort); const [acc, model] = String(r.fallback).split('|'); r.fallback = el.value ? `${acc}|${model}|${el.value}` : `${acc}|${model}`; }; });
     s.el.querySelectorAll('[data-notes]').forEach((el) => { el.oninput = () => { target(el.dataset.notes).notes = el.value; }; });
@@ -1132,6 +1139,7 @@ export function openTeamEditor(hostId, teamId) {
       const changes = {
         goal: st.goal.trim() !== team.goal ? st.goal.trim() : undefined,
         members: st.members.filter((m, i) => !m.remove && JSON.stringify({ threadId: m.threadId, accountId: m.accountId, model: m.model, effort: m.effort, daybreak: m.daybreak, notes: m.notes, fallback: m.fallback, name: m.name }) !== JSON.stringify(before[i])).map(({ threadId, accountId, model, effort, daybreak, notes, fallback, name }) => ({ threadId, accountId, model, effort: efforts ? effort || null : undefined, daybreak: daybreaks ? !!daybreak && modelOf(accountOf(hostId, accountId), model)?.daybreak !== false : undefined, notes, fallback, name: canRename ? name : undefined })),
+        audit: has(hostId, 'teamAudit') && JSON.stringify(st.audit) !== JSON.stringify({ accountId: team.audit?.accountId ?? '', model: team.audit?.model ?? 'default', effort: team.audit?.effort ?? '', every: team.audit?.every ?? 0 }) ? (st.audit.accountId ? { ...st.audit, effort: st.audit.effort || null } : null) : undefined,
         workDirs: has(hostId, 'teamWorkDirs') && st.workDirs.trim() !== (team.workDirs ?? []).join('\n') ? st.workDirs.split('\n').map((x) => x.trim()).filter(Boolean) : undefined,
         remove: st.members.filter((m) => m.remove).map((m) => m.threadId),
         add: { executors: st.adds.filter((a) => a.role === 'executor'), researcher: st.adds.find((a) => a.role === 'researcher') ?? null },
@@ -1196,28 +1204,80 @@ export function spendText(sp) {
  * What the team keeps across sessions and relays: the goal's milestones, the decisions taken and what the
  * researcher found. Relevo reminds the agents of it; here you see it and change it.
  */
-export function openTeamMemory(hostId, teamId, tab = 'milestones') {
-  const s = openSheet({ width: 660 });
+export function openTeamMemory(hostId, teamId, tab = undefined) {
+  const s = openSheet({ width: 700 });
   let busy = false;
   const full = has(hostId, 'teamMemory');
+  const boards = has(hostId, 'teamBoard');
+  tab ??= boards ? 'board' : 'milestones';
+  let query = '', results = null, searching = false, showClosed = false;
   const draw = () => {
     const team = snap(hostId)?.hostTeams?.find((x) => x.id === teamId);
     if (!team) { s.close(); return; }
     const when = (at) => (at ? new Date(at * 1000).toLocaleString('es-ES', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '');
     const ms = team.milestones ?? [], ds = team.decisions ?? [], fs = team.findings ?? [];
-    const tabs = [['milestones', 'Hitos', ms.length ? `${ms.filter((m) => m.done).length}/${ms.length}` : ''], ['decisions', 'Decisiones', ds.length || ''], ['findings', 'Investigado', fs.length || '']].filter(([k]) => full || k === 'decisions');
+    const board = team.board ?? { open: [], closed: [], log: [], audits: [] };
+    const gits = board.git ?? [];
+    const gitLabel = (g) => `${g.branch ? `rama ${g.branch}` : 'worktree'}${g.ahead ? ` · ${g.ahead} commit${g.ahead === 1 ? '' : 's'} sin integrar` : g.branch && g.ahead === 0 ? ' · integrada' : ''}${g.path ? (g.missing ? ' · su carpeta ya no existe' : ' · con worktree') : ''}${g.ready ? ' · lista para retirar' : ''}`;
+    const gitRow = (g) => `<div class="git-ref${g.ahead ? ' ahead' : ''}">${icon('arrow.triangle.branch', { size: 11 })}<span class="grow selectable" title="${esc(g.path ?? '')}">${esc(gitLabel(g))}${g.path && !g.task ? ` <span class="caption">${esc(g.path)}</span>` : ''}</span><button class="tb-btn" data-git-rm="${gits.indexOf(g)}" title="Retirar ${g.path ? 'el worktree y ' : ''}la rama (si queda algo sin integrar, te dice qué antes)">${icon('trash', { size: 11 })}</button></div>`;
+    const tops = ms.filter((m) => !m.parent);
+    const toCheck = board.open.filter((t) => t.state === 'hecha').length;
+    const tabs = [
+      ['board', 'Tablero', board.open.length ? `${board.open.length}${toCheck ? ` · ${toCheck} por cerrar` : ''}` : ''],
+      ['milestones', 'Hitos', tops.length ? `${tops.filter((m) => m.done).length}/${tops.length}` : ''],
+      ['decisions', 'Decisiones', ds.length || ''],
+      ['log', 'Registro', ''],
+      ['audits', 'Auditorías', board.audits.length || ''],
+      ['findings', 'Investigado', fs.length || ''],
+    ].filter(([k]) => (full || k === 'decisions') && (boards || !['board', 'log', 'audits'].includes(k)));
     if (!tabs.some(([k]) => k === tab)) tab = tabs[0][0];
     let body = '';
-    if (tab === 'milestones') {
-      const current = ms.find((m) => !m.done);
+    const STATE = { pendiente: 'Pendiente', 'en curso': 'En curso', bloqueada: 'Bloqueada', hecha: 'Hecha · por comprobar', verificada: 'Comprobada', descartada: 'Descartada' };
+    const taskRow = (t, open) => `<div class="decision task-row st-${esc(t.state.replace(' ', '-'))}"><span class="d-id">T${t.id}</span><div class="grow"><div class="d-text selectable">${esc(t.text)}</div>${t.result ? `<div class="f-sum selectable">${esc(t.result)}</div>` : ''}<div class="caption"><span class="task-state">${esc(STATE[t.state] ?? t.state)}</span> · ${esc(t.owner)}${t.milestone ? ` · hito #${t.milestone}` : ''} · ${esc(when(t.updated))}</div>${gits.filter((g) => g.task === t.id).map(gitRow).join('')}</div>${open
+      ? `<button class="tb-btn" data-task-ok="${t.id}" title="Darla por comprobada y cerrarla (el orquestador se entera)">${icon('checkmark.circle', { size: 14 })}</button><button class="tb-btn" data-task-drop="${t.id}" title="Descartarla: ya no hace falta (el orquestador se entera)">${icon('xmark.circle.fill', { size: 13 })}</button>`
+      : `<button class="tb-btn" data-task-reopen="${t.id}" title="Reabrirla">${icon('arrow.uturn.backward', { size: 12 })}</button>`}</div>`;
+    if (tab === 'board') {
+      const rank = { hecha: 0, bloqueada: 1, 'en curso': 2, pendiente: 3 };
+      const open = [...board.open].sort((a, b) => rank[a.state] - rank[b.state] || a.id - b.id);
+      body = `<div class="caption" style="margin-bottom:6px">Cada tarea que da el orquestador, con su responsable, su hito y su estado. Las «hechas» esperan a que el orquestador las compruebe y las cierre; puedes cerrarlas o descartarlas tú.</div>
+        <div class="decisions">${open.length ? open.map((t) => taskRow(t, true)).join('') : '<div class="caption" style="padding:10px 2px">No hay tareas abiertas.</div>'}</div>
+        ${board.closed.length ? `<button class="btn small" data-closed style="margin-top:8px">${showClosed ? 'Ocultar' : 'Ver'} las cerradas hace poco (${board.closed.length})</button>${showClosed ? `<div class="decisions" style="margin-top:6px">${board.closed.map((t) => taskRow(t, false)).join('')}</div>` : ''}` : ''}
+        ${has(hostId, 'teamGit') ? (() => {
+          const closedIds = new Set(board.closed.map((t) => t.id));
+          const left = gits.filter((g) => g.task && closedIds.has(g.task));
+          const loose = gits.filter((g) => !g.task);
+          return `<div class="caption" style="margin:14px 0 4px">Ramas y worktrees. Los ejecutores pueden abrir uno por tarea (t12-…); Relevo los retira al cerrarse la tarea si todo está integrado. <button class="link-btn" data-git-scan>Revisar ahora</button></div>
+            ${left.length ? `<div class="caption" style="margin-top:6px">De tareas cerradas, con algo sin integrar (${left.length}):</div><div class="decisions">${left.map((g) => `<div class="decision"><span class="d-id">T${g.task}</span><div class="grow">${gitRow(g)}</div></div>`).join('')}</div>` : ''}
+            ${loose.length ? `<div class="caption" style="margin-top:6px">Sin tarea (${loose.length}):</div><div class="decisions">${loose.map((g) => `<div class="decision"><div class="grow">${gitRow(g)}</div></div>`).join('')}</div>` : ''}
+            ${!left.length && !loose.length ? '<div class="caption">Nada suelto.</div>' : ''}`;
+        })() : ''}`;
+    } else if (tab === 'log') {
+      const list = results ?? board.log.map((e) => ({ kind: 'registro', ...e }));
+      const KIND = { registro: 'Registro', informe: 'Informe', decision: 'Decisión antigua', auditoria: 'Auditoría', tarea: 'Tablero' };
+      body = `<div class="caption" style="margin-bottom:6px">Lo comprobado y lo hecho (resultados, despliegues, commits aceptados), los informes de cada agente y las decisiones que salieron de la lista. No va al contexto de nadie: el orquestador lo busca cuando lo necesita.</div>
+        <div class="team-line"><input class="field-input grow" data-q placeholder="Buscar en el tablero, el registro, los informes y las decisiones antiguas" value="${esc(query)}"><button class="btn" data-search>${searching ? '<span class="spinner"></span>' : icon('magnifyingglass', { size: 12 })} Buscar</button>${results ? '<button class="btn" data-clear>Recientes</button>' : ''}</div>
+        <div class="decisions" style="margin-top:8px">${list.length ? list.map((x) => (x.task ? taskRow(x.task, ['pendiente', 'en curso', 'bloqueada', 'hecha'].includes(x.task.state))
+          : `<div class="decision"><span class="d-id">${esc(KIND[x.kind] ?? x.kind)}${x.kind === 'decision' && x.ref ? ` #${esc(x.ref)}` : ''}</span><div class="grow"><div class="f-sum selectable" style="color:var(--text);max-height:180px">${esc(x.text)}</div><div class="caption">${esc(x.by ?? '')}${x.ref && x.kind !== 'decision' ? ` · ${esc(x.ref)}` : ''} · ${esc(when(x.ts))}</div></div>${x.kind === 'decision' && x.ref ? `<button class="tb-btn" data-pin="${esc(x.ref)}" title="Recuperarla y fijarla en la lista de decisiones">${icon('pin', { size: 13 })}</button>` : ''}</div>`)).join('')
+          : `<div class="caption" style="padding:10px 2px">${results ? 'Nada encontrado.' : 'Aún no hay nada en el registro.'}</div>`}</div>`;
+    } else if (tab === 'audits') {
+      const a = team.audit;
+      const acc = a && accountOf(hostId, a.accountId);
+      body = `<div class="caption" style="margin-bottom:6px">Un modelo con ojos frescos y solo lectura revisa si el equipo avanza hacia el objetivo (tablero, hitos, decisiones, registro, git y documentos) y le pasa su revisión al orquestador; también audita al conseguirse un hito. Un auditor externo puede escribirle dejando un fichero en <code>.relevo/al-orquestador/</code> del proyecto, y leer el tablero en <code>.relevo/tablero.md</code>. ${a ? `Auditor: ${esc(acc?.name ?? '?')} · ${esc(modelOf(acc, a.model)?.name ?? a.model)}${a.every ? `, cada ${a.every} h` : ', solo cuando lo pidas'}.` : 'Elige su modelo y cada cuánto en Editar equipo.'}</div>
+        <div class="team-line"><button class="btn primary" data-audit${a && !a.running ? '' : ' disabled'}>${a?.running ? '<span class="spinner"></span> Auditando…' : 'Auditar ahora'}</button>${a?.threadId ? `<button class="btn" data-audit-thread>Ver el hilo del auditor</button>` : ''}</div>
+        <div class="decisions" style="margin-top:8px">${board.audits.length ? board.audits.map((x, i) => `<details class="decision audit"${i === 0 ? ' open' : ''}><summary><b>${esc(when(x.ts))}</b> · ${esc(((/^\s*[*_#>\- ]*conclusi[oó]n:?\**\s*(.+)$/im.exec(x.text) ?? [])[1] ?? x.text.split('\n')[0]).slice(0, 200))}</summary><div class="f-sum selectable" style="color:var(--text);max-height:none;white-space:pre-wrap">${esc(x.text)}</div></details>`).join('')
+          : '<div class="caption" style="padding:10px 2px">Aún no hay auditorías.</div>'}</div>`;
+    } else if (tab === 'milestones') {
+      const kids = (m) => ms.filter((x) => x.parent === m.id);
+      const firstTop = tops.find((m) => !m.done);
+      const current = (firstTop && kids(firstTop).find((x) => !x.done)) ?? firstTop ?? ms.find((m) => !m.done);
       body = `<div class="caption" style="margin-bottom:6px">Los pasos hacia el objetivo. El orquestador los escribe con <code>&lt;relevo:hito&gt;</code> y marca los conseguidos con <code>&lt;relevo:hecho&gt;</code>; los tiene presentes en cada sesión.</div>`
-        + (ms.length ? `<div class="m-progress"><i style="width:${Math.round((ms.filter((m) => m.done).length / ms.length) * 100)}%"></i></div>` : '')
-        + `<div class="decisions">${ms.length ? ms.map((m) => `<div class="decision${m.done ? ' done' : ''}${m === current ? ' current' : ''}"><button class="tb-btn" data-toggle="${m.id}" title="${m.done ? 'Marcar como pendiente' : 'Marcar como conseguido'}">${icon(m.done ? 'checkmark.circle.fill' : m === current ? 'largecircle.fill.circle' : 'circle', { size: 15 })}</button><div class="grow"><div class="d-text selectable">${esc(m.text)}</div><div class="caption">#${m.id}${m.done ? ` · conseguido ${esc(when(m.doneAt))}` : m === current ? ' · en curso' : ''}</div></div><button class="tb-btn" data-drop="${m.id}" title="Quitar este hito">${icon('trash', { size: 12 })}</button></div>`).join('')
+        + (tops.length ? `<div class="m-progress"><i style="width:${Math.round((tops.filter((m) => m.done).length / tops.length) * 100)}%"></i></div>` : '')
+        + `<div class="decisions">${ms.length ? ms.map((m) => `<div class="decision${m.done ? ' done' : ''}${m === current ? ' current' : ''}${m.parent ? ' sub' : ''}"><button class="tb-btn" data-toggle="${m.id}" title="${m.done ? 'Marcar como pendiente' : 'Marcar como conseguido'}">${icon(m.done ? 'checkmark.circle.fill' : m === current ? 'largecircle.fill.circle' : 'circle', { size: 15 })}</button><div class="grow"><div class="d-text selectable">${esc(m.text)}</div><div class="caption">#${m.id}${m.done ? ` · conseguido ${esc(when(m.doneAt))}` : m === current ? ' · en curso' : ''}</div></div><button class="tb-btn" data-drop="${m.id}" title="Quitar este hito">${icon('trash', { size: 12 })}</button></div>`).join('')
           : '<div class="caption" style="padding:10px 2px">Aún no hay hitos. El orquestador los escribirá al planificar, o añádelos tú.</div>'}</div>
-        <div class="team-line" style="margin-top:10px"><input class="field-input grow" data-new placeholder="Un hito comprobable (p. ej. «el menú principal se ve»)" maxlength="240"><button class="btn primary" data-add>Añadir</button></div>`;
+        <div class="team-line" style="margin-top:10px"><input class="field-input grow" data-new placeholder="Un hito comprobable (p. ej. «el menú principal se ve»)" maxlength="240">${boards && tops.length ? `<select class="field" data-parent style="width:150px"><option value="">Hito principal</option>${tops.filter((m) => !m.done).map((m) => `<option value="${m.id}"${m === firstTop ? ' selected' : ''}>Subhito del #${m.id}</option>`).join('')}</select>` : ''}<button class="btn primary" data-add>Añadir</button></div>`;
     } else if (tab === 'decisions') {
       body = `<div class="caption" style="margin-bottom:6px">Lo ya decidido, que no debe reabrirse. El orquestador las guarda con <code>&lt;relevo:decision&gt;</code>; Relevo se las da a cada agente nuevo, en cada sesión renovada y en cada relevo de proveedor.</div>
-        <div class="decisions">${ds.length ? ds.map((d) => `<div class="decision"><span class="d-id">#${d.id}</span><div class="grow"><div class="d-text selectable">${esc(d.text)}</div><div class="caption">${d.by === 'usuario' ? 'Tú' : esc(d.by ?? '')} · ${esc(when(d.at))}</div></div><button class="tb-btn" data-drop="${d.id}" title="Retirar esta decisión (se avisa al orquestador)">${icon('trash', { size: 12 })}</button></div>`).join('')
+        <div class="decisions">${ds.length ? [...ds.filter((d) => d.pinned), ...ds.filter((d) => !d.pinned)].map((d) => `<div class="decision${d.pinned ? ' pinned' : ''}"><span class="d-id">#${d.id}</span><div class="grow"><div class="d-text selectable">${esc(d.text)}</div><div class="caption">${d.by === 'usuario' ? 'Tú' : esc(d.by ?? '')} · ${esc(when(d.at))}</div></div>${boards ? `<button class="tb-btn${d.pinned ? ' on' : ''}" data-${d.pinned ? 'unpin' : 'pin'}="${d.id}" title="${d.pinned ? 'Soltarla: puede salir de la lista cuando haya muchas' : 'Fijarla: el rumbo del equipo, no sale nunca de la lista'}">${icon(d.pinned ? 'pin.fill' : 'pin', { size: 13 })}</button>` : ''}<button class="tb-btn" data-drop="${d.id}" title="Retirar esta decisión (se avisa al orquestador)">${icon('trash', { size: 12 })}</button></div>`).join('')
           : '<div class="caption" style="padding:10px 2px">Aún no hay ninguna. Añade las que ya estén claras (por ejemplo, qué proyecto usáis de base).</div>'}</div>
         <div class="team-line" style="margin-top:10px"><input class="field-input grow" data-new placeholder="Una decisión, en una línea: qué y por qué" maxlength="400"><button class="btn primary" data-add>Añadir</button></div>`;
     } else {
@@ -1230,7 +1290,7 @@ export function openTeamMemory(hostId, teamId, tab = 'milestones') {
       ${body}
       <div class="sheet-buttons"><span class="grow"></span><button class="btn" data-close>Listo</button></div>`;
     const $ = (q) => s.el.querySelector(q);
-    const kind = { milestones: 'milestone', decisions: 'decision', findings: 'finding' }[tab];
+    const kind = { milestones: 'milestone', decisions: 'decision', findings: 'finding', log: 'decision' }[tab];
     const send = async (op) => {
       if (busy) return;
       busy = true;
@@ -1240,14 +1300,74 @@ export function openTeamMemory(hostId, teamId, tab = 'milestones') {
       setTimeout(draw, 200); setTimeout(draw, 800); // the snapshot with the change is on its way
     };
     s.el.querySelectorAll('[data-tab]').forEach((b) => { b.onclick = () => { tab = b.dataset.tab; draw(); }; });
-    $('[data-add]')?.addEventListener('click', () => { const v = $('[data-new]').value.trim(); if (v) send({ add: v }); else $('[data-new]').focus(); });
+    $('[data-add]')?.addEventListener('click', () => { const v = $('[data-new]').value.trim(); if (v) send({ add: v, ...($('[data-parent]')?.value ? { parent: Number($('[data-parent]').value) } : {}) }); else $('[data-new]').focus(); });
+    s.el.querySelectorAll('[data-pin]').forEach((b) => { b.onclick = () => send({ pin: b.dataset.pin }); });
+    s.el.querySelectorAll('[data-unpin]').forEach((b) => { b.onclick = () => send({ unpin: b.dataset.unpin }); });
+    const task = async (id, state) => {
+      if (busy) return;
+      busy = true;
+      const r = await request(hostId, { teamTask: { teamId, id, state } });
+      busy = false;
+      if (!r.ok) { toast(r.error); return; }
+      setTimeout(draw, 200); setTimeout(draw, 800);
+    };
+    s.el.querySelectorAll('[data-task-ok]').forEach((b) => { b.onclick = () => task(Number(b.dataset.taskOk), 'verificada'); });
+    s.el.querySelectorAll('[data-task-drop]').forEach((b) => { b.onclick = () => task(Number(b.dataset.taskDrop), 'descartada'); });
+    s.el.querySelectorAll('[data-task-reopen]').forEach((b) => { b.onclick = () => task(Number(b.dataset.taskReopen), 'reabrir'); });
+    $('[data-closed]')?.addEventListener('click', () => { showClosed = !showClosed; draw(); });
+    $('[data-git-scan]')?.addEventListener('click', async () => { const r = await request(hostId, { teamGitScan: { teamId } }, 120_000); if (!r.ok) toast(r.error); else setTimeout(draw, 300); });
+    s.el.querySelectorAll('[data-git-rm]').forEach((b) => { b.onclick = async () => {
+      const g = gits[Number(b.dataset.gitRm)];
+      if (!g || busy) return;
+      const target = { repo: g.repo, branch: g.branch ?? null, path: g.path ?? null };
+      busy = true;
+      let r = await request(hostId, { teamGit: { teamId, ...target } }, 10 * 60_000);
+      busy = false;
+      if (!r.ok) { toast(r.error); return; }
+      if (r.needsForce) {
+        const lost = [r.ahead ? `${r.ahead} commit${r.ahead === 1 ? '' : 's'} que no están en ${g.base ?? 'la rama principal'}` : '', r.dirty ? `${r.dirty} fichero${r.dirty === 1 ? '' : 's'} con cambios sin commit` : '', r.ignoredN ? `${r.ignoredN} fichero${r.ignoredN === 1 ? '' : 's'} o carpeta${r.ignoredN === 1 ? '' : 's'} que git ignora (${r.ignored.join(', ')}${r.ignoredN > r.ignored.length ? '…' : ''})` : '', r.dirty === null || r.ahead === null ? 'lo que git no ha podido comprobar' : ''].filter(Boolean).join('; ');
+        const st = r.stats;
+        const mb = (b) => (b >= 1 << 30 ? `${(b / (1 << 30)).toFixed(1)} GB` : `${Math.max(0.1, b / (1 << 20)).toFixed(1)} MB`);
+        const big = st && (st.files > 100 || st.bytes > 1 << 30);
+        const choice = await alertSheet({ title: `¿Retirar ${g.path ? 'este worktree' : 'esta rama'}?`, message: `${g.path ? `Carpeta: ${g.path}\n` : ''}${g.branch ? `Rama: ${g.branch}\n` : ''}${st ? `Se borra la carpeta entera: ${st.files}${st.capped ? '+' : ''} ficheros, ${mb(st.bytes)}.\nPrimeros: ${st.first.map((f) => f.slice(g.path.length + 1)).join(', ')}${st.last.length ? `\nÚltimos: ${st.last.map((f) => f.slice(g.path.length + 1)).join(', ')}` : ''}\n` : ''}Se perdería: ${lost || 'nada que git sepa'}.${big ? '\n\nSon más de 100 ficheros o más de 1 GB: confírmalo dos veces.' : ''}${r.error ? `\n\nGit: ${r.error}` : ''}`, buttons: [{ label: lost ? 'Retirar y perderlo' : 'Retirar', role: 'destructive' }, { label: 'Cancelar', role: 'cancel' }] });
+        if (!choice) return;
+        if (big && !(await alertSheet({ title: `¿Seguro? Se borran ${st.files}${st.capped ? '+' : ''} ficheros (${mb(st.bytes)})`, message: g.path, buttons: [{ label: 'Sí, retirarlo', role: 'destructive' }, { label: 'Cancelar', role: 'cancel' }] }))) return;
+        busy = true;
+        r = await request(hostId, { teamGit: { teamId, ...target, force: true } }, 10 * 60_000);
+        busy = false;
+        if (!r.ok) { toast(r.error); return; }
+        if (r.error) { await alertSheet({ title: 'Git', message: r.error }); return; }
+      }
+      if (r.removed) toast(`Retirado: ${r.removed.join(' y ')}`);
+      setTimeout(draw, 300);
+    }; });
+    const search = async () => {
+      query = $('[data-q]').value.trim();
+      if (!query) { results = null; draw(); return; }
+      searching = true; draw();
+      const r = await request(hostId, { teamSearch: { teamId, q: query } });
+      searching = false;
+      if (!r.ok) { toast(r.error); draw(); return; }
+      results = r.results ?? [];
+      draw();
+    };
+    $('[data-search]')?.addEventListener('click', search);
+    $('[data-q]')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); search(); } });
+    $('[data-clear]')?.addEventListener('click', () => { results = null; query = ''; draw(); });
+    $('[data-audit]')?.addEventListener('click', async () => {
+      const r = await request(hostId, { teamAudit: { teamId } });
+      if (!r.ok) toast(r.error); else { toast('El auditor está revisando el equipo: su revisión llegará al orquestador'); setTimeout(draw, 600); }
+    });
+    $('[data-audit-thread]')?.addEventListener('click', () => { s.close(); hooks.select(hostId, team.audit.threadId); });
     $('[data-new]')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('[data-add]').click(); } });
     s.el.querySelectorAll('[data-drop]').forEach((b) => { b.onclick = () => send({ remove: b.dataset.drop }); });
     s.el.querySelectorAll('[data-toggle]').forEach((b) => { b.onclick = () => send({ toggle: b.dataset.toggle }); });
     $('[data-close]').onclick = s.close;
-    setTimeout(() => $('[data-new]')?.focus(), 0);
+    if (tab !== 'log') setTimeout(() => $('[data-new]')?.focus(), 0);
   };
   draw();
+  // The board changes while you look at it.
+  const live = setInterval(() => { if (!document.body.contains(s.el)) { clearInterval(live); return; } if (!searching && !busy && !s.el.contains(document.activeElement)) draw(); }, 3000);
 }
 
 // MARK: - Traza (WorkStateSheet)

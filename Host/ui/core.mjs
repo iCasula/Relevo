@@ -40,7 +40,7 @@ export function save(key, value) {
 }
 
 /** Re-render hooks set by the main window (keeps modules free of import cycles at load time). */
-export const hooks = { render() {}, renderThread() {}, onServer() {}, onInit() {}, onUpdate() {} };
+export const hooks = { render() {}, renderThread() {}, onServer() {}, onInit() {}, onUpdate() {}, select() {} };
 
 // MARK: - Lookups
 

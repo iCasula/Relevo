@@ -51,6 +51,17 @@ const SWITCH_AFTER_JOB = Number(process.env.RELEVO_SWITCH_AFTER_JOB ?? 10);
  * How well a model fits a role, from its name: «heavy» (executors: the strongest) or «light» (orchestrator,
  * researcher: cheap and quick but able).
  */
+/** A model's family, from its name: claude, gpt, gemini, deepseek… (null if it can't tell). */
+export function family(id, name = '') {
+  const n = `${id ?? ''} ${name ?? ''}`.toLowerCase();
+  if (/claude|opus|sonnet|haiku/.test(n)) return 'claude';
+  if (/gpt|codex|daybreak|\bo\d/.test(n)) return 'gpt';
+  if (/gemini|flash/.test(n)) return 'gemini';
+  if (/deepseek/.test(n)) return 'deepseek';
+  if (/qwen|kimi|glm|grok|llama|mistral/.test(n)) return n.match(/qwen|kimi|glm|grok|llama|mistral/)[0];
+  return null;
+}
+
 export function modelScore(m, tier) {
   const n = `${m.id} ${m.name ?? ''}`.toLowerCase();
   const heavy = [[/opus/, 100], [/gpt-?6|terra/, 95], [/flash-?lite|lite/, 30], [/flash/, 45], [/haiku/, 40], [/mini|luna|nano/, 35], [/\bpro\b|-pro/, 85], [/sonnet/, 82], [/gpt-?5|codex/, 78], [/default/, 65]];
@@ -59,7 +70,7 @@ export function modelScore(m, tier) {
   return 60;
 }
 /** What this host does beyond the shared protocol; clients show those controls only when listed. */
-export const HOST_FEATURES = ['askUser', 'effortSwitch', 'teamWorkDirs', 'daybreak', 'teams', 'projects', 'threads', 'git', 'images', 'usage', 'login', 'settings', 'limitPlans', 'history', 'titles', 'accounts',
+export const HOST_FEATURES = ['askUser', 'effortSwitch', 'teamWorkDirs', 'daybreak', 'teamBoard', 'teamAudit', 'teamParked', 'teamGit', 'teams', 'projects', 'threads', 'git', 'images', 'usage', 'login', 'settings', 'limitPlans', 'history', 'titles', 'accounts',
   'turns', 'worktrees', 'pullRequests', 'suggest', 'quickActions', 'attachments', 'teamRename', 'teamDecisions', 'teamMemory', 'smartFallback', 'teamBudget', 'teamHeld', 'guard', 'push', 'waitHere', 'leadApproves', 'renewSessions', 'earlySwitch', 'renewPerAgent'];
 /**
  * A long session rereads its whole context every turn (most of what a subscription spends): past this many tokens
@@ -523,7 +534,13 @@ export class Host {
       case 'setGuard': if (t) run(() => { this.setGuard(t, a.on); return {}; }); else if (a.teamId) run(() => this.teams.setGuard(String(a.teamId).toUpperCase(), a.on)); break;
       case 'setLeadApproves': run(() => this.teams.setLeadApproves(String(a.teamId).toUpperCase(), a.on)); break;
       case 'teamHeld': run(() => this.teams.reviewHeld(String(a.teamId).toUpperCase(), String(a.id ?? ''), a.action === 'send' ? 'send' : 'discard')); break;
-      case 'teamMemory': run(() => this.teams.editMemory(String(a.teamId).toUpperCase(), { kind: a.kind, add: a.add, remove: a.remove, toggle: a.toggle })); break;
+      case 'teamMemory': run(() => this.teams.editMemory(String(a.teamId).toUpperCase(), { kind: a.kind, add: a.add, remove: a.remove, toggle: a.toggle, pin: a.pin, unpin: a.unpin, parent: a.parent })); break;
+      case 'teamSearch': run(() => ({ results: this.teams.search(String(a.teamId).toUpperCase(), String(a.q ?? ''), 30) })); break;
+      case 'teamTask': run(() => this.teams.editTask(String(a.teamId).toUpperCase(), { id: Number(a.id), state: a.state, why: a.why })); break;
+      case 'teamParked': if (t) run(() => this.teams.parkedAction(t, a.action === 'send' ? 'send' : 'drop')); break;
+      case 'teamAudit': run(() => this.teams.runAudit(String(a.teamId).toUpperCase(), true)); break;
+      case 'teamGit': run(async () => { const r = await this.teams.gitRemove(String(a.teamId).toUpperCase(), { repo: a.repo, branch: a.branch ?? null, path: a.path ?? null, force: a.force === true }); this._broadcastSnapshot(); return r; }); break;
+      case 'teamGitScan': run(async () => { const team = this.teams.byId(String(a.teamId).toUpperCase()); if (team) await this.teams.gitTidy(team); this._broadcastSnapshot(); return {}; }); break;
       case 'pullRequest': if (t) run(async () => ({ pr: await gitops.pullRequest(t.projectPath) })); break;
       case 'createPullRequest': if (t) run(async () => {
         const url = await gitops.createPullRequest(t.projectPath);
@@ -1679,6 +1696,12 @@ export class Host {
       const turn = t.items.slice(start);
       // Out of quota only if this turn really ended on an error: a stale flag must never swallow a report.
       if (r.limitHit && !turn.some((i) => i.kind === 'error')) { this.log(`equipo: «${t.title}» tenía marcado un límite sin error en este turno; se informa igualmente`); r.limitHit = false; }
+      // The team's auditor finished its review: it goes to the orchestrator (not when you stopped it).
+      if (t.auditFor && !t.team && !r.stopRequested) {
+        try {
+          this.teams.onAuditFinished(t, { messages: turn.filter((i) => i.kind === 'assistant' && i.text).map((i) => i.text), errors: turn.filter((i) => i.kind === 'error').map((i) => i.text) });
+        } catch (e) { this.log(`auditoría: ${e.message}`); }
+      }
       const skip = !t.team ? null : r.limitHit ? 'límite de cuota' : r.sendNow ? 'mensaje urgente' : r.stopRequested ? 'detenido' : null;
       if (t.team && skip) {
         this.log(`equipo: el turno de «${t.title}» no se informa (${skip})`);
@@ -1898,7 +1921,10 @@ export class Host {
         if (a.id === current?.id && (a.kind !== 'gemini' || (m.id || 'default') === (t.model || 'default'))) continue;
         if (!this._usableTarget(a.id, m.id)) continue;
         const used = this._used(a, m.id);
-        out.push({ accountId: a.id, model: m.id, score: modelScore(m, tier) - (used >= 90 ? 50 : used / 5) });
+        // An orchestrator stays in its model's family when it can: another family thinks and plans differently,
+        // and the team loses its thread with every change.
+        const same = t.team?.role === 'orchestrator' && family(m.id, m.name) === family(t.home?.model ?? t.model, this._modelName(this._account(t), t.home?.model ?? t.model)) ? 15 : 0;
+        out.push({ accountId: a.id, model: m.id, score: modelScore(m, tier) + same - (used >= 90 ? 50 : used / 5) });
       }
     }
     out.sort((x, y) => y.score - x.score);
@@ -2169,8 +2195,10 @@ export class Host {
       autoRelay: settings.limitPlan.mode !== 'ask', pushReady: false,
       // Beyond the shared protocol (the Mac and the iPhone ignore unknown fields).
       hostFeatures: HOST_FEATURES, hostVersion: this.config.version ?? 'dev', hostPlatform: process.platform, hostCLIs: this.config.bins ?? {},
-      hostTeams: this.teams.list.map((x) => ({ id: x.id, projectId: x.projectId, goal: x.goal, status: x.status, auto: x.auto, held: x.held.length, decisions: (x.decisions ?? []).map((d) => ({ id: d.id, text: d.text, by: d.by, at: d.at })),
-        milestones: (x.milestones ?? []).map((m) => clean({ id: m.id, text: m.text, done: m.done, at: m.at, doneAt: m.doneAt })),
+      hostTeams: this.teams.list.map((x) => ({ id: x.id, projectId: x.projectId, goal: x.goal, status: x.status, auto: x.auto, held: x.held.length, decisions: (x.decisions ?? []).map((d) => clean({ id: d.id, text: d.text, by: d.by, at: d.at, pinned: d.pinned || undefined })),
+        milestones: (x.milestones ?? []).map((m) => clean({ id: m.id, text: m.text, done: m.done, at: m.at, doneAt: m.doneAt, parent: m.parent })),
+        board: this.teams.boardFor(x),
+        audit: x.audit?.accountId ? clean({ accountId: x.audit.accountId, model: x.audit.model, effort: x.audit.effort, every: x.audit.every, lastAt: x.audit.lastAt, threadId: x.audit.threadId, running: (() => { const at = x.audit.threadId && this.threads.get(x.audit.threadId); return at ? this._rt(at).isRunning || undefined : undefined; })() }) : undefined,
         findings: (x.findings ?? []).map((f) => ({ id: f.id, topic: f.topic, summary: f.summary, links: f.links ?? [], by: f.by, at: f.at })),
         budget: x.budget ?? undefined,
         guard: x.members.every((m) => { const t = this.threads.get(m.threadId); return !t || this._guarded(t); }),
@@ -2217,6 +2245,7 @@ export class Host {
       isRunning: r.isRunning, statusLine: r.statusLine, limit: r.limit ? clean(r.limit) : null, mode: t.mode, guard: this._guarded(t),
       selectedAccountId: account?.id, selectedModel: t.model, selectedEffort: t.effort, relayCandidates: candidates,
       queued: t.queued.map((q) => ({ id: q.id, text: q.text })), queuePaused: t.queuePaused,
+      parked: (() => { const p = t.team && this.teams.memberOf(t)?.parked; return p ? { text: p.text, from: p.from?.name ?? 'Orquestador', at: p.at } : null; })(),
       usage: windowsFor(account, t.model).map(remoteWindow), backgroundTasks: (r.backgroundTasks ?? []).map((b) => ({ id: b.id, description: b.description, startedAt: b.startedAt })),
       limitPlan: t.limitPlan ? { ...t.limitPlan, summary: this._planSummary(t.limitPlan) } : null,
       defaultLimitPlan: { ...this.settings.limitPlan, summary: this._planSummary(this.settings.limitPlan) },

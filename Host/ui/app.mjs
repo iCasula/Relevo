@@ -371,6 +371,7 @@ function renderThread() {
   void hostId;
 }
 hooks.renderThread = renderThread;
+hooks.select = (hostId, threadId) => select(hostId, threadId);
 
 // Toolbar items, in the Mac's order: tools · Traza · Consumo · Git · Acciones · Varios agentes · Relevo · Proyecto.
 function renderToolbar() {
@@ -937,6 +938,12 @@ function renderQueue() {
   const rt = thread?.runtime;
   const q = rt?.queued ?? [];
   let html = switchHTML(hostId, threadId) + heldHTML(hostId, threadId);
+  // An order from the orchestrator that waits for this agent to finish its turn: send it now or drop it.
+  if (rt?.parked && has(hostId, 'teamParked')) {
+    const p = rt.parked;
+    html += `<div class="card queue-card"><div class="qh">${icon('clock', { size: 11 })}<span class="grow">Orden pendiente de ${esc(p.from)}: se le entrega cuando termine su turno</span></div>`
+      + `<div class="qr"><span class="n" title="${esc(fullDate(p.at))}">${esc(clock(p.at))}</span><span class="tx" title="${esc(p.text)}">${esc(p.text)}</span><button class="btn small" data-parked-send title="Entregarla ya: interrumpe lo que está haciendo el agente (el orquestador se entera)">${icon('bolt.fill', { size: 10 })} Enviar ya</button><button class="icon-plain tert" data-parked-drop title="Descartarla (el orquestador se entera)">${icon('xmark.circle.fill', { size: 13 })}</button></div></div>`;
+  }
   if (q.length) {
     html += `<div class="card queue-card"><div class="qh${rt.queuePaused ? ' paused' : ''}">${icon(rt.queuePaused ? 'pause.circle' : 'text.append', { size: 11 })}<span class="grow">${rt.queuePaused ? 'Cola en pausa' : 'En cola · se envían al terminar cada turno'}</span>${rt.queuePaused ? `<button class="btn small" data-cmd="resumeQueue"${rt.isRunning ? ' disabled' : ''} title="Enviar el siguiente mensaje de la cola">Reanudar</button>` : ''}</div>`
       + q.map((m, i) => `<div class="qr"><span class="n">${i + 1}</span><span class="tx">${esc(m.text)}</span><button class="icon-plain orange" data-queued-now="${esc(m.id)}" title="Enviar ya: interrumpe al agente y le manda este mensaje ahora">${icon('bolt.fill', { size: 12 })}</button><button class="icon-plain tert" data-dequeue="${esc(m.id)}" title="Quitar de la cola">${icon('xmark.circle.fill', { size: 13 })}</button></div>`).join('')
@@ -1337,6 +1344,10 @@ document.addEventListener('click', (e) => {
   if (d.limitDismiss !== undefined) { sendTo(hostId, Client.limitAction(threadId, thread?.runtime?.resumeAt ? 'cancelResume' : 'cancelRelay')); return; }
   if (d.suggestion) { sendTo(hostId, Client.suggestion(threadId, d.suggestion)); return; }
   if (d.queuedNow) { sendTo(hostId, Client.sendQueuedNow(threadId, d.queuedNow)); return; }
+  if (d.parkedSend !== undefined || d.parkedDrop !== undefined) {
+    request(hostId, { teamParked: { threadId, action: d.parkedSend !== undefined ? 'send' : 'drop' } }).then((r) => { if (!r.ok) toast(r.error); });
+    return;
+  }
   if (d.dequeue) { sendTo(hostId, Client.dequeue(threadId, d.dequeue)); return; }
   if (d.removeAttachment) { attachments.splice(Number(d.removeAttachment), 1); renderAttachments(); return; }
   if (d.turnUsage) { sheets.turnUsagePopover(el, JSON.parse(d.turnUsage)); return; }
@@ -1433,7 +1444,7 @@ document.addEventListener('keydown', (e) => {
 // Inside the native Mac app (window.webkit.messageHandlers.relevo) the notifications are the system's.
 
 const native = () => window.webkit?.messageHandlers?.relevo;
-const ATTENTION = { pedir: 'El orquestador te pide algo', guard: 'Un permiso espera tu decisión', orquestador: 'El orquestador te escribe', fin: 'Objetivo cumplido', pausa: 'Equipo en pausa', presupuesto: 'Presupuesto del equipo superado', resumen: 'Resumen del día del equipo' };
+const ATTENTION = { pedir: 'El orquestador te pide algo', guard: 'Un permiso espera tu decisión', orquestador: 'El orquestador te escribe', fin: 'Objetivo cumplido', pausa: 'Equipo en pausa', presupuesto: 'Presupuesto del equipo superado', resumen: 'Resumen del día del equipo', auditoria: 'Auditoría del equipo' };
 
 function notifyChanges(hostId) {
   // A host that knows <relevo:pedir> says when you're needed: only that and the permissions that reach you
@@ -1449,7 +1460,7 @@ function notifyChanges(hostId) {
     const role = t.team?.role;
     const who = t.team ? `${t.team.name} · ` : '';
     if (!prev.approval && t.needsApproval && (!asks || !role || role === 'orchestrator')) notify(hostId, t, `${who}Necesita tu respuesta`, t.title);
-    else if (t.attention && t.attention.at !== prev.attention && (!asks || ['pedir', 'guard'].includes(t.attention.kind))) notify(hostId, t, ATTENTION[t.attention.kind] ?? 'El equipo te necesita', t.attention.text);
+    else if (t.attention && t.attention.at !== prev.attention && (!asks || ['pedir', 'guard', 'auditoria'].includes(t.attention.kind))) notify(hostId, t, ATTENTION[t.attention.kind] ?? 'El equipo te necesita', t.attention.text);
     else if (!asks && !role && prev.running && !t.isRunning && !t.needsApproval) notify(hostId, t, t.title, (t.preview ?? '').slice(0, 140));
   }
   if (asks) { reportStatus(); return; }

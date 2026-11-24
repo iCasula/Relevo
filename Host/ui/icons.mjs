@@ -7,6 +7,8 @@ const P = {
   'folder': '<path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4.2l2 2.2h8.8A1.5 1.5 0 0 1 21 8.7v9.8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5Z"/>',
   'folder.badge.plus': '<path d="M12.5 20h-8A1.5 1.5 0 0 1 3 18.5v-12A1.5 1.5 0 0 1 4.5 5h4.2l2 2.2h8.8A1.5 1.5 0 0 1 21 8.7V12"/><path d="M18 15v6M15 18h6"/>',
   'chevron.right': '<path d="m9 6 6 6-6 6"/>',
+  'pin': '<path d="M9 3h6l-1 6 4 3v2H6v-2l4-3Z"/><path d="M12 14v7"/>',
+  'pin.fill': '<path d="M9 3h6l-1 6 4 3v2H6v-2l4-3Z" fill="currentColor"/><path d="M12 14v7"/>',
   'chevron.down': '<path d="m6 9 6 6 6-6"/>',
   'chevron.up': '<path d="m6 15 6-6 6 6"/>',
   'chevron.up.chevron.down': '<path d="m8 9 4-4 4 4M8 15l4 4 4-4"/>',

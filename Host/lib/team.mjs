@@ -18,6 +18,7 @@ import * as gitops from './gitops.mjs';
 import { elideCode, clip, threadBrief } from './handoff.mjs';
 import { isReadOnlyCommand } from './codex.mjs';
 import { workDir } from './guard.mjs';
+import { openLedger } from './ledger.mjs';
 
 const clean = (o) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined && v !== null));
 
@@ -28,7 +29,11 @@ export const ROLES = {
 };
 
 /** Bumped when the agents' instructions change: teams made before get them again. */
-const RULES_VERSION = 11;
+const RULES_VERSION = 13;
+/** How often Relevo looks at the team's branches and worktrees besides after each turn (seconds). */
+const GIT_CHECK = 300;
+/** The task a branch or worktree folder is for: t12-audio, relevo/T12, tarea-12_x → 12. */
+export const taskOfRef = (name) => Number(/(?:^|[\/_.-])t(?:area)?[-_]?(\d{1,5})(?=$|[\/_.-])/i.exec(String(name ?? ''))?.[1]) || null;
 /** The orchestrator gets a fresh session (with a brief of its own thread) past any of these. */
 /**
  * When an agent starts a fresh session: only once its context is really full (this share of the model's
@@ -39,11 +44,16 @@ export const REFRESH = { share: 0.75, cap: 400_000 };
 /** The agent's own handoff note before a renewal: kept this long (seconds) and at most this many characters. */
 const NOTE_MAX = 6_000, NOTE_TTL = 24 * 3600;
 /** Decisions the team keeps (the oldest go first past this). */
-const DECISIONS_MAX = 40;
+const DECISIONS_MAX = 25; // besides the pinned ones
+const PINNED_MAX = 12;
+/** Open tasks listed at the end of each message to the orchestrator (when the board changed). */
+const BOARD_SHOWN = 12;
 /** Where the team's decisions are written in full, inside the project (kept out of git). */
 export const DECISIONS_DIR = '.relevo';
 /** Where the agents note what they'd delete but the orchestrator didn't see clear: cleaned up later, by you. */
 export const PENDING_DELETES = 'borrados-pendientes.md';
+/** Where an outside auditor leaves its reviews for the orchestrator (inside DECISIONS_DIR). */
+export const INBOX = 'al-orquestador';
 const DECISION_FULL_MAX = 8000;
 /** Research reports the team keeps, and how many the agents are reminded of. */
 const FINDINGS_MAX = 60, FINDINGS_SHOWN = 15;
@@ -65,9 +75,23 @@ export const PERMIT_WAIT = Number(process.env.RELEVO_PERMIT_WAIT ?? 600);
 
 // MARK: - Orders in the agents' replies
 
-const TAG = /<relevo:(tarea|urgente|investigar|respuesta|pregunta|integrar|fin|decisi[oó]n|descartar|hito|hecho|aprobar|denegar|consultar|pedir)\b([^>]*?)(?:\/>|>([\s\S]*?)<\/relevo:\1\s*>)/gi;
+const TAG = /<relevo:(tarea|urgente|investigar|respuesta|pregunta|integrar|fin|decisi[oó]n|descartar|hito|hecho|aprobar|denegar|consultar|pedir|cerrar|registro|buscar|fijar|soltar)\b([^>]*?)(?:\/>|>([\s\S]*?)<\/relevo:\1\s*>)/gi;
 const FENCED = /```[\s\S]*?(?:```|$)/g;
-const orderSig = (o) => `${o.type}|${o.to ?? ''}|${o.body}`;
+// The same as before attributes existed (the orders already marked as sent keep matching).
+const orderSig = (o) => `${o.type}|${o.to ?? ''}|${o.body}${o.attrs ? `|${JSON.stringify(o.attrs)}` : ''}`;
+/** The board task a pending order carries. */
+const taskIdOf = (p) => Number(p?.from?.taskId) || null;
+/** Numbers in a body that is only numbers («12», «T12, T13»): an id list, not a comment. */
+const ONLY_IDS = /^\s*#?T?\d+(\s*[,y ]\s*#?T?\d+)*\s*$/i;
+/**
+ * A «decision» that is really a record of what was done or checked (a commit, a SHA, a deployment): it goes to
+ * the log, where it can be searched, instead of filling the short list every agent reads. Not what you said.
+ */
+export function looksLikeRecord(text) {
+  const s = String(text ?? '');
+  if (/\busuario\b/i.test(s)) return false;
+  return /\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,64}\b/i.test(s) || /\bSHA-?256\b|\bFTP\b|\bdespleg|\brecuper[ao]/i.test(s);
+}
 /** What became of a message, as the orchestrator and you read it. */
 const RESULT = { sent: 'entregada', queued: 'en cola (la lee al terminar su turno)', bounced: 'no entregada: estaba a mitad de un turno', parked: 'pendiente: se la doy cuando termine su turno', held: 'retenida (equipo en pausa)', gone: 'no entregada: su hilo no existe', stashed: 'guardada para su próxima tarea', answered: 'respondida en su pregunta', approved: 'permitido', denied: 'denegado', escalated: 'pasado al usuario', nothing: 'no tenía ningún permiso esperando (ya estaba decidido)', replaced: 'sustituida por otra más reciente', dropped: 'descartada: le diste otra orden' };
 
@@ -79,7 +103,12 @@ export function parseOrders(text) {
     // para="…" (or de="…" for integrar) anywhere among the attributes, quoted or not.
     const attr = /\b(?:para|de)\s*=\s*(?:["“']([^"”']+)["”']|([^\s"”'>/]+))/i.exec(m[2]);
     const to = (attr?.[1] ?? attr?.[2])?.trim() || null;
-    out.push({ type: m[1].toLowerCase().replace('decisión', 'decision'), to, body: (m[3] ?? '').trim() });
+    // Every attribute (hito="7", tarea="12", estado="descartada", padre="7"), and bare flags as true.
+    const attrs = {};
+    for (const a of String(m[2] ?? '').matchAll(/([\p{L}_]+)(?:\s*=\s*(?:["“']([^"”']*)["”']|([^\s"”'>/]+)))?/gu)) attrs[a[1].toLowerCase()] = a[2] ?? a[3] ?? true;
+    const o = { type: m[1].toLowerCase().replace('decisión', 'decision'), to, body: (m[3] ?? '').trim() };
+    if (Object.keys(attrs).some((k) => k !== 'para' && k !== 'de')) o.attrs = attrs;
+    out.push(o);
   }
   return out;
 }
@@ -107,8 +136,6 @@ export function findMember(team, name) {
 export function memberName(s) {
   return String(s ?? '').replace(/["“”'<>]/g, '').replace(/\s+/g, ' ').trim().slice(0, 32);
 }
-/** An orchestrator's untagged comment that looks addressed to you (a question, a request, waiting for you). */
-const ASKS_USER = /\?|\b(usuario|necesito que|necesitamos que|puedes|podr[ií]as|confirma|conf[ií]rmame|decide|elige|dime|ind[ií]came|pru[eé]balo|esperando (al usuario|tu|a que))\b/i;
 const RESERVED = new Set(['relevo', 'usuario', 'tu', 'yo', 'todos', 'equipo']);
 
 // MARK: - What each role is told
@@ -132,7 +159,8 @@ export function planFromFallback(host, fallback, role = 'executor') {
   if (fallback === 'wait') return { mode: 'wait', targets: [] };
   // The best model with quota for its role, chosen when it runs out: the strongest for an executor, a light
   // one for the orchestrator and the researcher.
-  if (fallback === 'auto') return { mode: 'smart', targets: [], tier: role === 'executor' ? 'heavy' : 'light' };
+  // The orchestrator needs a strong model too: a light one loses the thread of the team. Only the researcher goes light.
+  if (fallback === 'auto') return { mode: 'smart', targets: [], tier: role === 'researcher' ? 'light' : 'heavy' };
   // «account|model» or «account|model|effort».
   const [accountId, model, effort] = String(fallback).split('|');
   return host._validPlan({ mode: 'chain', targets: [{ accountId, model: model || 'default', effort: effort || undefined }] });
@@ -156,15 +184,39 @@ export function decisionsBlock(team) {
   const list = team.decisions ?? [];
   if (!list.length) return '';
   const where = team.decisionsFile ? `Aquí van resumidas; enteras (y las antiguas o retiradas) están en ${team.decisionsFile}: léelas ahí si te falta el detalle o no recuerdas una.\n` : '';
-  return `\nDecisiones del equipo (ya tomadas: síguelas y no las reabras salvo que aparezca evidencia nueva que las contradiga; en ese caso dilo antes de cambiar de rumbo). ${where}${list.map((d) => `#${d.id} ${d.text}`).join('\n')}\n`;
+  const pinned = list.filter((d) => d.pinned);
+  const rest = list.filter((d) => !d.pinned);
+  const line = (d) => `#${d.id} ${d.text}`;
+  const body = pinned.length ? `Fijadas (el rumbo del equipo):\n${pinned.map(line).join('\n')}${rest.length ? `\nRecientes:\n${rest.map(line).join('\n')}` : ''}` : rest.map(line).join('\n');
+  return `\nDecisiones del equipo (ya tomadas: síguelas y no las reabras salvo que aparezca evidencia nueva que las contradiga; en ese caso dilo antes de cambiar de rumbo). ${where}${body}\n`;
+}
+
+/** The milestone being worked on: the first one not done, or its first sub-milestone not done. */
+export function currentMilestone(team) {
+  const list = team.milestones ?? [];
+  const top = list.find((m) => !m.parent && !m.done);
+  if (!top) return list.find((m) => !m.done) ?? null;
+  return list.find((m) => m.parent === top.id && !m.done) ?? top;
 }
 
 /** The goal's milestones: done, and the one in progress (the first not done). */
 export function milestonesBlock(team, forLead = false) {
   const list = team.milestones ?? [];
   if (!list.length) return forLead ? '\nHitos: aún no hay. Escríbelos al planificar (de 3 a 8, comprobables, en orden).\n' : '';
-  const current = list.find((m) => !m.done);
-  return `\nHitos del objetivo (${list.filter((m) => m.done).length}/${list.length}):\n${list.map((m) => `${m.done ? '✓' : m === current ? '→' : '○'} #${m.id} ${m.text}`).join('\n')}\n`;
+  const cur = currentMilestone(team);
+  const tops = list.filter((m) => !m.parent || !list.some((x) => x.id === m.parent));
+  const mark = (m) => (m.done ? '✓' : m === cur || cur?.parent === m.id ? '→' : '○');
+  const lines = [];
+  for (const m of tops) {
+    lines.push(`${mark(m)} #${m.id} ${m.text}`);
+    const kids = list.filter((x) => x.parent === m.id);
+    // The milestone in progress shows its sub-milestones; the others, how many are done.
+    if (kids.length && !m.done && (cur === m || cur?.parent === m.id)) for (const k of kids) lines.push(`   ${mark(k)} #${k.id} ${k.text}`);
+    else if (kids.length) lines.push(`   (${kids.filter((k) => k.done).length}/${kids.length} subhitos)`);
+  }
+  const split = forLead && cur && !cur.parent && !list.some((x) => x.parent === cur.id)
+    ? `\nEl hito en curso (#${cur.id}) no tiene subhitos: divídelo en 3-6 pasos comprobables con <relevo:hito padre="${cur.id}">…</relevo:hito>, y da cada tarea con hito= de uno de ellos.` : '';
+  return `\nHitos del objetivo (${tops.filter((m) => m.done).length}/${tops.length}):\n${lines.join('\n')}${split}\n`;
 }
 
 /** What the researcher already found: reuse it, ask only for what's new. */
@@ -192,7 +244,8 @@ export function researchReport(messages) {
 /** Where the team stood when the orchestrator starts a fresh session: the board and each agent's last report. */
 function boardBlock(host, team, lead) {
   const reports = team.members.filter((m) => m !== lead && m.lastReport).map((m) => `- ${m.name} (${new Date(m.lastReport.at * 1000).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}): ${m.lastReport.text}`);
-  return `\nDónde está el equipo ahora (vienes de una sesión anterior; esto y las decisiones son lo que importa de ella):\n${host.teams._status(team, lead)}\n${reports.length ? `Último informe de cada uno:\n${reports.join('\n')}\n` : ''}`;
+  const teams = host.teams;
+  return `\nDónde está el equipo ahora (vienes de una sesión anterior; esto, el tablero y las decisiones son lo que importa de ella):\n${teams._status(team, lead, { board: false })}\n${teams.boardText?.(team) ?? ''}${reports.length ? `Último informe de cada uno:\n${reports.join('\n')}\n` : ''}${teams.logText?.(team) ?? ''}${teams.lastAuditText?.(team) ?? ''}`;
 }
 
 /** What the agent itself wrote down before its session was renewed: the first thing its next session reads. */
@@ -228,12 +281,19 @@ Equipo:
 ${roster}
 
 Para dar órdenes, escríbelas tal cual en tu respuesta (fuera de bloques de código); Relevo las entrega:
-<relevo:tarea para="${executors[0]?.name ?? 'Ejecutor 1'}">qué hacer, criterio de terminado, ficheros o pistas</relevo:tarea>
+<relevo:tarea para="${executors[0]?.name ?? 'Ejecutor 1'}" hito="N">qué hacer, criterio de terminado, ficheros o pistas</relevo:tarea>
 ${researcher ? `<relevo:investigar para="${executors[0]?.name ?? 'Ejecutor 1'}">qué averiguar y para qué</relevo:investigar>  (para= es opcional: a quién más le llega el informe)\n` : ''}<relevo:respuesta para="${executors[0]?.name ?? 'Ejecutor 1'}">respuesta a su duda o cómo desbloquearse</relevo:respuesta>
-${executors.some((e) => host.threads.get(e.threadId)?.worktree) ? '<relevo:integrar de="Ejecutor 2"/>  fusiona en la rama principal el worktree de un ejecutor que ha terminado (lo hace Relevo, sin que tú toques git).\n' : ''}<relevo:fin>resumen para el usuario</relevo:fin>  cuando el objetivo esté cumplido y revisado.
+<relevo:integrar tarea="12"/>  fusiona en la rama principal la rama de la tarea T12 y retira su rama y su worktree (lo hace Relevo, sin que tú toques git). Antes comprueba que el trabajo está bien.
+${executors.some((e) => host.threads.get(e.threadId)?.worktree) ? '<relevo:integrar de="Ejecutor 2"/>  fusiona en la rama principal el worktree propio de un ejecutor que ha terminado.\n' : ''}<relevo:fin>resumen para el usuario</relevo:fin>  cuando el objetivo esté cumplido y revisado.
 <relevo:pedir>qué necesitas que haga el usuario y por qué, en una o dos frases</relevo:pedir>  la única forma de que al usuario le llegue un aviso: úsala solo cuando necesites que haga algo (decidir entre opciones, probar en la consola, darte un acceso o un archivo, desbloquear lo que el equipo no puede). No la uses para informar ni para resúmenes: lo que escribas sin ella lo lee cuando entre, sin aviso.
-<relevo:hito>un paso comprobable hacia el objetivo</relevo:hito>  añade un hito (en orden); <relevo:hecho>2</relevo:hecho> marca el #2 como conseguido cuando lo hayas comprobado. Relevo los muestra al usuario como progreso y te los recuerda siempre.
-<relevo:decision>una decisión firme, en una línea (qué y por qué)</relevo:decision>  Relevo la guarda y se la recuerda a todo el equipo, también a ti en tus sesiones nuevas. Úsala para lo que no debe reabrirse: tecnologías y proyectos elegidos (p. ej. «usamos shadPS4 como referencia para GNM»), enfoques descartados y por qué, criterios del usuario, y TODO resultado ya comprobado (en la consola, en tests o por el usuario), con fecha: «Comprobado 19-nov: Vulkan enumera 1 dispositivo en la consola sin consoleInit; no repetir la prueba». Un diagnóstico guardado no dice que el arreglo funcione: cuando se compruebe, guárdalo. <relevo:descartar>3</relevo:descartar> retira la decisión #3 si deja de valer.
+<relevo:hito>un paso comprobable hacia el objetivo</relevo:hito>  añade un hito (en orden); <relevo:hito padre="2">un paso más pequeño</relevo:hito> añade un subhito del #2: el hito en curso debe tener siempre sus subhitos. <relevo:hecho>2</relevo:hecho> marca el #2 como conseguido cuando lo hayas comprobado. Relevo los muestra al usuario como progreso y te los recuerda siempre.
+<relevo:decision>una decisión firme, en una línea (qué y por qué)</relevo:decision>  Relevo la guarda y se la recuerda a todo el equipo, también a ti en tus sesiones nuevas. Solo para el rumbo, lo que no debe reabrirse: tecnologías y proyectos elegidos (p. ej. «usamos shadPS4 como referencia para GNM»), enfoques descartados y por qué, criterios y acuerdos con el usuario. La lista es corta (las más antiguas salen de ella) y la recibe todo el equipo en cada sesión: no la llenes de resultados. <relevo:descartar>3</relevo:descartar> retira la decisión #3 si deja de valer. <relevo:fijar>3</relevo:fijar> la fija para que no salga nunca de la lista (también una antigua que ya salió: así recuperas una decisión de rumbo); <relevo:soltar>3</relevo:soltar> la suelta.
+<relevo:registro>un hecho comprobado, en una línea, con fecha y su prueba (commit, fichero, SHA, log)</relevo:registro>  Para resultados, pruebas en la consola, despliegues, aceptaciones de commits y verificaciones: «24-nov: NRO 09 probado en la Switch 2 por el usuario: crashea tras la cinemática de Shepard». No va al contexto de nadie, pero queda guardado y se puede buscar (también en ${DECISIONS_DIR}/registro.md). Relevo guarda además cada informe de los agentes.
+<relevo:buscar>palabras clave</relevo:buscar>  Relevo te responde con lo que encuentre en el tablero, el registro, los informes y las decisiones antiguas. Búscalo antes de repetir una prueba, reabrir un tema o pedir algo que quizá ya se hizo.
+
+Tablero: cada tarea que das queda en el tablero de Relevo con un número (T12), su responsable, su hito y su estado (pendiente, en curso, bloqueada, hecha). Cuando el agente informa «hecho», la tarea queda HECHA a la espera de que la compruebes: ciérrala con <relevo:cerrar tarea="12">cómo se ha comprobado</relevo:cerrar>, o con <relevo:cerrar tarea="12" estado="descartada">por qué ya no hace falta</relevo:cerrar> si la sustituyes o deja de servir. Cada tarea lleva hito="N" (el hito o subhito al que sirve): si no encaja en ninguno, o falta ese hito o la tarea sobra; sin hito=, Relevo la apunta al hito en curso. Al final de cada mensaje ves las tareas abiertas: no dejes abiertas las que ya no sigues, y no des una tarea que ya está abierta para otro.
+Ramas y worktrees: un ejecutor puede abrir una rama o un worktree para su tarea (uno por tarea, con su número: t12-…). Relevo los ata a su tarea y, cuando la cierras, los retira si todo está integrado; si queda trabajo sin integrar te lo dice. Cierra o integra las tareas terminadas: así no se acumulan.
+Auditor: si te llega «[Auditor · auditoría]», es una revisión independiente del rumbo hecha con ojos frescos. Contrástala con el tablero y los hitos y corrige lo que tenga razón (prioridades, tareas, hitos); si discrepas en algo importante, díselo al usuario con <relevo:pedir>.
 
 <relevo:urgente para="${executors[0]?.name ?? 'Ejecutor 1'}">…</relevo:urgente>  solo si lo que está haciendo ahora es claramente erróneo o ya no sirve: interrumpe su turno.
 
@@ -248,10 +308,11 @@ Cómo funciona la entrega: a un agente a mitad de un turno solo le llega lo urge
 - Si Relevo te dice «Pendiente para…», no la repitas: le llega sola salvo que le des otra orden al leer su informe. Si te dice «no entregada», esa sí tienes que volver a darla.
 - Si Relevo te avisa de que el equipo lleva un rato parado, reparte el trabajo que quede; si estáis esperando al usuario, dilo en una línea.
 - Una respuesta a quien no te ha preguntado nada no se entrega: se guarda y le llega con su siguiente tarea. No respondas a informes con ESTADO: esperando.
-- No hagas tú el trabajo de los ejecutores (depurar, compilar, hacer commits o merges): pídeselo a ellos${executors.some((e) => host.threads.get(e.threadId)?.worktree) ? ' o usa integrar' : ''}.
+- No hagas tú el trabajo de los ejecutores (depurar, compilar, hacer commits o merges): pídeselo a ellos o usa integrar.
 - Toda respuesta y tarea lleva para="…". No existen otras órdenes ni opciones («force», «redirect»…) aparte de las de arriba.
 - Tareas pequeñas y comprobables. No des a dos ejecutores los mismos ficheros a la vez.
 ${researcher ? `- Antes de que un ejecutor construya algo que ya puede existir (una librería, un proyecto open source, un ejemplo), o en cuanto lleve dos intentos fallidos con el mismo problema, pide al ${researcher.name} que lo busque, y pasa al ejecutor la recomendación concreta.\n` : '- Si un ejecutor lleva dos intentos fallidos con el mismo problema, para y busca otro enfoque (librerías o proyectos open source que ya lo resuelvan) antes de insistir.\n'}- Responde tú las dudas que puedas. Si solo el usuario puede decidir o hacer algo, pídeselo con <relevo:pedir> y espera.
+- El estado del trabajo vive en Relevo (tablero, hitos, registro y decisiones): no pidas documentos nuevos de estado, seguimiento o resumen (estado-actual.md, seguimiento-*.md, recap…). Si el objetivo del usuario pide mantener uno, mantén solo ese y al día. Los documentos del repositorio son para diseño, guías y resultados que deban quedarse con el código; antes de crear uno, mira si ya existe otro que ampliar.
 - Sé breve y gasta poco: todos ven el código en disco, no lo copies en los mensajes; no leas el proyecto entero, apóyate en los informes y lee solo lo que necesites para decidir.
 ${notesOf(member)}${milestonesBlock(team, true)}${decisionsBlock(team)}${findingsBlock(team)}${fresh ? boardBlock(host, team, member) : ''}${carried}
 Objetivo del usuario:
@@ -284,10 +345,12 @@ Eres ${member.name} en un equipo de agentes de IA coordinado por un orquestador,
 Equipo:
 ${roster}
 
-- Haz la tarea que te llega. Al terminar, tu ÚLTIMO mensaje es el informe para el orquestador (no para el usuario); Relevo solo le envía ese. Primera línea «ESTADO: hecho», «ESTADO: esperando» o «ESTADO: bloqueado», y después como mucho 10 líneas sencillas: qué has hecho, ficheros tocados, cómo lo has comprobado, qué queda y cualquier hallazgo que cambie el plan. Sin títulos, tablas ni negritas; no pegues código ni logs: están en disco.
+- Haz la tarea que te llega. Al terminar, tu ÚLTIMO mensaje es el informe para el orquestador (no para el usuario); Relevo solo le envía ese. Primera línea «ESTADO: hecho», «ESTADO: esperando» o «ESTADO: bloqueado», con el número de la tarea si lo tiene («ESTADO: hecho (T12)»), y después como mucho 10 líneas sencillas: qué has hecho, ficheros tocados, cómo lo has comprobado, qué queda y cualquier hallazgo que cambie el plan. Sin títulos, tablas ni negritas; no pegues código ni logs: están en disco.
 - Si dejas algo en segundo plano (una compilación, un emulador) y terminas el turno para esperarlo, no hace falta que informes: Relevo lo sabe y el orquestador no te escribirá hasta que acabes.
 - Si te bloqueas o necesitas una decisión, termina tu respuesta con <relevo:pregunta>tu duda concreta</relevo:pregunta> y espera la respuesta.${researcher ? ` Si llevas dos intentos fallidos con el mismo problema, pregunta: el ${researcher.name} puede buscar soluciones que ya existan.` : ''}
 - Otros agentes pueden estar trabajando en el mismo proyecto: toca solo lo que te pidan.
+- No crees documentos de estado, seguimiento ni informes en el repositorio salvo que tu tarea lo pida: tu informe final llega al orquestador y Relevo lo guarda.
+- Si tu tarea lo necesita, puedes trabajar en una rama o un worktree propios: uno por tarea y con su número en el nombre, p. ej. \`git worktree add .relevo/worktrees/t12-audio -b t12-audio\` desde la carpeta del proyecto (.relevo no entra en git). Haz commits en ella y di en tu informe la rama y si queda lista para integrar. No la borres ni la fusiones tú salvo que te lo pidan: al cerrarse la tarea con todo integrado, Relevo retira la rama y el worktree. Nada de ramas ni worktrees sin número de tarea.
 - Cada mensaje del equipo trae al final el estado de los demás (trabajando, en segundo plano, libre, BLOQUEADO esperando al usuario, SIN CUOTA y cuándo retoma): no esperes una respuesta de quien no puede darla; dilo en tu informe.
 ${notesOf(member)}${decisionsBlock(team)}${taskLine}${carried}</relevo_equipo>
 
@@ -300,8 +363,11 @@ export class Teams {
   constructor(host) {
     this.host = host;
     host.state.teams ??= [];
+    // The board and the log: SQLite in the host's data folder (in memory for a host without one, as in tests).
+    this._ledger = openLedger(host.config?.dataDir ? path.join(host.config.dataDir, 'teams') : null, { memory: !host.config?.dataDir });
     this._dropOrphans();
     this._upgrade();
+    if (!host.config?.readOnly) this._ledgerUpgrade();
     // Decisions on disk too (a one-off command such as `pair` only reads).
     if (!host.config?.readOnly) for (const team of this.list) { this._recoverDecisions(team); this._writeDecisions(team); }
     // Teams paused by an older version: why, from the notice it left (the loop guard's pause ends when you write).
@@ -317,7 +383,7 @@ export class Teams {
       setTimeout(() => { for (const team of this.list) if (team.status === 'paused' && team.pausedBy === 'limit') { this._reactivate(team, 'Equipo reactivado: Relevo ya no pausa el equipo por llevar muchos mensajes sin ti'); this.host._saveState(); this.host._broadcastSnapshot(); } }, 0);
     }
     this._watch = setInterval(() => {
-      try { this.watchBackground(); this._maybeSummary(); this.sweepUnreported(); this.watchIdle(); this.watchPermits(); } catch (e) { host.log?.(`team watch: ${e.message}`); }
+      try { this.watchBackground(); this._maybeSummary(); this.sweepUnreported(); this.watchIdle(); this.watchPermits(); this.watchAudits(); this.watchInbox(); this.watchGit(); } catch (e) { host.log?.(`team watch: ${e.message}`); }
     }, Math.max(1, Math.min(60, BG_CHECK / 2, IDLE_NUDGE / 3)) * 1000);
     this._watch.unref?.();
   }
@@ -330,7 +396,9 @@ export class Teams {
     const h = this.host;
     for (const team of this.list) {
       if (team.rules === RULES_VERSION) continue;
+      const before = team.rules ?? 0;
       team.rules = RULES_VERSION;
+      if (before && before < 12) team.notes = [...(team.notes ?? []), 'Relevo tiene ahora un tablero de tareas (T1, T2…), un registro que se puede buscar, decisiones fijadas y subhitos: lee tus instrucciones nuevas. Lo primero: divide el hito en curso en subhitos, vuelve a dar como tareas (con hito=) lo que siga vivo, cierra en el tablero lo que ya no, y pasa al registro los resultados que tengas como decisiones.'].slice(-6);
       for (const m of team.members) {
         const t = h.threads.get(m.threadId);
         if (!t) continue;
@@ -358,6 +426,93 @@ export class Teams {
   }
 
   /**
+   * Teams from before the ledger: the decisions that left the list go into it (so they can be found and pinned
+   * again), the ones the goal names are pinned, and each member's current task seeds the board. An orchestrator's
+   * automatic fallback becomes a strong model (a light one lost the thread of the team).
+   */
+  _ledgerUpgrade() {
+    for (const team of this.list) {
+      if (!team.ledgerImported) { this._importArchived(team); team.ledgerImported = true; }
+      this._pinGoalDecisions(team);
+      if (!team.boardSeeded) {
+        team.boardSeeded = true;
+        for (const m of team.members) {
+          if (m.role === 'orchestrator' || !m.task?.text || m.taskId) continue;
+          if (!/en curso|bloquead|esperando/.test(m.task.state ?? '')) continue;
+          const task = this.ledger.addTask(team.id, { owner: m.name, milestone: currentMilestone(team)?.id ?? null, kind: m.role === 'researcher' ? 'investigar' : 'tarea', text: m.task.text, state: /bloquead/.test(m.task.state) ? 'bloqueada' : 'en curso', by: 'Relevo' });
+          m.taskId = task.id;
+        }
+      }
+      const lead = team.members.find((m) => m.role === 'orchestrator');
+      const lt = lead && this.host.threads.get(lead.threadId);
+      if (lt?.limitPlan?.mode === 'smart' && lt.limitPlan.tier === 'light') lt.limitPlan = { ...lt.limitPlan, tier: 'heavy' };
+      this._writeBoard(team);
+    }
+    this.host._saveState();
+  }
+
+  /** decisiones-anteriores.md, into the ledger: «## #12 (antigua) · Orquestador» and its text. */
+  _importArchived(team) {
+    const dir = this._decisionsDir(team);
+    const file = dir && path.join(dir, 'decisiones-anteriores.md');
+    let text = '';
+    try { if (file && fs.existsSync(file)) text = fs.readFileSync(file, 'utf8'); } catch { return; }
+    for (const m of text.matchAll(/^## #(\d+) \(([^)]*)\) · ([^\n]*)\n\n([\s\S]*?)(?=\n+## #\d+ \(|\s*(?![\s\S]))/gm)) {
+      if (this.ledger.entry(team.id, 'decision', m[1])) continue;
+      this.ledger.log(team.id, { kind: 'decision', by: m[3].trim() || null, ref: m[1], text: m[4].trim() });
+    }
+  }
+
+  /** The decisions the goal names («decisiones #231, #267») are the team's course: pinned (once each). */
+  _pinGoalDecisions(team) {
+    const named = [...new Set([...String(team.goal ?? '').matchAll(/#(\d+)/g)].map((m) => Number(m[1])))];
+    const fresh = named.filter((id) => !(team.goalPinned ?? []).includes(id));
+    if (!fresh.length) return;
+    const pinned = this.pinDecisions(team, fresh.join(','), true);
+    team.goalPinned = [...new Set([...(team.goalPinned ?? []), ...pinned.map((d) => d.id)])];
+  }
+
+  /** Pins (or unpins) decisions by number; a pinned one never leaves the list. An old one comes back from the ledger. */
+  pinDecisions(team, which, on) {
+    const ids = [...new Set(String(which ?? '').match(/\d+/g)?.map(Number) ?? [])];
+    team.decisions ??= [];
+    const changed = [];
+    for (const id of ids) {
+      let d = team.decisions.find((x) => x.id === id);
+      if (!d && on) d = this._restoreDecision(team, id);
+      if (!d || !!d.pinned === on) continue;
+      if (on && team.decisions.filter((x) => x.pinned).length >= PINNED_MAX) break;
+      if (on) d.pinned = true; else delete d.pinned;
+      changed.push(d);
+    }
+    if (!changed.length) return [];
+    this._trimDecisions(team);
+    this._writeDecisions(team);
+    this._memoryChanged();
+    return changed;
+  }
+
+  _restoreDecision(team, id) {
+    const e = this.ledger.entry(team.id, 'decision', id);
+    if (!e) return null;
+    const whole = String(e.text).trim();
+    const text = clip(whole.replace(/\s+/g, ' '), 400);
+    const d = { id, text, by: e.by ?? undefined, at: e.ts, ...(text !== whole.replace(/\s+/g, ' ') ? { full: clip(whole, DECISION_FULL_MAX) } : {}) };
+    team.decisions.push(d);
+    team.decisions.sort((a, b) => a.id - b.id);
+    return d;
+  }
+
+  /** Past the limit, the oldest decisions that aren't pinned leave the list (into the ledger and the file). */
+  _trimDecisions(team) {
+    const loose = (team.decisions ?? []).filter((d) => !d.pinned);
+    if (loose.length <= DECISIONS_MAX) return;
+    const out = new Set(loose.slice(0, loose.length - DECISIONS_MAX));
+    team.decisions = team.decisions.filter((d) => !out.has(d));
+    this._archiveDecisions(team, [...out], 'antigua');
+  }
+
+  /**
    * Threads pointing at a team that doesn't exist (a creation that failed halfway in 0.6.x) go back to being
    * normal threads, and the empty ones that creation made are removed.
    */
@@ -373,6 +528,8 @@ export class Teams {
   }
 
   get list() { return this.host.state.teams; }
+  /** The board and the log (in memory when there's no data folder). */
+  get ledger() { return (this._ledger ??= openLedger(null, { memory: true })); }
   byId(id) { return this.list.find((t) => t.id === id) ?? null; }
   of(thread) { return thread?.team ? this.byId(thread.team.id) : null; }
   memberOf(thread) { return this.of(thread)?.members.find((m) => m.threadId === thread.id) ?? null; }
@@ -545,6 +702,10 @@ export class Teams {
         news.push(dirs.length ? `Carpetas de trabajo del equipo, además del proyecto: ${dirs.join(', ')}. Relevo deja escribir en ellas sin pedir permiso; los borrados recursivos siguen pasando por ti (orquestador) y borrar una entera llega al usuario.` : 'El equipo ya no tiene carpetas de trabajo fuera del proyecto: escribir fuera vuelve a pedir permiso');
       }
     }
+    if (changes.audit !== undefined) {
+      const said = this.setAudit(team, changes.audit);
+      if (said) news.push(said.replace('te enviará', 'te enviará a ti (orquestador)'));
+    }
     if (changes.budget !== undefined) {
       const usd = Number(changes.budget?.usd);
       team.budget = usd > 0 ? { usd: Math.round(usd * 100) / 100, action: changes.budget.action === 'light' ? 'light' : 'pause' } : null;
@@ -690,7 +851,6 @@ export class Teams {
     if (team.status === 'paused' && team.pausedBy === 'limit') this._reactivate(team, 'Equipo reactivado por tu mensaje');
     team.auto = 0;
     team.nudges = 0;
-    team.askHinted = false;
     if (team.status === 'done') team.status = 'active'; // you asked for more
   }
 
@@ -859,6 +1019,7 @@ export class Teams {
     const member = this.memberOf(thread);
     if (!team || !member || team.status === 'done') return;
     const h = this.host;
+    if (member.role === 'executor') this._gitSoon(team); // a branch or worktree it made, or integrated
     // The turn Relevo asked for before renewing: what it wrote is its handoff note, not a report or orders.
     if (member.noteRequested) {
       member.noteRequested = false;
@@ -878,14 +1039,6 @@ export class Teams {
       const sent = this._dispatch(team, member, thread, orders, items);
       this._offerParked(team, sent);
       this._receipt(team, thread, sent);
-      // Only <relevo:pedir> tells you (see _order). A turn with no orders that seems to ask you something gets
-      // the tag recalled once, until it uses it or you write: without it you'd get no notice.
-      const said = withoutOrders(text).trim();
-      if (orders.some((o) => o.type === 'pedir')) team.askHinted = false;
-      else if (!orders.some((o) => !['decision', 'descartar', 'hito', 'hecho'].includes(o.type)) && said && team.status !== 'done' && !team.askHinted && ASKS_USER.test(said)) {
-        team.askHinted = true;
-        this._deliver(team, member, 'Si eso era para el usuario y necesitas que haga algo, pídeselo con <relevo:pedir>qué y por qué</relevo:pedir>: sin la etiqueta no le llega ningún aviso. Si no lo era, sigue sin más.', { name: 'Relevo', role: 'relevo', label: 'aviso' });
-      }
       team.leadTurns = (team.leadTurns ?? 0) + 1;
       this._maybeRefreshLead(team, thread);
       h._saveState();
@@ -899,6 +1052,7 @@ export class Teams {
     if (question) {
       member.awaitingAnswer = true;
       this._setTask(member, 'bloqueado');
+      this._taskReport(team, member, `${question.body}\n\n${body}`, 'bloqueada', body);
       this._toLead(team, member, 'pregunta', `${question.body}${body.trim() ? `\n\nSu informe:\n${compactReport(body)}` : ''}`);
       this._markSent(team, thread, items, body, 'pregunta');
       return;
@@ -926,6 +1080,10 @@ export class Teams {
     // A turn without a status line (an answer to you, a quick check) leaves a blocked agent blocked.
     const stuck = ['bloqueado', 'esperando'].includes(member.task?.state) ? member.task.state : null;
     this._setTask(member, state === 'bloqueado' ? 'bloqueado' : state === 'esperando' ? 'esperando' : state ? 'hecha' : stuck ?? 'hecha');
+    // The board: its task is done (for you to check), blocked, or still going; a research report closes its own.
+    const taskState = member.role === 'researcher' ? 'verificada' : state === 'hecho' ? 'hecha' : state === 'bloqueado' ? 'bloqueada' : null;
+    const tid = this._taskReport(team, member, body, taskState);
+    if (tid && taskState === 'hecha') report.push(`(Tarea T${tid}: hecha, a la espera de que la compruebes y la cierres con <relevo:cerrar tarea="${tid}">.)`);
     if (member.role === 'researcher' && body.trim()) {
       const found = this.addFinding(team, { topic: member.inquiry || clip(body.split('\n').find((l) => l.trim()) ?? '', 200), body, by: member.name });
       if (found) member.findingsSeen = found.id; // it wrote it: no need to tell it
@@ -1041,6 +1199,7 @@ export class Teams {
     this.host._broadcastSnapshot();
     // Only a request from the orchestrator reaches your phone; the rest you see when you come in.
     if (kind === 'pedir') this.host._push?.(t, `${this.memberOf(t)?.name ?? 'El orquestador'} te pide algo`, t.attention.text, kind);
+    if (kind === 'auditoria') this.host._push?.(t, 'Auditoría del equipo', t.attention.text, kind);
   }
 
   /** Working, waiting for an answer, or waiting for something it left running in the background. */
@@ -1069,7 +1228,7 @@ export class Teams {
     // The short text travels in every preamble and to the apps; the whole one goes to the file on disk.
     const d = { id: team.nextDecision, text: clean, by, at: Date.now() / 1000, ...(clean !== whole.replace(/\s+/g, ' ') ? { full: clip(whole, DECISION_FULL_MAX) } : {}) };
     team.decisions.push(d);
-    if (team.decisions.length > DECISIONS_MAX) this._archiveDecisions(team, team.decisions.splice(0, team.decisions.length - DECISIONS_MAX), 'antigua');
+    this._trimDecisions(team);
     this._writeDecisions(team);
     this.host._saveState();
     this.host._broadcastSnapshot();
@@ -1094,7 +1253,7 @@ export class Teams {
       this._ignoreInGit(path.dirname(dir));
       const file = path.join(dir, 'decisiones.md');
       const day = (at) => new Date(at * 1000).toISOString().slice(0, 16).replace('T', ' ');
-      const body = team.decisions.map((d) => `## #${d.id} · ${d.by ?? ''} · ${day(d.at)}\n\n${d.full ?? d.text}\n`).join('\n');
+      const body = [...team.decisions.filter((d) => d.pinned), ...team.decisions.filter((d) => !d.pinned)].map((d) => `## #${d.id}${d.pinned ? ' (fijada)' : ''} · ${d.by ?? ''} · ${day(d.at)}\n\n${d.full ?? d.text}\n`).join('\n');
       fs.writeFileSync(file, `# Decisiones del equipo\n\nObjetivo: ${clip(String(team.goal ?? '').split('\n')[0], 200)}\n\nLas escribe Relevo: no edites este fichero (cámbialas con órdenes de decisión o desde la app). Las antiguas y las retiradas están en decisiones-anteriores.md.\n\n${body}`);
       team.decisionsFile = file;
     } catch (e) { this.host.log?.(`decisiones a disco: ${e.message}`); }
@@ -1115,6 +1274,8 @@ export class Teams {
 
   /** Decisions that leave the list (too old, or withdrawn) are kept at the end of a second file. */
   _archiveDecisions(team, list, why) {
+    // In the ledger too: found by «buscar», and pinned back if it turns out to matter.
+    for (const d of list) { try { this.ledger.log(team.id, { kind: 'decision', by: d.by ?? null, ref: d.id, text: d.full ?? d.text, ts: d.at }); } catch {} }
     const dir = this._decisionsDir(team);
     if (!dir || !list.length) return;
     try {
@@ -1171,10 +1332,16 @@ export class Teams {
   }
 
   /** You add or withdraw a decision from the apps: the orchestrator hears it with its next message. */
-  editDecisions(teamId, { add, remove } = {}) {
+  editDecisions(teamId, { add, remove, pin, unpin } = {}) {
     const team = this.byId(teamId);
     if (!team) throw new Error('Equipo desconocido');
     const lead = team.members.find((m) => m.role === 'orchestrator');
+    if (pin != null || unpin != null) {
+      const on = pin != null;
+      const changed = this.pinDecisions(team, String(on ? pin : unpin), on);
+      if (!changed.length && on && (team.decisions ?? []).filter((d) => d.pinned).length >= PINNED_MAX) throw new Error(`Ya hay ${PINNED_MAX} decisiones fijadas: suelta alguna antes`);
+      if (changed.length) team.notes = [...(team.notes ?? []), `El usuario ha ${on ? 'fijado' : 'soltado'} ${changed.map((d) => `la decisión #${d.id}${on ? ` («${clip(d.text, 120)}»)` : ''}`).join(' y ')}`];
+    }
     if (add) {
       const d = this.addDecision(team, add, 'usuario');
       if (!d) throw new Error(String(add).trim() ? 'Esa decisión ya está guardada' : 'Escribe la decisión');
@@ -1188,14 +1355,20 @@ export class Teams {
     return {};
   }
 
-  addMilestone(team, text) {
+  addMilestone(team, text, parent = null) {
     const clean = clip(String(text ?? '').replace(/\s+/g, ' ').trim(), 240);
     if (!clean) return null;
     team.milestones ??= [];
     if (team.milestones.some((m) => norm(m.text) === norm(clean))) return null;
+    // A sub-milestone hangs from a top-level one (one level: a sub-milestone's child goes to its parent).
+    let up = parent ? team.milestones.find((m) => m.id === Number(parent)) : null;
+    if (up?.parent) up = team.milestones.find((m) => m.id === up.parent) ?? null;
     team.nextMilestone = (team.nextMilestone ?? 0) + 1;
-    const m = { id: team.nextMilestone, text: clean, done: false, at: Date.now() / 1000 };
-    team.milestones.push(m);
+    const m = { id: team.nextMilestone, text: clean, done: false, at: Date.now() / 1000, ...(up ? { parent: up.id } : {}) };
+    // After its siblings, so the list reads in order.
+    const lastSibling = up ? team.milestones.findLastIndex((x) => x.id === up.id || x.parent === up.id) : -1;
+    if (lastSibling >= 0) team.milestones.splice(lastSibling + 1, 0, m); else team.milestones.push(m);
+    this._writeBoard(team);
     this._memoryChanged();
     return m;
   }
@@ -1205,8 +1378,22 @@ export class Teams {
     const ids = new Set(String(which ?? '').match(/\d+/g)?.map(Number) ?? []);
     const changed = (team.milestones ?? []).filter((m) => ids.has(m.id) && m.done !== done);
     for (const m of changed) { m.done = done; m.doneAt = done ? Date.now() / 1000 : undefined; }
-    if (changed.length) this._memoryChanged();
+    if (changed.length) { this._writeBoard(team); this._memoryChanged(); }
+    if (done && changed.length) this._milestoneReached(team, changed);
     return changed;
+  }
+
+  /** A milestone reached: in the log, a notice on your phone, and the auditor's review now (the right moment). */
+  _milestoneReached(team, list) {
+    const h = this.host;
+    const text = list.map((m) => `${m.parent ? 'Subhito' : 'Hito'} #${m.id} conseguido: ${m.text}`).join(' · ');
+    try { this.addLog(team, 'registro', text, 'Relevo'); } catch {}
+    const lead = this._lead(team);
+    if (lead) h._push?.(lead, list.some((m) => !m.parent) ? 'Hito conseguido' : 'Subhito conseguido', clip(text, 200), 'hito');
+    if (!team.audit?.accountId || team.audit.onMilestone === false) return;
+    const t = team.audit.threadId && h.threads.get(team.audit.threadId);
+    if (t && this._busy(t)) return;
+    try { this.runAudit(team.id); } catch (e) { h.log?.(`auditoría al cerrar un hito: ${e.message}`); }
   }
 
   /** A research report into the team's library (its conclusion line first, links kept apart). */
@@ -1315,25 +1502,25 @@ export class Teams {
   }
 
   _memoryChanged() {
-    this.host._saveState();
-    this.host._broadcastSnapshot();
+    this.host._saveState?.();
+    this.host._broadcastSnapshot?.();
   }
 
   /**
    * You change the team's memory from the apps: decisions, milestones (add, toggle, remove) and research
    * (remove). The orchestrator hears what matters with its next message.
    */
-  editMemory(teamId, { kind, add, remove, toggle } = {}) {
+  editMemory(teamId, { kind, add, remove, toggle, pin, unpin, parent } = {}) {
     const team = this.byId(teamId);
     if (!team) throw new Error('Equipo desconocido');
-    if (kind === 'decision') return this.editDecisions(teamId, { add, remove });
+    if (kind === 'decision') return this.editDecisions(teamId, { add, remove, pin, unpin });
     const ids = (x) => new Set(String(x ?? '').match(/\d+/g)?.map(Number) ?? []);
     const tell = (n) => { team.notes = [...(team.notes ?? []), n]; };
     if (kind === 'milestone') {
       if (add) {
-        const m = this.addMilestone(team, add);
+        const m = this.addMilestone(team, add, parent);
         if (!m) throw new Error(String(add).trim() ? 'Ese hito ya está' : 'Escribe el hito');
-        tell(`El usuario ha añadido el hito #${m.id}: ${m.text}`);
+        tell(`El usuario ha añadido el ${m.parent ? `subhito #${m.id} (del #${m.parent})` : `hito #${m.id}`}: ${m.text}`);
       }
       if (toggle) {
         for (const m of (team.milestones ?? []).filter((x) => ids(toggle).has(x.id))) {
@@ -1342,8 +1529,10 @@ export class Teams {
         }
       }
       if (remove) {
+        // A milestone goes with its sub-milestones.
+        const drop = new Set((team.milestones ?? []).filter((x) => ids(remove).has(x.id) || ids(remove).has(x.parent)).map((x) => x.id));
         const gone = (team.milestones ?? []).filter((x) => ids(remove).has(x.id));
-        team.milestones = (team.milestones ?? []).filter((x) => !ids(remove).has(x.id));
+        team.milestones = (team.milestones ?? []).filter((x) => !drop.has(x.id));
         if (gone.length) { tell(`El usuario ha quitado ${gone.map((m) => `el hito #${m.id}`).join(' y ')}`); this._memoryChanged(); }
       }
       return {};
@@ -1564,6 +1753,557 @@ export class Teams {
 
   // MARK: - Delivery
 
+  // MARK: - The board and the log
+
+  /** A task on the board for an order (its number goes with the message). Pending until it's delivered. */
+  _newTask(team, lead, to, o, kind = 'tarea') {
+    const ms = this._milestoneFor(team, o.attrs?.hito);
+    if (team.milestones?.length && !o.attrs?.hito) {
+      team.noMilestone = (team.noMilestone ?? 0) + 1;
+      if (team.noMilestone === 3) team.notes = [...(team.notes ?? []), 'Tus últimas tareas no llevaban hito="N": las he apuntado al hito en curso. Pon en cada tarea el hito o subhito al que sirve; si no encaja en ninguno, o falta ese hito o la tarea sobra.'].slice(-6);
+    } else team.noMilestone = 0;
+    return this.ledger.addTask(team.id, { owner: to.name, milestone: ms?.id ?? null, kind, text: clip(o.body.replace(/\s+/g, ' '), 600), state: 'pendiente', by: lead.name });
+  }
+
+  /** The milestone an order names (hito="7"), or the one in progress. */
+  _milestoneFor(team, hito) {
+    const id = Number(String(hito ?? '').match(/\d+/)?.[0]);
+    return (id && (team.milestones ?? []).find((m) => m.id === id)) || currentMilestone(team);
+  }
+
+  _taskHead(team, task) {
+    const ms = task.milestone && (team.milestones ?? []).find((m) => m.id === task.milestone);
+    return `(Tarea T${task.id}${ms ? ` · hito #${ms.id}: ${clip(ms.text, 90)}` : ''}. Al terminar, empieza tu informe con «ESTADO: hecho (T${task.id})».)\n`;
+  }
+
+  /** What became of a task's order: going (en curso), waiting to be delivered (pendiente), or never delivered. */
+  _taskDelivered(team, member, task, res) {
+    if (res === 'sent' || res === 'queued') { member.taskId = task.id; this.ledger.updateTask(team.id, task.id, { state: 'en curso' }); }
+    else if (res !== 'parked' && res !== 'held') this.ledger.updateTask(team.id, task.id, { state: 'descartada', result: `No se entregó (${RESULT[res] ?? res})` });
+    this._boardChanged(team);
+  }
+
+  _dropParkedTask(team, parked, why) {
+    const tid = taskIdOf(parked);
+    if (tid && this.ledger.task(team.id, tid)?.state === 'pendiente') { this.ledger.updateTask(team.id, tid, { state: 'descartada', result: why }); this._boardChanged(team); }
+  }
+
+  /**
+   * A member's report on the board: the task it names («ESTADO: hecho (T12)»), else its current one, takes
+   * `state` (null: unchanged); the report goes to the log either way. Returns the task's number.
+   */
+  _taskReport(team, member, body, state, logBody = body) {
+    const named = Number(/\bT(\d+)\b/.exec(String(body ?? '').split('\n').slice(0, 2).join(' '))?.[1]) || null;
+    let task = named ? this.ledger.task(team.id, named) : null;
+    if (task && task.owner !== member.name && !(member.formerNames ?? []).includes(task.owner)) task = null;
+    task ??= member.taskId ? this.ledger.task(team.id, member.taskId) : null;
+    const text = String(logBody ?? '').trim();
+    if (text) { try { this.addLog(team, 'informe', compactReport(text), member.name, task ? `T${task.id}` : null); } catch {} }
+    if (!task || !['pendiente', 'en curso', 'bloqueada', 'hecha'].includes(task.state)) return task?.id ?? null;
+    if (state && state !== task.state) {
+      const result = clip(headTail(elideCode(text, 4), 600).replace(/\s+/g, ' '), 600);
+      this.ledger.updateTask(team.id, task.id, { state, result });
+      if (['verificada', 'descartada'].includes(state) && member.taskId === task.id) member.taskId = null;
+      this._boardChanged(team);
+    }
+    return task.id;
+  }
+
+  /** Closes tasks (verified or dropped): from the orchestrator's order or from the apps. Returns the ones closed. */
+  closeTasks(team, ids, state, why, by) {
+    const closed = [];
+    for (const id of ids) {
+      const t = this.ledger.task(team.id, id);
+      if (!t || ['verificada', 'descartada'].includes(t.state)) continue;
+      closed.push(this.ledger.updateTask(team.id, id, { state, result: why || t.result }));
+      for (const m of team.members) if (m.taskId === id) m.taskId = null;
+    }
+    if (closed.length) {
+      this.addLog(team, 'tarea', closed.map((t) => `T${t.id} ${state} por ${by}: ${clip(t.text, 200)}${why ? ` — ${why}` : ''}`).join('\n'), by);
+      this._boardChanged(team);
+      this._gitSoon(team); // its branch and worktree go, if everything in them is integrated
+    }
+    return closed;
+  }
+
+  /** From the apps: you close, drop or reopen a task, and the orchestrator hears it. */
+  editTask(teamId, { id, state, why } = {}) {
+    const team = this.byId(teamId);
+    if (!team) throw new Error('Equipo desconocido');
+    const t = this.ledger.task(team.id, id);
+    if (!t) throw new Error('Esa tarea no está en el tablero');
+    if (state === 'verificada' || state === 'descartada') this.closeTasks(team, [t.id], state, why ? String(why) : 'cerrada por el usuario', 'usuario');
+    else if (state === 'reabrir') { this.ledger.updateTask(team.id, t.id, { state: 'en curso' }); this._boardChanged(team); }
+    else throw new Error('Estado desconocido');
+    team.notes = [...(team.notes ?? []), `El usuario ha ${state === 'reabrir' ? 'reabierto' : state === 'verificada' ? 'dado por comprobada' : 'descartado'} la tarea T${t.id} (${t.owner}: «${clip(t.text, 120)}»)${why ? `: ${why}` : ''}`].slice(-6);
+    return {};
+  }
+
+  _boardChanged(team) {
+    team.boardAt = Date.now() / 1000;
+    this._writeBoard(team);
+    this._memoryChanged();
+  }
+
+  /**
+   * The board as a file in the project (.relevo/tablero.md, out of git): who has each task, its milestone, its
+   * state and its last delivery, for anyone who reads the project from outside (an outside auditor, you).
+   */
+  _writeBoard(team) {
+    const dir = this._decisionsDir(team);
+    if (!dir) return;
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      this._ignoreInGit(path.dirname(dir));
+      const day = (ts) => new Date(ts * 1000).toLocaleString('sv-SE').slice(0, 16); // local time, «2026-11-24 17:42»
+      const open = this.ledger.tasks(team.id, { open: true, limit: 100 });
+      const closed = this.ledger.tasks(team.id, { open: false, limit: 30 });
+      const loose = (this._git?.get(team.id)?.items ?? []).filter((it) => !it.task || !this.ledger.task(team.id, it.task));
+      const line = (t) => `- **T${t.id}** · ${t.owner} · ${t.state}${t.milestone ? ` · hito #${t.milestone}` : ''} · ${day(t.updated)}\n  ${t.text.replace(/\s+/g, ' ')}${t.result ? `\n  Última entrega: ${t.result.replace(/\s+/g, ' ')}` : ''}${this._gitItems(team, t.id).map((it) => `\n  Git: ${this._gitLabel(it)}${it.path ? ` (${it.path})` : ''}`).join('')}`;
+      const body = `# Tablero del equipo\n\nLo escribe Relevo en cada cambio: no lo edites. Objetivo: ${clip(String(team.goal ?? '').split('\n')[0], 200)}\n${milestonesBlock(team)}\n## Abiertas (${open.length})\n\n${open.map(line).join('\n') || '- ninguna'}\n\n## Cerradas hace poco\n\n${closed.map(line).join('\n') || '- ninguna'}\n\n${loose.length ? `## Ramas y worktrees sin tarea (${loose.length})\n\n${loose.map((it) => `- ${this._gitLabel(it)}${it.path ? ` (${it.path})` : ''}`).join('\n')}\n\n` : ''}Para escribir al orquestador desde fuera (un auditor externo): deja un fichero .md o .txt en ${path.join(dir, INBOX)}; Relevo se lo entrega y lo archiva.\n`;
+      fs.writeFileSync(path.join(dir, 'tablero.md'), body);
+    } catch (e) { this.host.log?.(`tablero a disco: ${e.message}`); }
+  }
+
+  /**
+   * The outside auditor's channel: each file left in .relevo/al-orquestador reaches the orchestrator as a review
+   * (as if you had written it), goes to the log, and moves to entregados/.
+   */
+  watchInbox(now = Date.now()) {
+    for (const team of this.list) {
+      if (team.status === 'done') continue;
+      const dir = this._decisionsDir(team);
+      if (!dir) continue;
+      const inbox = path.join(dir, INBOX);
+      let files = [];
+      try { files = fs.readdirSync(inbox, { withFileTypes: true }).filter((f) => f.isFile() && /\.(md|txt)$/i.test(f.name)).map((f) => f.name).sort(); } catch { continue; }
+      const lead = team.members.find((m) => m.role === 'orchestrator');
+      if (!lead) continue;
+      for (const name of files) {
+        const file = path.join(inbox, name);
+        try {
+          if (now - fs.statSync(file).mtimeMs < 3000) continue; // still being written
+          const text = fs.readFileSync(file, 'utf8').trim();
+          fs.mkdirSync(path.join(inbox, 'entregados'), { recursive: true });
+          fs.renameSync(file, path.join(inbox, 'entregados', `${new Date(now).toISOString().slice(0, 16).replace(/[:T]/g, '')}-${name}`));
+          if (!text) continue;
+          this.addLog(team, 'auditoria', text, 'Auditor externo', name);
+          this._deliver(team, lead, `${clip(text, 12_000)}\n\n(Del auditor externo del usuario. Trátalo como una indicación del usuario: contrástalo con el tablero y los hitos y corrige lo que tenga razón; si discrepas en algo importante, díselo al usuario con <relevo:pedir>.)`, { name: 'Auditor externo', role: 'auditor', label: 'auditoría' });
+          const lt = this._lead(team);
+          if (lt) { this.host._append(lt, { id: this.host._uuid(), kind: 'notice', text: `Revisión del auditor externo entregada (${name})` }); this.host._changed(lt); }
+        } catch (e) { this.host.log?.(`buzón del auditor: ${e.message}`); }
+      }
+    }
+  }
+
+  /** The board in one line at the end of a message to the orchestrator: whole when it changed, short if not. */
+  _boardLine(team) {
+    const open = this.ledger.tasks(team.id, { open: true });
+    if (!open.length) { team.boardSig = ''; return '\nTablero: ninguna tarea abierta.'; }
+    const sig = open.map((t) => `${t.id}:${t.state}`).join(',');
+    if (sig === team.boardSig) return `\nTablero sin cambios: ${open.length} abierta${open.length === 1 ? '' : 's'} (${open.map((t) => `T${t.id}`).join(', ')}).`;
+    team.boardSig = sig;
+    const rank = { hecha: 0, bloqueada: 1, 'en curso': 2, pendiente: 3 };
+    const list = [...open].sort((a, b) => rank[a.state] - rank[b.state] || a.id - b.id);
+    const line = (t) => `T${t.id} ${t.owner} ${t.state === 'hecha' ? 'HECHA, sin cerrar' : t.state}${t.milestone ? ` #${t.milestone}` : ''} «${clip(t.text, 70)}»`;
+    const toClose = list.filter((t) => t.state === 'hecha').length;
+    return `\nTablero (${open.length} abiertas${toClose ? `; ${toClose} hecha${toClose === 1 ? '' : 's'}: compruébalas y ciérralas con <relevo:cerrar>` : ''}): ${list.slice(0, BOARD_SHOWN).map(line).join(' | ')}${list.length > BOARD_SHOWN ? ` | … y ${list.length - BOARD_SHOWN} más` : ''}`;
+  }
+
+  /** The whole board, for a fresh session or the auditor: open tasks and the latest closed ones. */
+  boardText(team, closedN = 8) {
+    const open = this.ledger.tasks(team.id, { open: true, limit: 40 });
+    const closed = this.ledger.tasks(team.id, { open: false, limit: closedN });
+    if (!open.length && !closed.length) return '';
+    const line = (t) => `- T${t.id} ${t.owner} · ${t.state}${t.milestone ? ` · hito #${t.milestone}` : ''}: ${clip(t.text, 160)}${t.result ? ` → ${clip(t.result, 160)}` : ''}${this._gitItems(team, t.id).map((it) => ` [${this._gitLabel(it)}]`).join('')}`;
+    const loose = (this._git?.get(team.id)?.items ?? []).filter((it) => !it.task || !this.ledger.task(team.id, it.task));
+    return `Tablero, tareas abiertas (${open.length}):\n${open.length ? open.map(line).join('\n') : '- ninguna'}\n${closed.length ? `Cerradas hace poco:\n${closed.map(line).join('\n')}\n` : ''}${loose.length ? `Ramas y worktrees que no son de ninguna tarea (${loose.length}): ${loose.slice(0, 12).map((it) => `${this._gitLabel(it)}${it.path ? ` → ${it.path}` : ''}`).join(' · ')}\n` : ''}`;
+  }
+
+  /** The latest records (what was checked), for a fresh session. */
+  logText(team, n = 8) {
+    const list = this.ledger.recent(team.id, { kinds: ['registro'], limit: n });
+    if (!list.length) return '';
+    const day = (ts) => new Date(ts * 1000).toLocaleString('es-ES', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+    return `Registro reciente (lo comprobado; lo anterior, con <relevo:buscar>):\n${list.reverse().map((e) => `- ${day(e.ts)}: ${clip(e.text.replace(/\s+/g, ' '), 220)}`).join('\n')}\n`;
+  }
+
+  lastAuditText(team) {
+    const a = this.ledger.recent(team.id, { kinds: ['auditoria'], limit: 1 })[0];
+    if (!a) return '';
+    return `Última auditoría (${new Date(a.ts * 1000).toLocaleString('es-ES', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}${a.ref ? `, entera en ${a.ref}` : ''}):\n${clip(a.text, 1500)}\n`;
+  }
+
+  /** Into the ledger; records and audits also into .relevo/registro.md, where any agent can read or grep them. */
+  addLog(team, kind, text, by, ref = null) {
+    const clean = String(text ?? '').trim();
+    if (!clean) return null;
+    const e = this.ledger.log(team.id, { kind, by, ref, text: clip(clean, 12_000) });
+    if (kind === 'registro' || kind === 'auditoria') {
+      const dir = this._decisionsDir(team);
+      if (dir) {
+        try {
+          fs.mkdirSync(dir, { recursive: true });
+          this._ignoreInGit(path.dirname(dir));
+          const file = path.join(dir, 'registro.md');
+          const head = fs.existsSync(file) ? '' : '# Registro del equipo\n\nLo comprobado y lo hecho, en orden (lo escribe Relevo). Búscalo antes de repetir una prueba.\n\n';
+          const day = new Date(e.ts * 1000).toLocaleString('sv-SE').slice(0, 16);
+          const line = kind === 'auditoria' ? `Auditoría${ref ? ` (${ref})` : ''}: ${clip(clean.split('\n').find((l) => l.trim()) ?? '', 300)}` : clean.replace(/\s+/g, ' ');
+          fs.appendFileSync(file, `${head}- ${day} · ${by ?? ''}: ${line}\n`);
+        } catch (err) { this.host.log?.(`registro a disco: ${err.message}`); }
+      }
+    }
+    if (kind !== 'informe') this._memoryChanged();
+    return e;
+  }
+
+  /** What «buscar» finds: tasks, records, reports, old decisions and audits. */
+  search(teamId, q, limit = 12) {
+    const team = this.byId(teamId);
+    if (!team) throw new Error('Equipo desconocido');
+    return this.ledger.search(team.id, q, { limit });
+  }
+
+  searchText(team, q) {
+    const hits = this.ledger.search(team.id, q, { limit: 10 });
+    if (!hits.length) return `Nada en el tablero ni en el registro para «${clip(q, 80)}».`;
+    const day = (ts) => new Date(ts * 1000).toLocaleString('es-ES', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+    const KIND = { registro: 'registro', informe: 'informe', decision: 'decisión antigua', auditoria: 'auditoría', tarea: 'tablero' };
+    const lines = hits.map((x) => (x.task
+      ? `- T${x.task.id} (${x.task.owner}, ${x.task.state}, ${day(x.task.updated)}): ${clip(x.task.text, 200)}${x.task.result ? ` → ${clip(x.task.result, 200)}` : ''}`
+      : `- ${KIND[x.kind] ?? x.kind}${x.kind === 'decision' ? ` #${x.ref}` : x.ref ? ` ${x.ref}` : ''} · ${x.by ?? ''} · ${day(x.ts)}: ${clip(x.text.replace(/\s+/g, ' '), 400)}`));
+    return `Lo que hay sobre «${clip(q, 80)}» (lo más relevante primero):\n${lines.join('\n')}\n(Una decisión antigua que siga valiendo se recupera con <relevo:fijar>N</relevo:fijar>.)`;
+  }
+
+  /** The board and the log for the apps. */
+  boardFor(team) {
+    const view = (t) => ({ id: t.id, owner: t.owner, milestone: t.milestone ?? undefined, kind: t.kind, text: t.text, state: t.state, by: t.by ?? undefined, created: t.created, updated: t.updated, result: t.result ?? undefined });
+    return {
+      open: this.ledger.tasks(team.id, { open: true, limit: 60 }).map(view),
+      closed: this.ledger.tasks(team.id, { open: false, limit: 25 }).map(view),
+      log: this.ledger.recent(team.id, { kinds: ['registro'], limit: 40 }).map((e) => ({ id: e.id, ts: e.ts, by: e.by ?? undefined, text: e.text })),
+      audits: this.ledger.recent(team.id, { kinds: ['auditoria'], limit: 6 }).map((e) => ({ id: e.id, ts: e.ts, file: e.ref ?? undefined, text: clip(e.text, 8000) })),
+      git: (this._git?.get(team.id)?.items ?? []).map((it) => clean({ repo: it.repo, base: it.base, branch: it.branch, path: it.path, ahead: it.ahead, missing: it.missing, when: it.when, ready: it.ready, task: it.task && this.ledger.task(team.id, it.task) ? it.task : undefined })),
+    };
+  }
+
+  // MARK: - Task branches and worktrees
+
+  /**
+   * The team's branches and worktrees. Executors may make them, one per task with its number in the name
+   * (t12-audio, in .relevo/worktrees/t12-audio), and Relevo keeps them in hand: it ties each to its task, takes
+   * them away when the task closes with everything integrated (only what git takes away without losing anything),
+   * and tells the orchestrator what's left over: a closed task's unmerged work, two for one task, more than the
+   * team needs, or one without a task. The rest of the repository's branches (yours, main) it never touches.
+   */
+  _gitRepos(team) {
+    const project = this.host.projects().find((p) => p.id === team.projectId);
+    // The worktrees Relevo made for threads (the team's executors', yours): they have their own way out.
+    const own = new Set();
+    for (const t of this.host.threads.values()) if (t.worktree) { own.add(t.worktree.branch); own.add(path.resolve(t.worktree.path)); }
+    return { roots: [project?.path, ...(team.workDirs ?? [])].filter(Boolean), own };
+  }
+
+  /** Reads the team's task branches and worktrees from git; returns { repos: [{repo, base}], items }. */
+  gitScan(team) {
+    const { roots, own } = this._gitRepos(team);
+    const repos = [], items = [], seen = new Set();
+    for (const root of roots) {
+      let r = null;
+      // Every other worktree (an agent's, whatever its name), but only the branches named after a task: the
+      // rest of the repository's branches are not the team's to tidy.
+      try { r = gitops.taskRefs(root, (branch, dir) => !own.has(branch) && (dir ? !own.has(path.resolve(dir)) : !!taskOfRef(branch))); } catch {}
+      if (!r || seen.has(r.repo)) continue;
+      seen.add(r.repo);
+      repos.push({ repo: r.repo, base: r.base });
+      for (const it of r.items) {
+        const ready = this._gitReady?.get(`${r.repo}|${it.branch ?? it.path}`);
+        items.push({ ...it, repo: r.repo, base: r.base, task: taskOfRef(it.branch) || taskOfRef(it.path && path.basename(it.path)) || null, ...(ready ? { ready } : {}) });
+      }
+    }
+    const state = { at: Date.now() / 1000, repos, items };
+    (this._git ??= new Map()).set(team.id, state);
+    return state;
+  }
+
+  _gitItems(team, taskId) {
+    return (this._git?.get(team.id)?.items ?? []).filter((it) => it.task === taskId);
+  }
+
+  /** «rama t12-audio, 2 commits sin integrar, en su worktree» for the board. */
+  _gitLabel(it) {
+    return `${it.branch ? `rama ${it.branch}` : 'worktree'}${it.ahead ? `, ${it.ahead} commit${it.ahead === 1 ? '' : 's'} sin integrar` : it.branch ? ', integrada' : ''}${it.path ? `${it.missing ? ', su carpeta ya no existe' : ', con worktree'}` : ''}${it.ready ? `, lista para retirar (quedan ${it.ready} ficheros o carpetas que git ignora)` : ''}`;
+  }
+
+  /** Soon after a turn or a task closing: once at a time per team, and not more than every 20 s. */
+  _gitSoon(team, delay = 2000) {
+    (this._gitTimers ??= new Map());
+    if (this._gitTimers.has(team.id)) return;
+    const t = setTimeout(() => { this._gitTimers.delete(team.id); this.gitTidy(team).catch((e) => this.host.log?.(`ramas del equipo: ${e.message}`)); }, delay);
+    t.unref?.();
+    this._gitTimers.set(team.id, t);
+  }
+
+  /** Every few minutes, in case something changed outside a turn. */
+  watchGit(now = Date.now() / 1000) {
+    for (const team of this.list) {
+      if (team.status === 'done') continue;
+      const at = this._git?.get(team.id)?.at ?? 0;
+      if (now - at >= GIT_CHECK) this._gitSoon(team, 0);
+    }
+  }
+
+  /**
+   * Looks at the team's branches and worktrees: takes away the closed tasks' ones that are fully integrated and
+   * clean, and tells the orchestrator (once each) what's out of hand.
+   */
+  async gitTidy(team) {
+    if (this._gitBusy?.has(team.id)) return;
+    (this._gitBusy ??= new Set()).add(team.id);
+    try {
+      const { items } = this.gitScan(team);
+      const warned = new Set(team.gitWarned ?? []);
+      const warn = [];
+      const removed = [];
+      const once = (key, text) => { if (!warned.has(key)) { warned.add(key); warn.push(text); } };
+      for (const it of items) {
+        const task = it.task ? this.ledger.task(team.id, it.task) : null;
+        const key = `${it.repo}|${it.branch ?? it.path}`;
+        this._gitReady?.delete(key);
+        if (!task) { once(`suelta|${key}`, `${this._gitLabel(it)}${it.path ? ` (${it.path})` : ''} no es de ninguna tarea del tablero`); continue; }
+        if (!['verificada', 'descartada'].includes(task.state)) continue;
+        const lo = it.path && !it.missing ? await gitops.leftovers(it.path) : { dirty: 0, ignored: [] };
+        const dirty = lo.dirty;
+        if (it.ahead === 0 && dirty === 0) {
+          // Build outputs and the like (what git ignores) would go with the folder without anyone seeing them:
+          // that one you take away from the board, seeing what's in it.
+          if (lo.ignored.length) {
+            (this._gitReady ??= new Map()).set(key, lo.ignored.length);
+            if (!warned.has(`listo|${key}`)) {
+              warned.add(`listo|${key}`);
+              const lt = this._lead(team);
+              if (lt) { this.host._append(lt, { id: this.host._uuid(), kind: 'notice', text: `T${task.id}: su worktree ${it.path} está integrado y listo para retirar, pero tiene ${lo.ignored.length} ficheros o carpetas que git ignora (${lo.ignored.slice(0, 3).join(', ')}${lo.ignored.length > 3 ? '…' : ''}): retíralo desde el tablero cuando quieras` }); this.host._changed(lt); }
+            }
+            continue;
+          }
+          const r = await gitops.removeTaskRef(it.repo, { path: it.path, branch: it.branch });
+          if (r.ok) { removed.push(`T${task.id}: ${r.done.join(' y ')}`); continue; }
+          once(`cerrada|${key}`, `T${task.id} está cerrada, pero no he podido retirar ${this._gitLabel(it)}: ${clip(r.out.split('\n').filter(Boolean).at(-1) ?? '', 160)}`);
+          continue;
+        }
+        const left = [it.ahead ? `${it.ahead} commit${it.ahead === 1 ? '' : 's'} sin integrar` : '', dirty ? `${dirty} cambio${dirty === 1 ? '' : 's'} sin commit en su worktree` : ''].filter(Boolean).join(' y ');
+        once(`cerrada|${key}|${it.ahead}|${dirty}`, `T${task.id} está ${task.state}, pero su ${it.branch ? `rama ${it.branch}` : `worktree ${it.path}`} tiene ${left || 'trabajo que no sé comprobar'}: intégrala con <relevo:integrar tarea="${task.id}"/> si vale; si sobra, díselo al usuario: él la retira desde el tablero`);
+      }
+      // Two for one task, or more worktrees than the team has executors.
+      const open = items.filter((it) => it.task && ['pendiente', 'en curso', 'bloqueada', 'hecha'].includes(this.ledger.task(team.id, it.task)?.state));
+      const byTask = new Map();
+      for (const it of open) byTask.set(it.task, [...(byTask.get(it.task) ?? []), it]);
+      for (const [tid, list] of byTask) if (list.length > 1) once(`dos|${tid}|${list.length}`, `T${tid} tiene ${list.length} ramas o worktrees (${list.map((x) => x.branch ?? x.path).join(', ')}): una por tarea; que ${this.ledger.task(team.id, tid)?.owner ?? 'su responsable'} se quede con una`);
+      const wts = open.filter((it) => it.path && !it.missing).length;
+      const limit = Math.max(2, team.members.filter((m) => m.role === 'executor').length);
+      if (wts > limit) once(`muchos|${wts}`, `hay ${wts} worktrees de tareas abiertas para ${limit === 2 ? 'un equipo de este tamaño' : `${limit} ejecutores`} (máximo ${limit}): que se integren o cierren antes de abrir otros`);
+      team.gitWarned = [...warned].slice(-200);
+      this.gitScan(team);
+      if (removed.length) {
+        this.addLog(team, 'tarea', `Retirado al cerrarse la tarea, con todo integrado: ${removed.join('; ')}`, 'Relevo');
+        const lt = this._lead(team);
+        if (lt) { this.host._append(lt, { id: this.host._uuid(), kind: 'notice', text: `Ramas y worktrees retirados (tareas cerradas, todo integrado): ${removed.join('; ')}` }); this.host._changed(lt); }
+      }
+      if (warn.length) {
+        const loose = warn.filter((w) => w.includes('no es de ninguna tarea'));
+        const rest = warn.filter((w) => !loose.includes(w));
+        const lines = [...rest, ...(loose.length > 3 ? [`${loose.length} ramas o worktrees no son de ninguna tarea del tablero (${loose.slice(0, 3).map((w) => w.split(' no es de')[0]).join(' · ')}…): el usuario los ve en el tablero y puede retirarlos; las nuevas, con el número de su tarea (t12-…)`] : loose.map((w) => `${w}: las ramas y worktrees llevan el número de su tarea (t12-…)`))];
+        team.notes = [...(team.notes ?? []), `Ramas y worktrees: ${lines.join('. ')}.`].slice(-6);
+      }
+      this._writeBoard(team);
+      this._memoryChanged();
+    } finally { this._gitBusy.delete(team.id); }
+  }
+
+  /** <relevo:integrar tarea="12"/>: merges T12's branch into the base branch and takes it away. */
+  async integrateTask(team, taskId) {
+    const task = this.ledger.task(team.id, taskId);
+    if (!task) throw new Error(`T${taskId} no está en el tablero`);
+    const list = this.gitScan(team).items.filter((it) => it.task === task.id && it.branch);
+    if (!list.length) throw new Error(`T${task.id} no tiene ninguna rama (una rama de tarea lleva su número: t${task.id}-…)`);
+    if (list.length > 1) throw new Error(`T${task.id} tiene ${list.length} ramas (${list.map((x) => x.branch).join(', ')}): pide a ${task.owner} que se quede con una`);
+    const it = list[0];
+    const owner = team.members.find((m) => m.name === task.owner);
+    const ot = owner && this.host.threads.get(owner.threadId);
+    if (ot && this._busy(ot) && owner.taskId === task.id) throw new Error(`${task.owner} sigue trabajando en T${task.id}: integra cuando haya terminado`);
+    const dirty = it.path && !it.missing ? await gitops.dirtyCount(it.path) : 0;
+    if (dirty) throw new Error(`el worktree de T${task.id} (${it.path}) tiene ${dirty} cambio${dirty === 1 ? '' : 's'} sin commit: pide a ${task.owner} que haga commit o los descarte`);
+    if (!it.ahead) {
+      const r = await gitops.removeTaskRef(it.repo, { path: it.path, branch: it.branch });
+      return `La rama ${it.branch} de T${task.id} no tenía nada sin integrar${r.ok ? `; retirada (${r.done.join(' y ')})` : ''}.`;
+    }
+    await gitops.mergeBranch(it.repo, it.base, it.branch, `T${task.id}: ${clip(task.text.replace(/\s+/g, ' '), 60)} (integrado por Relevo)`);
+    const lo = it.path && !it.missing ? await gitops.leftovers(it.path) : { ignored: [] };
+    if (lo.ignored.length) {
+      (this._gitReady ??= new Map()).set(`${it.repo}|${it.branch}`, lo.ignored.length);
+      this.addLog(team, 'registro', `T${task.id}: rama ${it.branch} (${it.ahead} commit${it.ahead === 1 ? '' : 's'}) integrada en ${it.base}`, 'Relevo', `T${task.id}`);
+      this.gitScan(team);
+      this._memoryChanged();
+      return `Integrado: la rama ${it.branch} de T${task.id} (${it.ahead} commit${it.ahead === 1 ? '' : 's'}) está fusionada en ${it.base}. Su worktree queda hasta que el usuario lo retire desde el tablero, porque tiene ficheros que git ignora (${lo.ignored.slice(0, 3).join(', ')}${lo.ignored.length > 3 ? '…' : ''}).`;
+    }
+    const r = await gitops.removeTaskRef(it.repo, { path: it.path, branch: it.branch });
+    this.addLog(team, 'registro', `T${task.id}: rama ${it.branch} (${it.ahead} commit${it.ahead === 1 ? '' : 's'}) integrada en ${it.base}${r.ok ? '; rama y worktree retirados' : ''}`, 'Relevo', `T${task.id}`);
+    this.gitScan(team);
+    this._memoryChanged();
+    return `Integrado: la rama ${it.branch} de T${task.id} (${it.ahead} commit${it.ahead === 1 ? '' : 's'}) está fusionada en ${it.base}${r.ok ? `, y he retirado ${r.done.join(' y ')}` : `; no he podido retirarla: ${clip(r.out, 200)}`}.`;
+  }
+
+  /**
+   * From the apps: you take away one of the team's branches or worktrees (only one Relevo listed). Without
+   * `force`, only a branch that loses nothing; a worktree's folder, or anything not integrated, comes back with
+   * what would go (its files, size, first and last ones) for you to confirm.
+   */
+  async gitRemove(teamId, { repo, branch, path: dir, force = false } = {}) {
+    const team = this.byId(teamId);
+    if (!team) throw new Error('Equipo desconocido');
+    const it = this.gitScan(team).items.find((x) => x.repo === repo && (x.branch ?? null) === (branch ?? null) && (x.path ?? null) === (dir ?? null));
+    if (!it) throw new Error('Esa rama o worktree ya no está (o no es del equipo)');
+    const lo = it.path && !it.missing ? await gitops.leftovers(it.path) : { dirty: 0, ignored: [] };
+    const dirty = lo.dirty;
+    const loses = { dirty: dirty ?? null, ahead: it.ahead ?? null, ignored: lo.ignored.slice(0, 8), ignoredN: lo.ignored.length, path: it.path ?? null, branch: it.branch ?? null };
+    // Anything besides what's committed and integrated: you see what would go (the folder's files, how big, the
+    // first and last ones) and confirm.
+    if (!force && (dirty !== 0 || it.ahead !== 0 || lo.ignored.length || (it.path && !it.missing))) return { needsForce: true, ...loses, stats: it.path && !it.missing ? await gitops.folderStats(it.path) : null };
+    const r = await gitops.removeTaskRef(it.repo, { path: it.path, branch: it.branch }, { force });
+    if (!r.ok) return { needsForce: !force, ...loses, error: clip(r.out, 400) };
+    const what = r.done.join(' y ');
+    this.addLog(team, 'tarea', `El usuario ha retirado ${what}${force && (dirty || it.ahead) ? ` (perdiendo ${[it.ahead ? `${it.ahead} commits sin integrar` : '', dirty ? `${dirty} cambios sin commit` : ''].filter(Boolean).join(' y ')})` : ''}`, 'usuario', it.task ? `T${it.task}` : null);
+    team.notes = [...(team.notes ?? []), `El usuario ha retirado ${what}${it.task ? ` (T${it.task})` : ''}.`].slice(-6);
+    this.gitScan(team);
+    this._memoryChanged();
+    return { removed: r.done };
+  }
+
+  // MARK: - The auditor
+
+  /**
+   * The auditor: every few hours (or when you ask), a model with fresh eyes and read-only access reviews whether
+   * the team is moving towards the goal — the board, the milestones, the decisions, the log, git and the docs —
+   * and the orchestrator gets its review. What you've been doing by hand with an outside AI.
+   * audit: { accountId, model, effort, every (hours, 0 = only when asked) }
+   */
+  setAudit(team, audit) {
+    if (!audit || !audit.accountId) { if (team.audit) team.audit = { ...team.audit, every: 0, accountId: null }; return 'La auditoría periódica está desactivada'; }
+    const a = this.host.accountsById.get(String(audit.accountId).toUpperCase());
+    if (!a) throw new Error('La cuenta del auditor no existe');
+    const every = Math.max(0, Math.min(48, Number(audit.every) || 0));
+    const prev = team.audit ?? {};
+    team.audit = { ...prev, accountId: a.id, model: audit.model || 'default', effort: audit.effort || null, every, lastAt: prev.lastAt ?? Date.now() / 1000, lastTurns: prev.lastTurns ?? team.leadTurns ?? 0 };
+    return every ? `Un auditor (${a.name} · ${this.host._modelName(a, team.audit.model)}) revisará el rumbo del equipo cada ${every} h y te enviará su revisión` : null;
+  }
+
+  /** The auditor's thread (made the first time): read-only, outside the team, a fresh session for every audit. */
+  _auditThread(team) {
+    const h = this.host;
+    const a = team.audit;
+    let t = a.threadId && h.threads.get(a.threadId);
+    if (!t) {
+      t = h.createThread(team.projectId);
+      if (!t) return null;
+      t.title = `Auditor · ${clip(String(team.goal ?? '').split('\n')[0], 48)}`;
+      t.aiTitled = true;
+      a.threadId = t.id;
+      h._append(t, { id: h._uuid(), kind: 'notice', text: 'Hilo del auditor del equipo: cada auditoría empieza con una sesión nueva y solo lee (no cambia ficheros); su revisión va al orquestador' });
+    }
+    t.auditFor = team.id;
+    h.agents.get(t.id)?.close();
+    h.agents.delete(t.id);
+    Object.assign(t, { accountId: a.accountId, model: a.model || 'default', effort: a.effort || null, mode: 'plan', sessionId: null, sessions: {}, handoffPending: false });
+    return t;
+  }
+
+  runAudit(teamId, manual = false) {
+    const team = this.byId(teamId);
+    if (!team) throw new Error('Equipo desconocido');
+    if (!team.audit?.accountId) throw new Error('Elige antes el modelo del auditor en Editar equipo');
+    const old = team.audit.threadId && this.host.threads.get(team.audit.threadId);
+    if (old && this._busy(old)) throw new Error('El auditor ya está revisando');
+    const t = this._auditThread(team);
+    if (!t) throw new Error('No se ha podido crear el hilo del auditor');
+    team.audit.lastAt = Date.now() / 1000;
+    team.audit.lastTurns = team.leadTurns ?? 0;
+    this.host._startTurn(t, manual ? 'Auditoría del equipo (pedida por el usuario)' : 'Auditoría periódica del equipo', false, {
+      from: { name: 'Relevo', role: 'relevo', label: 'auditoría' },
+      prompt: this._auditPrompt(team),
+    });
+    this.host._saveState();
+    this.host._broadcastSnapshot();
+    return {};
+  }
+
+  /** Due audits: every N hours, and only if the team has done something since the last one. */
+  watchAudits(now = Date.now() / 1000) {
+    for (const team of this.list) {
+      const a = team.audit;
+      if (!a?.accountId || !(a.every > 0) || team.status !== 'active') continue;
+      if (now - (a.lastAt ?? 0) < a.every * 3600) continue;
+      if ((team.leadTurns ?? 0) - (a.lastTurns ?? 0) < 3) continue;
+      const t = a.threadId && this.host.threads.get(a.threadId);
+      if (t && this._busy(t)) continue;
+      try { this.runAudit(team.id); } catch (e) { this.host.log?.(`auditoría: ${e.message}`); }
+    }
+  }
+
+  _auditPrompt(team) {
+    const h = this.host;
+    const project = h.projects().find((p) => p.id === team.projectId);
+    const lead = team.members.find((m) => m.role === 'orchestrator');
+    const reports = team.members.filter((m) => m !== lead && m.lastReport).map((m) => `- ${m.name} (${new Date(m.lastReport.at * 1000).toLocaleString('es-ES', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}): ${m.lastReport.text}`);
+    const previous = this.ledger.recent(team.id, { kinds: ['auditoria'], limit: 1 })[0];
+    let git = '';
+    try { git = project?.path ? gitops.workState(project.path) ?? '' : ''; } catch {}
+    try { this.gitScan(team); } catch {}
+    try { const wts = project?.path ? gitops.worktrees?.(project.path) : null; if (wts?.length) git += `\n- Worktrees (${wts.length}): ${wts.slice(0, 20).map((w) => `${w.branch ?? '?'} → ${w.path}`).join(' · ')}`; } catch {}
+    return `<relevo_auditoria>
+Eres el AUDITOR de un equipo de agentes de IA (un orquestador que reparte el trabajo, ejecutores y quizá un investigador) que trabaja en ${project?.path ?? 'el proyecto'}, coordinado desde Relevo. No formas parte del equipo ni das órdenes: revisas con ojos frescos si el trabajo avanza hacia el objetivo y propones cómo reconducirlo. Solo lees: no modifiques ficheros, no hagas commits ni ejecutes nada que cambie el estado.
+
+Equipo:
+${team.members.map((m) => rosterLine(h, team, m)).join('\n')}
+
+Objetivo del usuario:
+${team.goal}
+${milestonesBlock(team)}${decisionsBlock(team)}
+${this.boardText(team, 15)}${reports.length ? `Último informe de cada agente:\n${reports.join('\n')}\n` : ''}${this.logText(team, 20)}${lead ? userSaidBlock(h, lead) : ''}${previous ? `\nTu auditoría anterior (${new Date(previous.ts * 1000).toLocaleString('es-ES', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}): comprueba qué se ha hecho de lo que proponías.\n${clip(previous.text, 3000)}\n` : ''}${git ? `\nGit en la carpeta del proyecto:\n${git}\n` : ''}
+Contrasta lo que dicen los informes con el repositorio (git log, docs/, PROGRESS.md, docs/reviews/, ${DECISIONS_DIR}/registro.md): no te fíes solo de lo que te cuentan.
+
+Tu respuesta es un único mensaje (unos 3.000-5.000 caracteres, sin tablas), para el orquestador:
+Conclusión: una línea: ¿el equipo avanza hacia el objetivo? ¿Qué es lo más importante ahora?
+1. Avance real desde la auditoría anterior, con evidencia (commits, ficheros, resultados comprobados).
+2. Desvíos: tareas o líneas de trabajo que no sirven al hito en curso, repetidas, o abandonadas a medias; tareas del tablero que deberían cerrarse.
+3. Riesgos y bloqueos, incluido lo que espera al usuario.
+4. Prioridades: de 3 a 5 acciones concretas, en orden, con quién debería hacerlas y cómo se comprueba cada una.
+5. Hitos: si conviene dividir, reordenar o cerrar alguno, propónlo.
+6. Orden: documentos de estado o seguimiento duplicados o desfasados, worktrees y ramas abandonados o ya integrados: qué se puede consolidar o limpiar (propónlo; no borres nada).
+</relevo_auditoria>`;
+  }
+
+  /** The audit is in: to the ledger, to a file in the project, to the orchestrator, and a notice for you. */
+  onAuditFinished(t, { messages = [], errors = [] } = {}) {
+    const team = this.byId(t.auditFor);
+    if (!team) return;
+    const h = this.host;
+    const report = withoutOrders(researchReport(messages)).trim();
+    const lead = team.members.find((m) => m.role === 'orchestrator');
+    const leadThread = this._lead(team);
+    if (!report) {
+      if (leadThread) { h._append(leadThread, { id: h._uuid(), kind: 'notice', text: `La auditoría no ha terminado bien${errors.length ? `: ${clip(errors.at(-1), 200)}` : ''}` }); h._changed(leadThread); }
+      return;
+    }
+    this.addLog(team, 'auditoria', report, 'Auditor');
+    const conclusion = clip((/^\s*[*_#>\- ]*conclusi[oó]n:?\**\s*(.+)$/im.exec(report)?.[1] ?? report.split('\n').find((l) => l.trim()) ?? '').trim(), 240);
+    if (lead) {
+      this._deliver(team, lead, `${clip(report, 7000)}\n\n(Revisión independiente del rumbo; la tienes también con <relevo:buscar>auditoría</relevo:buscar>. Contrástala con el tablero y los hitos: corrige prioridades, tareas e hitos en lo que tenga razón; si discrepas en algo importante, díselo al usuario con <relevo:pedir>.)`, { threadId: t.id, name: 'Auditor', role: 'auditor', label: 'auditoría' });
+    }
+    if (leadThread) this._attention(leadThread, 'auditoria', `Auditoría: ${conclusion}`);
+    h._saveState();
+    h._broadcastSnapshot();
+  }
+
   _lead(team) {
     const m = team.members.find((x) => x.role === 'orchestrator');
     return m ? this.host.threads.get(m.threadId) : null;
@@ -1634,10 +2374,12 @@ export class Teams {
         if (!o.body) return;
         // Answers saved because it hadn't asked anything go with its next task.
         const notes = to.stash?.length ? `(Notas anteriores del ${lead.name}: ${to.stash.join(' · ')})\n\n` : '';
-        const res = this._deliver(team, to, `${notes}${o.body}`, { ...from, label: o.type === 'urgente' ? 'urgente' : 'tarea' }, false, o.type === 'urgente');
+        const task = this._newTask(team, lead, to, o);
+        const res = this._deliver(team, to, `${notes}${o.body}`, { ...from, label: o.type === 'urgente' ? 'urgente' : 'tarea', taskId: task.id, lead: this._taskHead(team, task) }, false, o.type === 'urgente');
         // On the board only what really went out (not what bounced off someone busy or is held in a pause).
         if (res === 'sent' || res === 'queued') { to.stash = []; this._setTask(to, 'en curso', clip(o.body.replace(/\s+/g, ' '), 140)); }
-        return this._sent(team, o.type, to, o.body, res);
+        this._taskDelivered(team, to, task, res);
+        return this._sent(team, o.type, to, `T${task.id} ${o.body}`, res);
       }
       case 'investigar': {
         if (!researcher) { complain('Este equipo no tiene investigador: busca tú o pide al usuario que lo añada.'); return; }
@@ -1651,9 +2393,11 @@ export class Teams {
         const rt = h.threads.get(researcher.threadId);
         const unseen = rt?.teamPrimed ? (team.findings ?? []).filter((f) => f.id > (researcher.findingsSeen ?? 0)) : [];
         const extra = unseen.length ? `\n\n(Investigado desde tu última consulta:\n${unseen.map(findingLine).join('\n')})` : '';
-        const res = this._deliver(team, researcher, `${o.body}${extra}`, { ...from, label: researcher.reportFor ? `investigación para ${researcher.reportFor}` : 'investigación' });
+        const task = this._newTask(team, lead, researcher, o, 'investigar');
+        const res = this._deliver(team, researcher, `${o.body}${extra}`, { ...from, label: researcher.reportFor ? `investigación para ${researcher.reportFor}` : 'investigación', taskId: task.id, lead: this._taskHead(team, task) });
         if (res === 'sent' || res === 'queued') { researcher.findingsSeen = team.nextFinding ?? 0; this._setTask(researcher, 'en curso', clip(o.body.replace(/\s+/g, ' '), 140)); }
-        return this._sent(team, 'investigar', researcher, o.body, res);
+        this._taskDelivered(team, researcher, task, res);
+        return this._sent(team, 'investigar', researcher, `T${task.id} ${o.body}`, res);
       }
       case 'aprobar':
       case 'denegar':
@@ -1703,6 +2447,7 @@ export class Teams {
         if (to.awaitingAnswer || ['bloqueado', 'esperando'].includes(to.task?.state)) {
           const res = this._deliver(team, to, o.body, { ...from, label: 'respuesta' });
           to.awaitingAnswer = false;
+          if ((res === 'sent' || res === 'queued') && to.taskId && this.ledger.task(team.id, to.taskId)?.state === 'bloqueada') { this.ledger.updateTask(team.id, to.taskId, { state: 'en curso' }); this._boardChanged(team); }
           return this._sent(team, 'respuesta', to, o.body, res);
         }
         // It hadn't asked anything (an acknowledgement, a comment): opening a turn for that costs its whole
@@ -1713,6 +2458,16 @@ export class Teams {
         return this._sent(team, 'respuesta', to, o.body, 'stashed');
       }
       case 'integrar': {
+        const tid = Number(String(o.attrs?.tarea ?? (o.to ? '' : o.body) ?? '').match(/\d+/)?.[0]) || null;
+        if (tid) {
+          h._append(leadThread, { id: h._uuid(), kind: 'notice', text: `Integrando la rama de T${tid}…` });
+          h._changed(leadThread);
+          this.integrateTask(team, tid).then(
+            (said) => this._deliver(team, lead, said, { name: 'Relevo', role: 'relevo', label: 'integración' }),
+            (e) => this._deliver(team, lead, `No se ha podido integrar T${tid}: ${clip(e.message, 600)}.`, { name: 'Relevo', role: 'relevo', label: 'integración' }),
+          );
+          return;
+        }
         const to = o.to ? findMember(team, o.to) : null;
         const t = to && h.threads.get(to.threadId);
         if (!t?.worktree) { complain(`${to ? `${to.name} no trabaja en un worktree` : 'No sé de quién integrar el trabajo: pon de="…"'}: no hay nada que fusionar.`); return; }
@@ -1726,8 +2481,8 @@ export class Teams {
         return;
       }
       case 'hito': {
-        const m = this.addMilestone(team, o.body);
-        if (m) { h._append(leadThread, { id: h._uuid(), kind: 'notice', text: `Hito #${m.id}: ${clip(m.text, 200)}` }); h._changed(leadThread); }
+        const m = this.addMilestone(team, o.body, Number(o.attrs?.padre) || null);
+        if (m) { h._append(leadThread, { id: h._uuid(), kind: 'notice', text: `${m.parent ? `Subhito #${m.id} (del #${m.parent})` : `Hito #${m.id}`}: ${clip(m.text, 200)}` }); h._changed(leadThread); }
         return;
       }
       case 'hecho': {
@@ -1737,6 +2492,15 @@ export class Teams {
         return;
       }
       case 'decision': {
+        if (looksLikeRecord(o.body)) {
+          const e = this.addLog(team, 'registro', o.body, lead.name);
+          if (e) {
+            h._append(leadThread, { id: h._uuid(), kind: 'notice', text: `Al registro (no a decisiones): ${clip(o.body.replace(/\s+/g, ' '), 200)}` });
+            h._changed(leadThread);
+            if (!team.recordHinted) { team.recordHinted = true; team.notes = [...(team.notes ?? []), 'Lo que diste como decisión con un commit, un SHA, un despliegue o una recuperación lo he guardado en el registro: es un resultado, no un rumbo. Usa <relevo:registro> para eso y deja <relevo:decision> para lo que no debe reabrirse.'].slice(-6); }
+          }
+          return;
+        }
         const d = this.addDecision(team, o.body, lead.name);
         if (d) {
           lead.decisionsSeen = d.id;
@@ -1755,6 +2519,37 @@ export class Teams {
       }
       case 'pedir': {
         if (o.body) this._attention(leadThread, 'pedir', o.body);
+        return;
+      }
+      case 'cerrar': {
+        const ref = o.attrs?.tarea ?? o.attrs?.id ?? (ONLY_IDS.test(o.body) ? o.body : o.to);
+        const ids = [...new Set(String(ref ?? '').match(/\d+/g)?.map(Number) ?? [])];
+        if (!ids.length) { complain('Di qué tarea cierras: <relevo:cerrar tarea="12">cómo se ha comprobado</relevo:cerrar>.'); return; }
+        const drop = /^descart/i.test(String(o.attrs?.estado ?? '')) || o.attrs?.descartada === true;
+        const why = ONLY_IDS.test(o.body) ? '' : clip(o.body.replace(/\s+/g, ' '), 600);
+        const closed = this.closeTasks(team, ids, drop ? 'descartada' : 'verificada', why, lead.name);
+        if (closed.length) { h._append(leadThread, { id: h._uuid(), kind: 'notice', text: `${closed.map((t) => `T${t.id}`).join(', ')} ${drop ? 'descartada' : 'verificada'}${closed.length > 1 ? 's' : ''}${why ? `: ${clip(why, 160)}` : ''}` }); h._changed(leadThread); }
+        const missing = ids.filter((id) => !closed.some((t) => t.id === id) && !this.ledger.task(team.id, id));
+        if (missing.length) complain(`No hay ninguna tarea ${missing.map((id) => `T${id}`).join(', ')} en el tablero.`);
+        return;
+      }
+      case 'registro': {
+        const e = this.addLog(team, 'registro', o.body, lead.name);
+        if (e) { h._append(leadThread, { id: h._uuid(), kind: 'notice', text: `Registro: ${clip(o.body.replace(/\s+/g, ' '), 200)}` }); h._changed(leadThread); }
+        return;
+      }
+      case 'buscar': {
+        const q = o.body || o.to;
+        if (!q) return;
+        this._deliver(team, lead, this.searchText(team, q), { name: 'Relevo', role: 'relevo', label: 'búsqueda' });
+        return;
+      }
+      case 'fijar':
+      case 'soltar': {
+        const on = o.type === 'fijar';
+        const changed = this.pinDecisions(team, o.body || o.to, on);
+        if (changed.length) { h._append(leadThread, { id: h._uuid(), kind: 'notice', text: `Decisión ${on ? 'fijada' : 'soltada'}: ${changed.map((d) => `#${d.id}`).join(', ')}` }); h._changed(leadThread); }
+        else if (on) complain(`No encuentro la decisión ${o.body || o.to} (ni en las antiguas)${(team.decisions ?? []).filter((d) => d.pinned).length >= PINNED_MAX ? `, o ya hay ${PINNED_MAX} fijadas: suelta alguna` : ''}.`);
         return;
       }
       case 'fin': {
@@ -1793,7 +2588,7 @@ export class Teams {
       text = `${team.notes.map((n) => `(${n})`).join('\n')}\n\n${text}`;
       team.notes = [];
     }
-    const header = `[${from.name}${from.label ? ` · ${from.label}` : ''}]`;
+    const header = `[${from.name}${from.label ? ` · ${from.label}` : ''}${from.taskId ? ` T${from.taskId}` : ''}]`;
     // Decisions taken since this agent last heard them (unless its next message brings the whole preamble).
     let fresh = '';
     const seen = member.decisionsSeen ?? 0;
@@ -1805,8 +2600,8 @@ export class Teams {
     // Everyone sees where the others stand: the orchestrator so it doesn't pile orders on someone busy, the rest
     // so they don't wait on someone out of quota or ask someone who is stuck.
     const status = `\n\n(${this._status(team, member)})`;
-    const prompt = `${fresh}${header}\n${text}${status}`;
-    const meta = { from: { threadId: from.threadId ?? null, name: from.name, role: from.role, label: from.label ?? null } };
+    const prompt = `${fresh}${header}\n${text}${from.lead ? `\n\n${from.lead.trim()}` : ''}${status}`;
+    const meta = { from: { threadId: from.threadId ?? null, name: from.name, role: from.role, label: from.taskId && from.label ? `${from.label} T${from.taskId}` : from.label ?? null } };
     const r = h._rt(t);
     if (urgent && r.isRunning && member.role !== 'orchestrator') {
       h.sendNow(t, text, { ...meta, prompt: `${prompt}\n\n(Esto interrumpe lo que estabas haciendo: atiéndelo primero.)` });
@@ -1908,7 +2703,10 @@ export class Teams {
       const prev = member.parked;
       const old = prev?.outId && team.outbox?.find((x) => x.id === prev.outId);
       if (old) { old.result = 'replaced'; old.shown = false; }
+      if (prev) this._dropParkedTask(team, prev, 'sustituida por otra orden antes de entregarse');
       member.parked = { text, from, label: from.label ?? null, at: Date.now() / 1000, offered: false };
+      const mt = h.threads.get(member.threadId);
+      if (mt) h._changed(mt); // its chat shows the pending order, to send it now if you want
       if (lead) {
         h._append(lead, { id: h._uuid(), kind: 'notice', text: `Pendiente para ${member.name} (está a mitad de un turno): se le entrega cuando termine, salvo que al leer su informe le des otra orden` });
         h._changed(lead);
@@ -1937,19 +2735,58 @@ export class Teams {
       if (sent.some((x) => x.to === m.name && x.result !== 'parked' && ['tarea', 'urgente', 'investigar', 'respuesta'].includes(x.type))) {
         const e = team.outbox?.find((x) => x.id === m.parked.outId);
         if (e) { e.result = 'dropped'; e.shown = false; }
+        this._dropParkedTask(team, m.parked, 'sustituida por otra orden antes de entregarse');
         m.parked = null;
+        const pt = this.host.threads.get(m.threadId);
+        if (pt) this.host._changed(pt);
       } else if (m.parked.offered) this._deliverParked(team, m);
     }
+  }
+
+  /**
+   * You, from the agent's own chat: its pending order from the orchestrator goes now (interrupting what it's
+   * doing), or is dropped. The orchestrator hears which, so it doesn't give it again or wait for it.
+   */
+  parkedAction(thread, action) {
+    const team = this.of(thread);
+    const m = this.memberOf(thread);
+    const p = m?.parked;
+    if (!team || !p) throw new Error('Ya no hay ninguna orden pendiente para este agente');
+    const h = this.host;
+    m.parked = null;
+    const e = team.outbox?.find((x) => x.id === p.outId);
+    const what = clip(p.text.replace(/\s+/g, ' '), 140);
+    if (action === 'send') {
+      const res = this._deliver(team, m, p.text, p.from, false, true);
+      if (e) { e.result = res; e.shown = false; }
+      if ((res === 'sent' || res === 'queued') && ['tarea', 'urgente'].includes(p.label)) this._setTask(m, 'en curso', clip(p.text.replace(/\s+/g, ' '), 140));
+      const tid = taskIdOf(p);
+      if (tid && (res === 'sent' || res === 'queued')) { m.taskId = tid; this.ledger.updateTask(team.id, tid, { state: 'en curso' }); this._boardChanged(team); }
+      team.notes = [...(team.notes ?? []), `El usuario ha entregado ya a ${m.name} tu orden pendiente («${what}»), interrumpiendo lo que hacía: no se la repitas.`].slice(-6);
+    } else {
+      if (e) { e.result = 'dropped'; e.shown = false; }
+      this._dropParkedTask(team, p, 'descartada por el usuario antes de entregarse');
+      team.notes = [...(team.notes ?? []), `El usuario ha descartado tu orden pendiente para ${m.name} («${what}»): no se le entregará.`].slice(-6);
+    }
+    const lead = this._lead(team);
+    if (lead) { h._append(lead, { id: h._uuid(), kind: 'notice', text: `${action === 'send' ? 'Enviada ya' : 'Descartada'} por ti la orden pendiente para ${m.name}` }); h._changed(lead); }
+    h._changed(thread);
+    h._saveState();
+    return {};
   }
 
   _deliverParked(team, m) {
     const p = m.parked;
     if (!p) return;
     m.parked = null;
+    const pt = this.host.threads.get(m.threadId);
+    if (pt) this.host._changed(pt);
     const res = this._deliver(team, m, p.text, p.from);
     const e = team.outbox?.find((x) => x.id === p.outId);
     if (e && res !== 'parked') { e.result = res; e.shown = false; }
     if ((res === 'sent' || res === 'queued') && ['tarea', 'urgente'].includes(p.label)) this._setTask(m, 'en curso', clip(p.text.replace(/\s+/g, ' '), 140));
+    const tid = taskIdOf(p);
+    if (tid && (res === 'sent' || res === 'queued')) { m.taskId = tid; this.ledger.updateTask(team.id, tid, { state: 'en curso' }); this._boardChanged(team); }
     this.host.log?.(`equipo: orden pendiente → ${m.name}: ${res}`);
   }
 
@@ -2006,7 +2843,7 @@ export class Teams {
    * Where the team stands, as one member reads it (everyone but itself). The orchestrator also sees what waits
    * for each one and what became of the orders it sent.
    */
-  _status(team, self) {
+  _status(team, self, { board = true } = {}) {
     const lead = self?.role === 'orchestrator';
     const parts = team.members.filter((m) => m !== self).map((m) => {
       const s = this._memberState(team, m);
@@ -2021,7 +2858,7 @@ export class Teams {
     const paused = team.status === 'paused' ? (lead ? `EQUIPO EN PAUSA: tus órdenes se retienen sin entregar hasta que el usuario las revise (${team.held.length} retenidas). ` : 'EQUIPO EN PAUSA. ') : '';
     const news = lead ? this._outboxNews(team) : [];
     const out = news.length ? `\nQué ha sido de tus mensajes: ${news.join(' | ')}` : '';
-    return `${paused}Estado del equipo: ${parts.join(' | ')}${out}`;
+    return `${paused}Estado del equipo: ${parts.join(' | ')}${lead && board ? this._boardLine(team) : ''}${out}`;
   }
 }
 
