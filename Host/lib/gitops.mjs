@@ -357,12 +357,21 @@ export function taskRefs(cwd, pick) {
     const key = w.branch ?? `@${w.path}`;
     items.set(key, { ...(items.get(key) ?? { branch: w.branch, when: null }), path: w.path, missing: w.missing || undefined });
   }
+  // Integrated means in the main checkout's branch or in an integration branch (integration/me1): a team that
+  // gathers its work there before it reaches main has its task branches integrated all the same.
+  const heads = git(cwd, ['for-each-ref', 'refs/heads', '--format=%(refname:short)']).out.split('\n').filter(Boolean);
+  const targets = [...new Set([base, ...heads.filter((b) => /^integra(tion|cion|ción)\//i.test(b))].filter(Boolean))];
   for (const it of items.values()) {
-    if (!it.branch || !base) continue;
-    const n = git(cwd, ['rev-list', '--count', `${base}..${it.branch}`]);
-    it.ahead = n.ok ? Number(n.out.trim()) || 0 : null;
+    if (!it.branch || !targets.length) continue;
+    let best = null;
+    for (const t of targets) {
+      const n = git(cwd, ['rev-list', '--count', `${t}..${it.branch}`]);
+      if (n.ok && (best === null || Number(n.out.trim()) < best.n)) best = { n: Number(n.out.trim()) || 0, t };
+    }
+    it.ahead = best ? best.n : null;
+    if (best && best.n === 0 && best.t !== base) it.into = best.t;
   }
-  return { repo: main.path, base, items: [...items.values()] };
+  return { repo: main.path, base, integration: targets.filter((t) => t !== base), items: [...items.values()] };
 }
 
 /** How many files a worktree has changed and not committed (null if git can't tell). */
@@ -407,7 +416,9 @@ export async function folderStats(dir, cap = 300_000) {
  * Takes away a task's worktree and branch. Without `force`, only what git can take away without losing anything:
  * a clean worktree (git refuses otherwise) and a branch already merged (`branch -d`).
  */
-export async function removeTaskRef(repo, { path: dir, branch }, { force = false } = {}) {
+export async function removeTaskRef(repo, { path: dir, branch, into }, { force = false } = {}) {
+  // Merged into an integration branch, not the checked-out one: git's -d would refuse; -D after checking it here.
+  const merged = !!into && git(repo, ['merge-base', '--is-ancestor', branch, into]).ok;
   const done = [];
   if (dir) {
     // Never the main checkout, a disk's root or a relative path: only a worktree git listed elsewhere.
@@ -419,7 +430,7 @@ export async function removeTaskRef(repo, { path: dir, branch }, { force = false
     done.push(`worktree ${dir}`);
   }
   if (branch) {
-    const r = await gitAsync(repo, ['branch', force ? '-D' : '-d', branch]);
+    const r = await gitAsync(repo, ['branch', force || merged ? '-D' : '-d', branch]);
     if (!r.ok) return { ok: false, done, out: r.out };
     done.push(`rama ${branch}`);
   }

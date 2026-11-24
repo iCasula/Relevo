@@ -292,7 +292,7 @@ ${executors.some((e) => host.threads.get(e.threadId)?.worktree) ? '<relevo:integ
 <relevo:buscar>palabras clave</relevo:buscar>  Relevo te responde con lo que encuentre en el tablero, el registro, los informes y las decisiones antiguas. Búscalo antes de repetir una prueba, reabrir un tema o pedir algo que quizá ya se hizo.
 
 Tablero: cada tarea que das queda en el tablero de Relevo con un número (T12), su responsable, su hito y su estado (pendiente, en curso, bloqueada, hecha). Cuando el agente informa «hecho», la tarea queda HECHA a la espera de que la compruebes: ciérrala con <relevo:cerrar tarea="12">cómo se ha comprobado</relevo:cerrar>, o con <relevo:cerrar tarea="12" estado="descartada">por qué ya no hace falta</relevo:cerrar> si la sustituyes o deja de servir. Cada tarea lleva hito="N" (el hito o subhito al que sirve): si no encaja en ninguno, o falta ese hito o la tarea sobra; sin hito=, Relevo la apunta al hito en curso. Al final de cada mensaje ves las tareas abiertas: no dejes abiertas las que ya no sigues, y no des una tarea que ya está abierta para otro.
-Ramas y worktrees: un ejecutor puede abrir una rama o un worktree para su tarea (uno por tarea, con su número: t12-…). Relevo los ata a su tarea y, cuando la cierras, los retira si todo está integrado; si queda trabajo sin integrar te lo dice. Cierra o integra las tareas terminadas: así no se acumulan.
+Ramas y worktrees: un ejecutor puede abrir una rama o un worktree para su tarea (uno por tarea, con su número: t12-…). Relevo los ata a su tarea y, cuando la cierras, los retira si todo está integrado (en la rama principal o en una rama integration/…); si queda trabajo sin integrar te lo dice. Cierra o integra las tareas terminadas: así no se acumulan.
 Auditor: si te llega «[Auditor · auditoría]», es una revisión independiente del rumbo hecha con ojos frescos. Contrástala con el tablero y los hitos y corrige lo que tenga razón (prioridades, tareas, hitos); si discrepas en algo importante, díselo al usuario con <relevo:pedir>.
 
 <relevo:urgente para="${executors[0]?.name ?? 'Ejecutor 1'}">…</relevo:urgente>  solo si lo que está haciendo ahora es claramente erróneo o ya no sirve: interrumpe su turno.
@@ -350,7 +350,7 @@ ${roster}
 - Si te bloqueas o necesitas una decisión, termina tu respuesta con <relevo:pregunta>tu duda concreta</relevo:pregunta> y espera la respuesta.${researcher ? ` Si llevas dos intentos fallidos con el mismo problema, pregunta: el ${researcher.name} puede buscar soluciones que ya existan.` : ''}
 - Otros agentes pueden estar trabajando en el mismo proyecto: toca solo lo que te pidan.
 - No crees documentos de estado, seguimiento ni informes en el repositorio salvo que tu tarea lo pida: tu informe final llega al orquestador y Relevo lo guarda.
-- Si tu tarea lo necesita, puedes trabajar en una rama o un worktree propios: uno por tarea y con su número en el nombre, p. ej. \`git worktree add .relevo/worktrees/t12-audio -b t12-audio\` desde la carpeta del proyecto (.relevo no entra en git). Haz commits en ella y di en tu informe la rama y si queda lista para integrar. No la borres ni la fusiones tú salvo que te lo pidan: al cerrarse la tarea con todo integrado, Relevo retira la rama y el worktree. Nada de ramas ni worktrees sin número de tarea.
+- Si tu tarea lo necesita, puedes trabajar en una rama o un worktree propios: uno por tarea y con su número en el nombre (t12-audio, o con prefijo: e1/t12-audio), p. ej. \`git worktree add .relevo/worktrees/t12-audio -b t12-audio\` desde la carpeta del proyecto (.relevo no entra en git). Haz commits en ella y di en tu informe la rama y si queda lista para integrar. No la borres ni la fusiones tú salvo que te lo pidan: al cerrarse la tarea con todo integrado, Relevo retira la rama y el worktree. Nada de ramas ni worktrees sin número de tarea.
 - Cada mensaje del equipo trae al final el estado de los demás (trabajando, en segundo plano, libre, BLOQUEADO esperando al usuario, SIN CUOTA y cuándo retoma): no esperes una respuesta de quien no puede darla; dilo en tu informe.
 ${notesOf(member)}${decisionsBlock(team)}${taskLine}${carried}</relevo_equipo>
 
@@ -2032,7 +2032,7 @@ export class Teams {
 
   /** «rama t12-audio, 2 commits sin integrar, en su worktree» for the board. */
   _gitLabel(it) {
-    return `${it.branch ? `rama ${it.branch}` : 'worktree'}${it.ahead ? `, ${it.ahead} commit${it.ahead === 1 ? '' : 's'} sin integrar` : it.branch ? ', integrada' : ''}${it.path ? `${it.missing ? ', su carpeta ya no existe' : ', con worktree'}` : ''}${it.ready ? `, lista para retirar (quedan ${it.ready} ficheros o carpetas que git ignora)` : ''}`;
+    return `${it.branch ? `rama ${it.branch}` : 'worktree'}${it.ahead ? `, ${it.ahead} commit${it.ahead === 1 ? '' : 's'} sin integrar` : it.branch ? `, integrada${it.into ? ` en ${it.into}` : ''}` : ''}${it.path ? `${it.missing ? ', su carpeta ya no existe' : ', con worktree'}` : ''}${it.ready ? `, lista para retirar (quedan ${it.ready} ficheros o carpetas que git ignora)` : ''}`;
   }
 
   /** Soon after a turn or a task closing: once at a time per team, and not more than every 20 s. */
@@ -2086,7 +2086,7 @@ export class Teams {
             }
             continue;
           }
-          const r = await gitops.removeTaskRef(it.repo, { path: it.path, branch: it.branch });
+          const r = await gitops.removeTaskRef(it.repo, { path: it.path, branch: it.branch, into: it.into });
           if (r.ok) { removed.push(`T${task.id}: ${r.done.join(' y ')}`); continue; }
           once(`cerrada|${key}`, `T${task.id} está cerrada, pero no he podido retirar ${this._gitLabel(it)}: ${clip(r.out.split('\n').filter(Boolean).at(-1) ?? '', 160)}`);
           continue;
@@ -2134,7 +2134,7 @@ export class Teams {
     const dirty = it.path && !it.missing ? await gitops.dirtyCount(it.path) : 0;
     if (dirty) throw new Error(`el worktree de T${task.id} (${it.path}) tiene ${dirty} cambio${dirty === 1 ? '' : 's'} sin commit: pide a ${task.owner} que haga commit o los descarte`);
     if (!it.ahead) {
-      const r = await gitops.removeTaskRef(it.repo, { path: it.path, branch: it.branch });
+      const r = await gitops.removeTaskRef(it.repo, { path: it.path, branch: it.branch, into: it.into });
       return `La rama ${it.branch} de T${task.id} no tenía nada sin integrar${r.ok ? `; retirada (${r.done.join(' y ')})` : ''}.`;
     }
     await gitops.mergeBranch(it.repo, it.base, it.branch, `T${task.id}: ${clip(task.text.replace(/\s+/g, ' '), 60)} (integrado por Relevo)`);
@@ -2146,7 +2146,7 @@ export class Teams {
       this._memoryChanged();
       return `Integrado: la rama ${it.branch} de T${task.id} (${it.ahead} commit${it.ahead === 1 ? '' : 's'}) está fusionada en ${it.base}. Su worktree queda hasta que el usuario lo retire desde el tablero, porque tiene ficheros que git ignora (${lo.ignored.slice(0, 3).join(', ')}${lo.ignored.length > 3 ? '…' : ''}).`;
     }
-    const r = await gitops.removeTaskRef(it.repo, { path: it.path, branch: it.branch });
+    const r = await gitops.removeTaskRef(it.repo, { path: it.path, branch: it.branch, into: it.into });
     this.addLog(team, 'registro', `T${task.id}: rama ${it.branch} (${it.ahead} commit${it.ahead === 1 ? '' : 's'}) integrada en ${it.base}${r.ok ? '; rama y worktree retirados' : ''}`, 'Relevo', `T${task.id}`);
     this.gitScan(team);
     this._memoryChanged();
@@ -2169,7 +2169,7 @@ export class Teams {
     // Anything besides what's committed and integrated: you see what would go (the folder's files, how big, the
     // first and last ones) and confirm.
     if (!force && (dirty !== 0 || it.ahead !== 0 || lo.ignored.length || (it.path && !it.missing))) return { needsForce: true, ...loses, stats: it.path && !it.missing ? await gitops.folderStats(it.path) : null };
-    const r = await gitops.removeTaskRef(it.repo, { path: it.path, branch: it.branch }, { force });
+    const r = await gitops.removeTaskRef(it.repo, { path: it.path, branch: it.branch, into: it.into }, { force });
     if (!r.ok) return { needsForce: !force, ...loses, error: clip(r.out, 400) };
     const what = r.done.join(' y ');
     this.addLog(team, 'tarea', `El usuario ha retirado ${what}${force && (dirty || it.ahead) ? ` (perdiendo ${[it.ahead ? `${it.ahead} commits sin integrar` : '', dirty ? `${dirty} cambios sin commit` : ''].filter(Boolean).join(' y ')})` : ''}`, 'usuario', it.task ? `T${it.task}` : null);

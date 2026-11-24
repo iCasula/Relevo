@@ -29,7 +29,7 @@ function taskWorktree(dir, name, commits = 1) {
   const wt = path.join(dir, '.relevo', 'worktrees', name);
   git(dir, 'worktree', 'add', '-q', wt, '-b', name);
   for (let i = 0; i < commits; i++) {
-    fs.writeFileSync(path.join(wt, `${name}-${i}.txt`), `${i}\n`);
+    fs.writeFileSync(path.join(wt, `${name.replace(/\//g, "_")}-${i}.txt`), `${i}\n`);
     git(wt, 'add', '.');
     git(wt, 'commit', '-q', '-m', `${name} ${i}`);
   }
@@ -170,4 +170,22 @@ test('build outputs (what git ignores) are never deleted on their own: the workt
   assert.ok(asked.stats.first.some((f) => f.endsWith('juego.nro')) || asked.stats.last.some((f) => f.endsWith('juego.nro')));
   assert.deepEqual((await teams.gitRemove(team.id, { repo: dir, branch: 't1-compila', path: wt, force: true })).removed.length, 2);
   assert.equal(fs.existsSync(wt), false);
+});
+
+test('a task branch merged into an integration branch (integration/me1) counts as integrated, and goes when its task closes', async () => {
+  const dir = repo();
+  const { teams, team, task } = stand(dir);
+  const t1 = task('arregla el GC');
+  git(dir, 'branch', 'integration/me1');
+  const wt = taskWorktree(dir, 'e1/t1-gc', 1);
+  git(dir, 'worktree', 'add', '-q', path.join(dir, '.relevo', 'int'), 'integration/me1');
+  git(path.join(dir, '.relevo', 'int'), 'merge', '-q', '--no-ff', '-m', 'integra T1', 'e1/t1-gc');
+  const it = teams.gitScan(team).items.find((x) => x.branch === 'e1/t1-gc');
+  assert.deepEqual([it.task, it.ahead, it.into], [1, 0, 'integration/me1']);
+  assert.match(teams.boardText(team), /rama e1\/t1-gc, integrada en integration\/me1/);
+  teams.closeTasks(team, [t1.id], 'verificada', 'ok', 'Orquestador');
+  await teams.gitTidy(team);
+  assert.equal(fs.existsSync(wt), false);
+  assert.equal(branches(dir).includes('e1/t1-gc'), false);
+  assert.equal(branches(dir).includes('integration/me1'), true);
 });
