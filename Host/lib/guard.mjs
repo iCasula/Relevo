@@ -62,6 +62,34 @@ const USER_ONLY = new Set(['formateo de disco', 'git push --force']);
 const DELETE_VERB = /^(?:sudo\s+)?(?:rm|rmdir|del|erase|rd|Remove-Item|ri|unlink|shred|truncate)\b/i;
 const WRITE_VERB = /^(?:sudo\s+)?(?:mv|move|Move-Item|mi|cp|copy|Copy-Item|cpi|xcopy|robocopy|New-Item|ni|Set-Content|sc|Add-Content|ac|Out-File|tee|mkdir|md|touch|install|ln|rsync|dd|Expand-Archive|tar|unzip|7z|git\s+clone)\b/i;
 
+/** A push with --force-with-lease (and no plain force) of named branches, none of them main or the integration one. */
+function leasePush(part) {
+  const m = /(?:^|[\s(])git\s+push\b(.*)$/.exec(part);
+  if (!m) return false;
+  const args = words(m[1]);
+  if (!args.some((a) => a === '--force-with-lease' || a.startsWith('--force-with-lease='))) return false;
+  if (args.some((a) => a === '--force' || a === '--mirror' || a === '--all' || a === '--delete' || a.startsWith('+') || /^-[a-zA-Z]*[fd]/.test(a))) return false;
+  const refs = args.filter((a) => !a.startsWith('-'));
+  if (refs.length < 2) return false; // which branch it would rewrite isn't in the command
+  return !refs.slice(1).some((r) => /^(?:main|master|integration(?:\/.*)?|HEAD)$/i.test(r.replace(/^.*:/, '').replace(/^refs\/heads\//, '')));
+}
+
+/**
+ * A folder you allow a team to work in besides the project (e.g. its copies in WSL): absolute, and never a disk's
+ * root, /, /mnt, /home or a single top folder. Null if it doesn't qualify.
+ */
+export function workDir(p) {
+  const s = String(p ?? '').trim().replace(/^["']|["']$/g, '').replace(/[\\/]+$/, '');
+  if (!s || /[\0\n*?]/.test(s) || /(?:^|[\\/])\.\.(?:[\\/]|$)/.test(s)) return null;
+  if (/^[A-Za-z]:[\\/]/.test(s)) return s.split(/[\\/]/).filter(Boolean).length >= 2 ? s : null;
+  if (s.startsWith('/')) {
+    const seg = s.split('/').filter(Boolean);
+    if (seg[0] === 'mnt' && /^[a-z]$/i.test(seg[1] ?? '')) return seg.length >= 3 ? s : null;
+    return seg.length >= 2 && !['mnt', 'proc', 'sys', 'dev'].includes(seg[0]) ? s : null;
+  }
+  return null;
+}
+
 /** Paths that look absolute in a command: C:\…, C:/…, /mnt/c/…, /…, ~/… (quotes stripped). */
 function absolutePaths(text) {
   const out = [];
@@ -125,7 +153,8 @@ function words(text) {
   return [...String(text).matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)].map((m) => m[1] ?? m[2] ?? m[3]);
 }
 
-const isRoot = (p, platform) => { const n = normalize(p, platform); return /^[a-z]:\\$/.test(n) || n === '/' || /^\/mnt(?:\/[a-z])?$/.test(String(p)); };
+// «/» is a root on Windows too: through WSL it's the whole Linux disk.
+const isRoot = (p, platform) => { const n = normalize(p, platform); return /^[a-z]:\\$/.test(n) || n === '/' || /^\/+$/.test(String(p).trim()) || /^\/mnt(?:\/[a-z])?\/?$/.test(String(p).trim()); };
 
 /**
  * The folders an agent may write in by itself: the project, its worktree, the temp folders and Relevo's data
@@ -144,24 +173,36 @@ export function checkCommand(command, { roots = [], cwd = null, platform = proce
   // Each part is judged from the folder the command's own «cd» left it in (a wrapper's «cd» stays inside it).
   let here = cwd;
   const parts = splitCommand(cmd).flatMap((p) => {
-    const inner = /(?:bash|sh|zsh)\s+(?:-\w+\s+)*-c\s+(["'])([\s\S]*)\1/.exec(p) ?? /(?:powershell(?:\.exe)?|pwsh)\b[^"']*?-(?:Command|c)\s+(["'])([\s\S]*)\1/i.exec(p) ?? /cmd(?:\.exe)?\s+\/[cCkK]\s+(["']?)([\s\S]*)\1/.exec(p);
-    return inner ? [{ raw: p }, ...splitCommand(inner[2]).map((x, i) => ({ raw: x, inner: true, first: i === 0 }))] : [{ raw: p }];
+    const inner = /(?:bash|sh|zsh)\s+(?:-\w+\s+)*-\w*c\s+(["'])([\s\S]*)\1/.exec(p) ?? /(?:powershell(?:\.exe)?|pwsh)\b[^"']*?-(?:Command|c)\s+(["'])([\s\S]*)\1/i.exec(p) ?? /cmd(?:\.exe)?\s+\/[cCkK]\s+(["']?)([\s\S]*)\1/.exec(p);
+    // The wrapper is judged without the inner command (judged on its own, part by part): a «git push» inside
+    // «bash -lc "cd x && git push …"» is read with its own arguments, not with the rest of the line.
+    return inner ? [{ raw: p.slice(0, inner.index) + p.slice(inner.index + inner[0].length) }, ...splitCommand(inner[2]).map((x, i) => ({ raw: x, inner: true, first: i === 0 }))] : [{ raw: p }];
   });
   let innerHere = cwd;
   for (const { raw, inner, first } of parts) {
-    const part = raw.replace(/^(?:wsl(?:\.exe)?\s+(?:-\S+\s+(?:\S+\s+)?)*--\s+|sudo\s+|env\s+(?:\S+=\S+\s+)*|exec\s+)/i, '').trim();
+    const part = raw.replace(/^(?:wsl(?:\.exe)?\s+(?:(?:-d|--distribution|-u|--user|--cd)\s+\S+\s+)*(?:-e|--exec)\s+|wsl(?:\.exe)?\s+(?:-\S+\s+(?:\S+\s+)?)*--\s+|sudo\s+|env\s+(?:\S+=\S+\s+)*|exec\s+)/i, '').trim();
     if (inner && first) innerHere = here;
     const from = inner ? innerHere : here;
     const moved = changeDir(part, from, platform);
     if (moved !== undefined) { if (inner) innerHere = moved; else here = moved; continue; }
+    // Rewriting a work branch of its own (after an amend) with --force-with-lease: the orchestrator decides it,
+    // like a deletion. A plain --force, main or the integration branch still wait for you.
+    if (leasePush(part)) return { reason: 'git push --force-with-lease a una rama de trabajo', critical: true };
     for (const [re, why] of DESTRUCTIVE) {
       if (!re.test(part)) continue;
-      const root = absolutePaths(part).find((p) => isRoot(p, platform));
-      return root ? { reason: `${why} sobre la raíz de un disco (${root})`, critical: true, userOnly: true } : { reason: why, critical: true, userOnly: USER_ONLY.has(why) || undefined };
+      const paths = absolutePaths(part);
+      const root = paths.find((p) => isRoot(p, platform));
+      if (root) return { reason: `${why} sobre la raíz de un disco (${root})`, critical: true, userOnly: true };
+      // The project or a whole work folder (or what holds them): only you.
+      const whole = paths.find((p) => roots.some((r) => inside(r, [p], platform)));
+      if (whole) return { reason: `${why} de una carpeta de trabajo entera (${whole})`, critical: true, userOnly: true };
+      return { reason: why, critical: true, userOnly: USER_ONLY.has(why) || undefined };
     }
     const deletes = DELETE_VERB.test(part);
     const verb = deletes || WRITE_VERB.test(part);
-    const redirects = [...part.matchAll(/(?:^|[^>&\d])\d?>{1,2}[ \t]*("[^"]+"|'[^']+'|[^\s;&|<>]+)/g)].map((m) => m[1].replace(/^["']|["']$/g, ''))
+    // Quoted text is an argument, not a redirect: «perl -pi -e 's/<algorithm>/#include…/'» writes no «/#include».
+    const unquoted = part.replace(/(?<!>[ \t]*)("[^"]*"|'[^']*')/g, "''");
+    const redirects = [...unquoted.matchAll(/(?:^|[^>&\d])\d?>{1,2}[ \t]*("[^"]+"|'[^']+'|[^\s;&|<>]+)/g)].map((m) => m[1].replace(/^["']|["']$/g, ''))
       .filter((p) => /^(?:[A-Za-z]:[\\/]|\/|~)/.test(p) && !/^\/(?:dev\/(?:null|std)|tmp\b)/.test(p));
     if (!verb && !redirects.length) continue;
     if (deletes && /\$\{?\w+|%\w+%|\$\(/.test(part.replace(DELETE_VERB, ''))) return { reason: 'borrado con una ruta en una variable (no se puede comprobar antes)', critical: true };

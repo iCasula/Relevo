@@ -1,15 +1,17 @@
 ﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-  Installs or updates relevo-host on this Windows PC, as a scheduled task that starts with Windows (even
-  before anyone signs in) and runs as you, so the agents use your logins and your projects.
+  Installs or updates relevo-host on this Windows PC, as a scheduled task that starts when you sign in and
+  runs as you, hidden, so the agents use your logins and your projects. With -SinSesion it starts with Windows
+  instead, before anyone signs in; but then Antigravity (agy) can't run terminal commands (they fail with
+  -1073741502: a session without a desktop can't give them a console).
 
 .DESCRIPTION
   Run it from an administrator PowerShell, signed in as the user who will own the agents (an admin account
   with UAC: right-click PowerShell › Run as administrator). Administrator rights are needed once, for the
   firewall rule and for a task that starts without a session.
 
-    powershell -ExecutionPolicy Bypass -File Host\deploy\install-windows.ps1 [-Projects <folder>] [-Base <folder>] [-Name <name>] [-Port 47820]
+    powershell -ExecutionPolicy Bypass -File Host\deploy\install-windows.ps1 [-Projects <folder>] [-Base <folder>] [-Name <name>] [-Port 47820] [-SinSesion]
     powershell -ExecutionPolicy Bypass -File Host\deploy\install-windows.ps1 -Uninstall
 
   <Base>\app          the program (a few files)
@@ -26,6 +28,7 @@ param(
   [string]$Base = (Join-Path $env:LOCALAPPDATA 'RelevoHost'),
   [string]$Name = $env:COMPUTERNAME,
   [int]$Port = 47820,
+  [switch]$SinSesion,
   [switch]$Uninstall
 )
 $ErrorActionPreference = 'Stop'
@@ -45,10 +48,18 @@ function Remove-FromUserPath([string]$dir) {
   [Environment]::SetEnvironmentVariable('Path', ($kept -join ';'), 'User')
 }
 
+# The host's own node processes (supervisor and worker), by their command line: nothing else.
+function Get-HostProcesses {
+  $script = Join-Path $Base 'app\relevo-host.mjs'
+  Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -and $_.CommandLine.Contains($script) }
+}
 if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
   Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
   # The worker notices its supervisor is gone within 5 s and frees the port.
   Start-Sleep -Seconds 6
+  # Started through the hidden launcher, stopping the task ends the launcher, not node: end it too.
+  Get-HostProcesses | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 }
 
 $shortcuts = @([Environment]::GetFolderPath('Programs'), [Environment]::GetFolderPath('Desktop')) | ForEach-Object { Join-Path $_ 'Relevo.lnk' }
@@ -135,11 +146,28 @@ if (-not (@($userPath -split ';') | Where-Object { $_.TrimEnd('\') -eq $Base.Tri
 Get-NetFirewallRule -DisplayName $TaskName -ErrorAction SilentlyContinue | Remove-NetFirewallRule
 New-NetFirewallRule -DisplayName $TaskName -Direction Inbound -Action Allow -Protocol TCP -LocalPort $Port -Profile Private, Domain | Out-Null
 
-# S4U: runs as you without storing your password and without a window; starts with Windows. relevo-host
-# supervises its own worker (restarts after an update or a crash); the task restarts the supervisor.
-$action = New-ScheduledTaskAction -Execute $node -Argument "`"$app\relevo-host.mjs`" serve" -WorkingDirectory $Base
-$trigger = New-ScheduledTaskTrigger -AtStartup
-$principal = New-ScheduledTaskPrincipal -UserId $identity.Name -LogonType S4U -RunLevel Limited
+# relevo-host supervises its own worker (restarts after an update or a crash); the task restarts the supervisor.
+if ($SinSesion) {
+  # S4U: runs as you without storing your password and without a window; starts with Windows. Its session has
+  # no desktop, so agy's terminal commands fail there (Claude's and Codex's work).
+  $action = New-ScheduledTaskAction -Execute $node -Argument "`"$app\relevo-host.mjs`" serve" -WorkingDirectory $Base
+  $trigger = New-ScheduledTaskTrigger -AtStartup
+  $principal = New-ScheduledTaskPrincipal -UserId $identity.Name -LogonType S4U -RunLevel Limited
+} else {
+  # In your session, from when you sign in (a locked screen is fine), with no window: a small launcher starts
+  # node hidden (window style 0) and waits for it, so the task sees it running and restarts it if it stops.
+  $launcher = Join-Path $Base 'relevo-host-oculto.vbs'
+  $q = '""'
+  $command = "$q$node$q $q$app\relevo-host.mjs$q serve"
+  [IO.File]::WriteAllLines($launcher, [string[]]@(
+    'Set shell = CreateObject("WScript.Shell")',
+    "shell.CurrentDirectory = `"$Base`"",
+    "WScript.Quit shell.Run(`"$command`", 0, True)"
+  ), [Text.Encoding]::Unicode)
+  $action = New-ScheduledTaskAction -Execute (Join-Path $env:SystemRoot 'System32\wscript.exe') -Argument "//B //NoLogo `"$launcher`"" -WorkingDirectory $Base
+  $trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity.Name
+  $principal = New-ScheduledTaskPrincipal -UserId $identity.Name -LogonType Interactive -RunLevel Limited
+}
 $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable `
   -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
 # The app's link (and its token, created here before the service starts, so both use the same one).

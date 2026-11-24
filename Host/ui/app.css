@@ -136,6 +136,7 @@ code, pre, .mono { font-family: var(--mono); }
 .acct-head .name { font-size: 10px; font-weight: 500; flex: none; }
 .acct-head .email { font-size: 10px; color: var(--secondary); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
 .plan-pill { font-size: 9px; font-weight: 500; color: var(--secondary); padding: 1px 5px; border-radius: 8px; background: var(--subtle); flex: none; }
+.acct-family { font-size: 10px; font-weight: 600; color: var(--secondary); margin-top: 2px; }
 .acct-note { font-size: 10px; color: var(--tertiary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .acct-note.warn { color: var(--orange); }
 .ubar { display: flex; align-items: center; gap: 6px; font-size: 10px; }
@@ -575,6 +576,7 @@ input[type=checkbox].check { accent-color: var(--accent); width: 14px; height: 1
 .team-notes { font-size: 12px; }
 .team-line.removed { opacity: .6; }
 .team-fb { width: 210px; flex: none; font-size: 12px; }
+.team-effort { width: 118px; flex: none; font-size: 12px; }
 .team-name { width: 96px; min-width: 0; font: inherit; color: inherit; background: transparent; border: 1px solid transparent; border-radius: 5px; padding: 2px 4px; margin-left: -4px; }
 .team-name:hover { border-color: var(--separator, rgba(128,128,128,.3)); }
 .team-name:focus { outline: none; border-color: var(--accent); background: var(--field-bg, transparent); }

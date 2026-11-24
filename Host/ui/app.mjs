@@ -152,6 +152,17 @@ function threadRowHTML(hostId, s, t, nested = false) {
 // MARK: - «Límites» footer (UsageFooter) — always visible
 
 
+/** Antigravity's four quotas, under each family's name: «Gemini» then its week and 5 h, the same for Claude/GPT. */
+function antigravityBars(windows) {
+  const groups = new Map();
+  for (const w of windows) {
+    const fam = /claude|gpt/i.test(`${w.id} ${w.label}`) ? 'Claude/GPT' : 'Gemini';
+    if (!groups.has(fam)) groups.set(fam, []);
+    groups.get(fam).push({ ...w, label: w.label.replace(/^(Gemini|Claude\/GPT)\s*/i, '').replace(/^semana$/i, 'Semana') || 'Semana' });
+  }
+  return [...groups].map(([fam, ws]) => `<div class="acct-family">${esc(fam)}</div>${ws.map((w) => usageBar(w)).join('')}`).join('');
+}
+
 function accountUsageHTML(hostId, a) {
   const s = a.status;
   const exhausted = s?.exhausted;
@@ -160,7 +171,8 @@ function accountUsageHTML(hostId, a) {
       : exhausted ? `<span class="red">${icon('hourglass', { size: 10 })}</span>`
         : s?.loggedIn === false ? `<span class="orange">${icon('person.crop.circle.badge.exclamationmark', { size: 10 })}</span>` : '';
   let body;
-  if (s?.windows?.length) body = s.windows.slice(0, 2).map((w) => usageBar(w)).join('');
+  if (s?.windows?.length && a.kind === 'gemini') body = antigravityBars(s.windows);
+  else if (s?.windows?.length) body = s.windows.slice(0, 2).map((w) => usageBar(w)).join('');
   else if (s?.loggedIn === false) body = '<div class="acct-note warn">Sin sesión · pulsa para iniciar</div>';
   else if (s?.noPlan) body = `<div class="acct-note warn">${esc(s.error ?? 'El plan no incluye este servicio')}</div>`;
   else if (s?.error) body = `<div class="acct-note">${esc(s.error)}</div>`;

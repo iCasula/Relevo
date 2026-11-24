@@ -889,9 +889,17 @@ export function openCompare(hostId, threadId, draft = '') {
 /** «Sin cuota →»: what a member does when its subscription runs out (its thread's out-of-quota plan). */
 function fallbackSelect(hostId, attrs, value) {
   const accounts = (snap(hostId)?.accounts ?? []).filter((a) => a.status?.loggedIn !== false);
-  const opt = (v, label) => `<option value="${esc(v)}"${String(value ?? '') === v ? ' selected' : ''}>${esc(label)}</option>`;
+  const chosen = String(value ?? '').split('|').slice(0, 2).join('|'); // «account|model», its effort apart
+  const opt = (v, label) => `<option value="${esc(v)}"${chosen === v ? ' selected' : ''}>${esc(label)}</option>`;
   return `<select class="field team-fb" ${attrs} title="Qué hace este agente cuando se le acaba la cuota. Automático: el mejor modelo con cuota para su papel (el más potente para un ejecutor, uno ligero para el orquestador y el investigador). Con «→ otro modelo» va al que tú elijas. En los dos casos vuelve solo a su modelo en cuanto recupera la cuota">${has(hostId, 'smartFallback') ? opt('auto', 'Sin cuota: automático') : ''}${opt('', 'Sin cuota: como en Ajustes')}${opt('wait', 'Sin cuota: esperar y seguir aquí')}`
     + accounts.map((a) => `<optgroup label="Sin cuota → ${esc(a.name)}">${visibleModels(a).map((m) => opt(`${a.id}|${m.id}`, `→ ${a.name} · ${m.name} (y vuelve)`)).join('')}</optgroup>`).join('') + '</select>';
+}
+
+/** The effort to use with a model: «Esfuerzo auto» and the model's own levels (nothing if it has none). */
+function effortSelect(hostId, accountId, model, value, attrs, title) {
+  const efforts = modelOf(accountOf(hostId, accountId), model)?.efforts ?? [];
+  if (!efforts.length) return '';
+  return `<select class="field team-effort" ${attrs} title="${esc(title)}"><option value="">Esfuerzo auto</option>${efforts.map((e) => `<option value="${esc(e)}"${e === value ? ' selected' : ''}>${esc(effortName(e))}</option>`).join('')}</select>`;
 }
 
 /** One picker that sets what every agent of the team does when its quota runs out. */
@@ -1033,7 +1041,8 @@ export function openTeamEditor(hostId, teamId) {
   const ROLE_UI = { orchestrator: ['crown.fill', 'r-orchestrator'], executor: ['wrench.and.screwdriver', 'r-executor'], researcher: ['globe', 'r-researcher'] };
   const st = {
     goal: team.goal,
-    members: team.members.map((m) => ({ ...m, accountId: m.accountId ?? usable[0]?.id, model: m.model ?? 'default', notes: m.notes ?? '', fallback: m.fallback ?? '', remove: false })),
+    members: team.members.map((m) => ({ ...m, accountId: m.accountId ?? usable[0]?.id, model: m.model ?? 'default', effort: m.effort ?? '', notes: m.notes ?? '', fallback: m.fallback ?? '', remove: false })),
+    workDirs: (team.workDirs ?? []).join('\n'),
     allFallback: null, // the "for everyone" picker, until a member's own differs
     adds: [], // { role, accountId, model, notes }
     budget: { usd: team.budget?.usd ?? '', action: team.budget?.action ?? 'pause' },
@@ -1041,7 +1050,8 @@ export function openTeamEditor(hostId, teamId) {
     leadApproves: team.leadApproves !== false,
     worktrees: true,
   };
-  const original = JSON.stringify(st.members.map(({ threadId, accountId, model, notes, fallback, name }) => ({ threadId, accountId, model, notes, fallback, name })));
+  const original = JSON.stringify(st.members.map(({ threadId, accountId, model, effort, notes, fallback, name }) => ({ threadId, accountId, model, effort, notes, fallback, name })));
+  const efforts = has(hostId, 'effortSwitch');
   const canRename = has(hostId, 'teamRename');
   const nameField = (key, m) => (canRename ? `<input class="team-name" data-name="${key}" value="${esc(m.name)}" maxlength="32" spellcheck="false" title="Nombre del agente: el orquestador lo usa para darle órdenes">` : esc(m.name));
   const everyone = () => [...st.members.filter((m) => !m.remove), ...st.adds];
@@ -1053,9 +1063,15 @@ export function openTeamEditor(hostId, teamId) {
     const a = accountOf(hostId, r.accountId) ?? usable[0];
     const list = accounts.some((x) => x.id === r.accountId) ? usable.concat(usable.some((x) => x.id === r.accountId) ? [] : [accountOf(hostId, r.accountId)]) : usable;
     return `<select class="field" style="width:190px" data-acc="${key}">${list.map((x) => `<option value="${esc(x.id)}"${x.id === r.accountId ? ' selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
-      <select class="field grow" data-model="${key}">${visibleModels(a).map((m) => `<option value="${esc(m.id)}"${m.id === r.model ? ' selected' : ''}>${esc(m.name)}</option>`).join('')}${visibleModels(a).some((m) => m.id === r.model) ? '' : `<option value="${esc(r.model)}" selected>${esc(r.model)}</option>`}</select>`;
+      <select class="field grow" data-model="${key}">${visibleModels(a).map((m) => `<option value="${esc(m.id)}"${m.id === r.model ? ' selected' : ''}>${esc(m.name)}</option>`).join('')}${visibleModels(a).some((m) => m.id === r.model) ? '' : `<option value="${esc(r.model)}" selected>${esc(r.model)}</option>`}</select>`
+      + (efforts ? effortSelect(hostId, a?.id, r.model, r.effort, `data-effort="${key}"`, 'Esfuerzo de razonamiento con este modelo: se aplica al guardar (si está a mitad de un turno, al terminarlo)') : '');
   };
-  const notesRow = (key, value) => `<div class="team-line"><span class="team-role"></span><input class="field-input grow team-notes" data-notes="${key}" placeholder="Indicaciones para este agente (opcional)" value="${esc(value ?? '')}">${fallbackSelect(hostId, `data-fb="${key}"`, (key[0] === 'm' ? st.members[Number(key.slice(1))] : st.adds[Number(key.slice(1))])?.fallback)}<span class="tb-spacer"></span></div>`;
+  // With «→ otro modelo» as the fallback, the effort for that model too.
+  const fallbackEffort = (key, r) => {
+    const [acc, model, effort] = String(r?.fallback ?? '').split('|');
+    return efforts && model ? effortSelect(hostId, acc, model, effort ?? '', `data-fb-effort="${key}"`, 'Esfuerzo con el modelo de reserva') : '';
+  };
+  const notesRow = (key, value) => `<div class="team-line"><span class="team-role"></span><input class="field-input grow team-notes" data-notes="${key}" placeholder="Indicaciones para este agente (opcional)" value="${esc(value ?? '')}">${fallbackSelect(hostId, `data-fb="${key}"`, (key[0] === 'm' ? st.members[Number(key.slice(1))] : st.adds[Number(key.slice(1))])?.fallback)}${fallbackEffort(key, key[0] === 'm' ? st.members[Number(key.slice(1))] : st.adds[Number(key.slice(1))])}<span class="tb-spacer"></span></div>`;
   const draw = () => {
     const live = st.members.filter((m) => !m.remove);
     const executors = live.filter((m) => m.role === 'executor').length + st.adds.filter((a) => a.role === 'executor').length;
@@ -1071,15 +1087,18 @@ export function openTeamEditor(hostId, teamId) {
         ${allFallbackRow(hostId, sharedFallback())}
       </div>
       ${has(hostId, 'guard') ? `<div class="form-group" style="margin-top:12px"><div class="form-row"><label style="display:flex;gap:8px;align-items:center"><input type="checkbox" class="check" data-guard${st.guard ? ' checked' : ''}> Guardarraíl: Relevo detiene y te pregunta antes de borrados recursivos, descartes de git o escrituras fuera de la carpeta del proyecto (recomendado, también con acceso total)</label></div></div>` : ''}
+      ${has(hostId, 'teamWorkDirs') ? `<div class="form-group" style="margin-top:12px"><div class="form-row" style="align-items:flex-start"><span class="grow">Carpetas de trabajo además del proyecto<div class="caption">Una por línea, p. ej. sus copias en WSL (/home/usuario). El guardarraíl deja escribir en ellas como en el proyecto; los borrados recursivos siguen pasando por el orquestador y borrar una carpeta entera te llega siempre a ti. Nunca la raíz de un disco, /, /home ni /mnt/x.</div></span><textarea class="field" data-workdirs spellcheck="false" placeholder="/home/usuario" style="width:260px;min-height:44px;font-family:var(--mono, monospace);font-size:12px">${esc(st.workDirs)}</textarea></div></div>` : ''}
       ${has(hostId, 'leadApproves') ? `<div class="form-group" style="margin-top:12px"><div class="form-row"><label style="display:flex;gap:8px;align-items:center"><input type="checkbox" class="check" data-lead-approves${st.leadApproves ? ' checked' : ''}> El orquestador decide los permisos de los demás agentes: permite lo que encaja con su tarea y te pasa lo delicado. Los borrados también: permite los que sobran claramente y, si no lo ve claro, el agente busca otra forma o lo anota en .relevo/borrados-pendientes.md. Formatear discos, tocar la raíz de un disco o un push forzado te llegan siempre a ti</label></div></div>` : ''}
       ${has(hostId, 'teamBudget') ? `<div class="form-group" style="margin-top:12px"><div class="form-row"><span class="grow">Presupuesto diario <span class="caption">(${team.members.some((m) => m.today?.cost) ? `hoy van ${usd(team.members.reduce((n, m) => n + (m.today?.cost ?? 0), 0))}` : 'coste equivalente a la API'})</span></span><input class="field-input" data-budget type="number" min="0" step="1" placeholder="sin límite" style="width:110px" value="${st.budget.usd || ''}"> USD <select class="field" data-budget-action>${[['pause', 'y entonces pausar'], ['light', 'y entonces abaratar']].map(([v, l]) => `<option value="${v}"${st.budget.action === v ? ' selected' : ''}>${l}</option>`).join('')}</select></div><div class="caption" style="padding:0 10px 8px">Abaratar: el orquestador y el investigador pasan a modelos ligeros; los ejecutores siguen igual.</div></div>` : ''}
       ${st.adds.some((a) => a.role === 'executor') && has(hostId, 'worktrees') ? `<div class="form-group" style="margin-top:12px"><div class="form-row"><label style="display:flex;gap:8px;align-items:center"><input type="checkbox" class="check" data-wt${st.worktrees ? ' checked' : ''}> Los ejecutores nuevos, cada uno en su worktree (si el proyecto es un repositorio git)</label></div></div>` : ''}
       <div class="sheet-buttons"><button class="btn" data-no>Cancelar</button><span class="grow"></span><button class="btn primary" data-go>Guardar cambios</button></div>`;
     const $ = (q) => s.el.querySelector(q);
     const target = (key) => (key[0] === 'm' ? st.members[Number(key.slice(1))] : st.adds[Number(key.slice(1))]);
-    const keep = () => { st.goal = $('[data-goal]').value; const g = $('[data-guard]'); if (g) st.guard = g.checked; const la = $('[data-lead-approves]'); if (la) st.leadApproves = la.checked; const b = $('[data-budget]'); if (b) { st.budget.usd = b.value; st.budget.action = $('[data-budget-action]').value; } };
-    s.el.querySelectorAll('[data-acc]').forEach((el) => { el.onchange = () => { const r = target(el.dataset.acc); r.accountId = el.value; r.model = visibleModels(accountOf(hostId, el.value))[0]?.id ?? 'default'; keep(); draw(); }; });
-    s.el.querySelectorAll('[data-model]').forEach((el) => { el.onchange = () => { target(el.dataset.model).model = el.value; }; });
+    const keep = () => { st.goal = $('[data-goal]').value; const wd = $('[data-workdirs]'); if (wd) st.workDirs = wd.value; const g = $('[data-guard]'); if (g) st.guard = g.checked; const la = $('[data-lead-approves]'); if (la) st.leadApproves = la.checked; const b = $('[data-budget]'); if (b) { st.budget.usd = b.value; st.budget.action = $('[data-budget-action]').value; } };
+    s.el.querySelectorAll('[data-acc]').forEach((el) => { el.onchange = () => { const r = target(el.dataset.acc); r.accountId = el.value; r.model = visibleModels(accountOf(hostId, el.value))[0]?.id ?? 'default'; r.effort = ''; keep(); draw(); }; });
+    s.el.querySelectorAll('[data-model]').forEach((el) => { el.onchange = () => { const r = target(el.dataset.model); r.model = el.value; if (!(modelOf(accountOf(hostId, r.accountId), r.model)?.efforts ?? []).includes(r.effort)) r.effort = ''; keep(); draw(); }; });
+    s.el.querySelectorAll('[data-effort]').forEach((el) => { el.onchange = () => { target(el.dataset.effort).effort = el.value; }; });
+    s.el.querySelectorAll('[data-fb-effort]').forEach((el) => { el.onchange = () => { const r = target(el.dataset.fbEffort); const [acc, model] = String(r.fallback).split('|'); r.fallback = el.value ? `${acc}|${model}|${el.value}` : `${acc}|${model}`; }; });
     s.el.querySelectorAll('[data-notes]').forEach((el) => { el.oninput = () => { target(el.dataset.notes).notes = el.value; }; });
     s.el.querySelectorAll('[data-fb]').forEach((el) => { el.onchange = () => { target(el.dataset.fb).fallback = el.value; keep(); draw(); }; });
     $('[data-fb-all]').onchange = (e) => { if (e.target.value === '*') return; for (const m of everyone()) m.fallback = e.target.value; keep(); draw(); };
@@ -1087,7 +1106,7 @@ export function openTeamEditor(hostId, teamId) {
     s.el.querySelectorAll('[data-rm]').forEach((b) => { b.onclick = () => { st.members[Number(b.dataset.rm)].remove = true; keep(); draw(); }; });
     s.el.querySelectorAll('[data-undo]').forEach((b) => { b.onclick = () => { st.members[Number(b.dataset.undo)].remove = false; keep(); draw(); }; });
     s.el.querySelectorAll('[data-rm-add]').forEach((b) => { b.onclick = () => { st.adds.splice(Number(b.dataset.rmAdd), 1); keep(); draw(); }; });
-    const fresh = (role) => { const a = usable[0]; return { role, accountId: a?.id, model: visibleModels(a)[0]?.id ?? 'default', notes: '', fallback: has(hostId, 'smartFallback') ? 'auto' : '' }; };
+    const fresh = (role) => { const a = usable[0]; return { role, accountId: a?.id, model: visibleModels(a)[0]?.id ?? 'default', effort: '', notes: '', fallback: has(hostId, 'smartFallback') ? 'auto' : '' }; };
     $('[data-add-exec]').onclick = () => { st.adds.push(fresh('executor')); keep(); draw(); };
     $('[data-add-res]')?.addEventListener('click', () => { st.adds.push(fresh('researcher')); keep(); draw(); });
     $('[data-wt]')?.addEventListener('change', (e) => { st.worktrees = e.target.checked; });
@@ -1101,7 +1120,8 @@ export function openTeamEditor(hostId, teamId) {
       if (new Set(names).size !== names.length) { toast('Dos agentes no pueden llamarse igual'); return; }
       const changes = {
         goal: st.goal.trim() !== team.goal ? st.goal.trim() : undefined,
-        members: st.members.filter((m, i) => !m.remove && JSON.stringify({ threadId: m.threadId, accountId: m.accountId, model: m.model, notes: m.notes, fallback: m.fallback, name: m.name }) !== JSON.stringify(before[i])).map(({ threadId, accountId, model, notes, fallback, name }) => ({ threadId, accountId, model, notes, fallback, name: canRename ? name : undefined })),
+        members: st.members.filter((m, i) => !m.remove && JSON.stringify({ threadId: m.threadId, accountId: m.accountId, model: m.model, effort: m.effort, notes: m.notes, fallback: m.fallback, name: m.name }) !== JSON.stringify(before[i])).map(({ threadId, accountId, model, effort, notes, fallback, name }) => ({ threadId, accountId, model, effort: efforts ? effort || null : undefined, notes, fallback, name: canRename ? name : undefined })),
+        workDirs: has(hostId, 'teamWorkDirs') && st.workDirs.trim() !== (team.workDirs ?? []).join('\n') ? st.workDirs.split('\n').map((x) => x.trim()).filter(Boolean) : undefined,
         remove: st.members.filter((m) => m.remove).map((m) => m.threadId),
         add: { executors: st.adds.filter((a) => a.role === 'executor'), researcher: st.adds.find((a) => a.role === 'researcher') ?? null },
         worktrees: st.worktrees,

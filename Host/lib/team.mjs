@@ -17,6 +17,7 @@ import path from 'node:path';
 import * as gitops from './gitops.mjs';
 import { elideCode, clip, threadBrief } from './handoff.mjs';
 import { isReadOnlyCommand } from './codex.mjs';
+import { workDir } from './guard.mjs';
 
 const clean = (o) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined && v !== null));
 
@@ -132,15 +133,16 @@ export function planFromFallback(host, fallback, role = 'executor') {
   // The best model with quota for its role, chosen when it runs out: the strongest for an executor, a light
   // one for the orchestrator and the researcher.
   if (fallback === 'auto') return { mode: 'smart', targets: [], tier: role === 'executor' ? 'heavy' : 'light' };
-  const [accountId, model] = String(fallback).split('|');
-  return host._validPlan({ mode: 'chain', targets: [{ accountId, model: model || 'default' }] });
+  // «account|model» or «account|model|effort».
+  const [accountId, model, effort] = String(fallback).split('|');
+  return host._validPlan({ mode: 'chain', targets: [{ accountId, model: model || 'default', effort: effort || undefined }] });
 }
 export function fallbackOf(plan) {
   if (!plan) return '';
   if (plan.mode === 'wait') return 'wait';
   if (plan.mode === 'smart') return 'auto';
   const t = plan.mode === 'chain' && plan.targets?.[0];
-  return t ? `${t.accountId}|${t.model || 'default'}` : '';
+  return t ? `${t.accountId}|${t.model || 'default'}${t.effort ? `|${t.effort}` : ''}` : '';
 }
 
 /** Instructions as stored: trimmed, at most 2000 characters, or undefined. */
@@ -460,6 +462,7 @@ export class Teams {
     const account = h.accountsById.get(pick?.accountId) ?? h.accountsById.get(t.accountId);
     t.accountId = account?.id ?? t.accountId;
     t.model = pick?.model || 'default';
+    t.effort = pick?.effort || null;
     // A Codex researcher runs read-only: it can read and search without asking, and can't write.
     t.mode = role === 'researcher' && account?.kind === 'codex' ? 'plan' : mode;
     t.title = `${name} · ${clip(team.goal.split('\n')[0], 48)}`;
@@ -497,6 +500,8 @@ export class Teams {
     }
     const leadMember = team.members.find((m) => m.role === 'orchestrator');
     const news = [];
+    const badDirs = Array.isArray(changes.workDirs) ? changes.workDirs.filter((d) => String(d ?? '').trim() && !workDir(d)) : [];
+    if (badDirs.length) throw new Error(`Carpeta de trabajo no válida (ruta absoluta, nunca la raíz de un disco, /, /home o /mnt/x): ${badDirs.join(', ')}`);
     // Names first, all of them checked before anything changes.
     const renames = new Map();
     for (const c of changes.members ?? []) {
@@ -532,6 +537,13 @@ export class Teams {
       }
       news.push(m.role === 'orchestrator' ? `Ahora te llamas ${name}` : `${old} ahora se llama ${name}: usa ese nombre en para="…"`);
     }
+    if (Array.isArray(changes.workDirs)) {
+      const dirs = [...new Set(changes.workDirs.map(workDir).filter(Boolean))].slice(0, 8);
+      if (JSON.stringify(dirs) !== JSON.stringify(team.workDirs ?? [])) {
+        if (dirs.length) team.workDirs = dirs; else delete team.workDirs;
+        news.push(dirs.length ? `Carpetas de trabajo del equipo, además del proyecto: ${dirs.join(', ')}. Relevo deja escribir en ellas sin pedir permiso; los borrados recursivos siguen pasando por ti (orquestador) y borrar una entera llega al usuario.` : 'El equipo ya no tiene carpetas de trabajo fuera del proyecto: escribir fuera vuelve a pedir permiso');
+      }
+    }
     if (changes.budget !== undefined) {
       const usd = Number(changes.budget?.usd);
       team.budget = usd > 0 ? { usd: Math.round(usd * 100) / 100, action: changes.budget.action === 'light' ? 'light' : 'pause' } : null;
@@ -554,9 +566,11 @@ export class Teams {
       if (plan !== undefined && JSON.stringify(plan) !== JSON.stringify(t.limitPlan ?? null)) { t.limitPlan = plan; h._changed(t); }
       const account = c.accountId && h.accountsById.get(String(c.accountId).toUpperCase());
       const model = c.model || 'default';
-      if (account && (account.id !== t.accountId || model !== (t.model || 'default'))) {
-        h.select(t, account.id, model, false);
-        if (m.role !== 'orchestrator') news.push(`${m.name} pasa a ${account.name} · ${h._modelName(account, model)}`);
+      const effort = c.effort === undefined ? undefined : (c.effort || null);
+      const moved = account && (account.id !== t.accountId || model !== (t.model || 'default'));
+      if (account && (moved || (effort !== undefined && effort !== (t.effort ?? null)))) {
+        h.select(t, account.id, model, false, false, effort);
+        if (m.role !== 'orchestrator') news.push(`${m.name} pasa a ${account.name} · ${h._modelName(account, model)}${effort ? ` (esfuerzo ${effort})` : ''}`);
       }
     }
 
@@ -583,7 +597,11 @@ export class Teams {
     if (newExecutors.length) {
       const projectPath = h.projects().find((p) => p.id === team.projectId)?.path;
       const worktrees = changes.worktrees !== false && gitops.hasCommits(projectPath);
-      const mode = ['ask', 'autoEdit', 'full'].includes(changes.mode) ? changes.mode : 'autoEdit';
+      // Unless you say, a new executor works like the team's others (one in «Auto-editar» among «Acceso total» ones
+      // would ask for every command).
+      const modes = team.members.filter((x) => x.role === 'executor').map((x) => h.threads.get(x.threadId)?.mode).filter((x) => ['ask', 'autoEdit', 'full'].includes(x));
+      const usual = modes.sort((a, b) => modes.filter((x) => x === b).length - modes.filter((x) => x === a).length)[0];
+      const mode = ['ask', 'autoEdit', 'full'].includes(changes.mode) ? changes.mode : usual ?? 'autoEdit';
       const taken = new Set(team.members.map((m) => m.name));
       let n = 1;
       for (const e of newExecutors) {

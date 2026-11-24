@@ -699,3 +699,35 @@ test('a limit hit earlier gives way to a later reading with room, and an agent c
   h._preTurnSwitch(t);
   assert.equal(selects.pop().accountId, 'DS', 'on again: it moves first');
 });
+
+test('the model it falls back to carries its effort, and coming home brings back the one it had', () => {
+  const { h, selects } = stand([acct('CX', 'codex', ['gpt-6.1-sol']), acct('AG', 'gemini', ['gemini-4-neon-medium'])]);
+  h.select = (t, accountId, model, carryOn, auto, effort) => { selects.push({ accountId, model, auto, effort }); t.accountId = accountId; t.model = model; if (effort !== undefined) t.effort = effort; };
+  h._validPlan = P._validPlan;
+  // «account|model|effort» as the out-of-quota choice, and back to «account|model» with no effort.
+  const plan = h._validPlan({ mode: 'chain', targets: [{ accountId: 'AG', model: 'gemini-4-neon-medium', effort: 'high' }] });
+  assert.deepEqual(plan.targets, [{ accountId: 'AG', model: 'gemini-4-neon-medium', effort: 'high' }]);
+  const t = { id: 'T', accountId: 'CX', model: 'gpt-6.1-sol', effort: 'xhigh', limitPlan: plan };
+  h._rt(t).pendingRelay = h._planTarget(t, plan);
+  h._relayNow(t);
+  assert.deepEqual(selects.pop(), { accountId: 'AG', model: 'gemini-4-neon-medium', auto: true, effort: 'high' });
+  assert.deepEqual(t.home, { accountId: 'CX', model: 'gpt-6.1-sol', effort: 'xhigh' });
+  h.accounts[0].status.windows = [{ percent: 4 }];
+  h._preTurnSwitch(t);
+  assert.deepEqual(selects.pop(), { accountId: 'CX', model: 'gpt-6.1-sol', auto: true, effort: 'xhigh' });
+});
+
+test("a fallback written in the team sheet keeps its effort both ways", async () => {
+  const { planFromFallback, fallbackOf } = await import('../lib/team.mjs');
+  const host = { _validPlan: P._validPlan, accountsById: new Map([['AG', {}]]) };
+  const plan = planFromFallback(host, 'AG|gemini-4-neon-medium|low');
+  assert.deepEqual(plan, { mode: 'chain', targets: [{ accountId: 'AG', model: 'gemini-4-neon-medium', effort: 'low' }] });
+  assert.equal(fallbackOf(plan), 'AG|gemini-4-neon-medium|low');
+  assert.equal(fallbackOf(planFromFallback(host, 'AG|gemini-4-neon-medium')), 'AG|gemini-4-neon-medium');
+});
+
+test('a new executor works like the others: «Acceso total» if they are, unless you say otherwise', async () => {
+  // The rule is in updateTeam; here the choice it makes from the executors' modes.
+  const src = (await import('node:fs')).readFileSync(new URL('../lib/team.mjs', import.meta.url), 'utf8');
+  assert.match(src, /const mode = \['ask', 'autoEdit', 'full'\]\.includes\(changes\.mode\) \? changes\.mode : usual \?\? 'autoEdit';/);
+});

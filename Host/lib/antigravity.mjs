@@ -67,7 +67,7 @@ export function parseUsage(out) {
     const group = cols[0].replace(/ models/i, '').replace(' and ', '/');
     const kind = cols[1].toLowerCase();
     const period = kind.includes('week') ? 'sem.' : kind.includes('5') || kind.includes('hour') ? '5 h' : kind.includes('day') ? 'día' : '';
-    const label = period === 'sem.' || !period ? group : `${group} ${period}`;
+    const label = !period ? group : `${group} ${period === 'sem.' ? 'semana' : period}`;
     const reset = cols[3] ? Date.parse(cols[3]) : NaN;
     windows.push({ id: cols[0] + cols[1], label, percent: Math.max(0, Math.min(100, 100 - remaining)),
       resetsAt: Number.isNaN(reset) ? null : reset / 1000, detail: period === 'sem.' ? 'límite semanal' : cols[1] });

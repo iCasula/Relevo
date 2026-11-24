@@ -132,3 +132,30 @@ test('only disks and a forced push are yours alone; other deletions can go to th
   assert.equal(only('git push --force origin master'), true);
   assert.equal(only('rm -rf V:\\'), true);
 });
+
+test("a team's work folders: writing there goes on; deleting one whole, or /, is only yours", async () => {
+  const { workDir } = await import('../lib/guard.mjs');
+  const T = { ...W, roots: [...W.roots, '/home/icasula'] };
+  assert.equal(held('wsl -e bash -lc "python3 x.py > /home/icasula/e4/out.log 2>&1"', T), null);
+  assert.match(held('wsl -e bash -lc "python3 x.py > /home/otro/out.log 2>&1"', T), /fuera de la carpeta/);
+  assert.match(held('wsl -e bash -lc "cd /home/icasula/e4 && rm -rf build"', T), /^borrado recursivo \(rm -r\)$/);
+  for (const cmd of ['wsl -e rm -rf /home/icasula', 'wsl -e rm -rf /home', 'Remove-Item -Recurse V:\\masseffect\\me1-sw2', 'bash -c "rm -rf /"']) {
+    assert.equal(checkCommand(cmd, T)?.userOnly, true, cmd);
+  }
+  for (const ok of ['/home/icasula', '/mnt/v/masseffect/x', 'V:\\masseffect']) assert.equal(workDir(ok), ok);
+  for (const bad of ['/', '/home', '/mnt/v', 'V:\\', '~/x', 'build', '/home/icasula/../..']) assert.equal(workDir(bad), null, bad);
+});
+
+test('--force-with-lease of its own work branch goes to the orchestrator; plain force, main or integration only to you', () => {
+  const lease = checkCommand('wsl -e bash -lc "cd /home/icasula/e4 && git commit --amend --no-edit && git push --force-with-lease origin e4/t8b && git status --short"', W);
+  assert.equal(lease.reason, 'git push --force-with-lease a una rama de trabajo');
+  assert.equal(lease.userOnly, undefined);
+  for (const cmd of ['git push --force-with-lease origin integration/me1', 'git push --force-with-lease origin main', 'git push --force-with-lease', 'git push --force origin e4/x', 'git push -f origin e4/x', 'git push --force-with-lease origin +e4/x']) {
+    assert.equal(checkCommand(cmd, W)?.userOnly, true, cmd);
+  }
+});
+
+test('quoted text is no redirect: a perl substitution with «<algorithm>/#include» writes nothing at /#include', () => {
+  assert.equal(held(`wsl -e bash -lc "cd /tmp/x; perl -0pi -e 's/#include <algorithm>/#include <new>/' scripts/x.py; git diff --stat"`), null);
+  assert.match(held('echo hola > "C:\\Users\\x\\a.txt"'), /fuera de la carpeta/);
+});

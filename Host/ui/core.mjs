@@ -55,16 +55,24 @@ export function modelName(account, id) {
   return /^Predeterminado \((.+)\)$/.exec(name)?.[1] ?? name;
 }
 export const visibleModels = (account) => (account?.models ?? []).filter((m) => !m.hidden);
-// Antigravity's families (Gemini, Claude/GPT) have their own quotas: the account has the room of the freest one.
+// Antigravity's families (Gemini, Claude/GPT) have their own quotas, each with a weekly and a 5-hour window.
+const family = (w) => (/claude|gpt/i.test(`${w.id} ${w.label}`) ? 'Claude/GPT' : 'Gemini');
+/** Per family on Antigravity, the tightest of its windows: «[['Gemini', 26], ['Claude/GPT', 0]]». */
+const familyPercents = (ws) => {
+  const m = new Map();
+  for (const w of ws) m.set(family(w), Math.max(m.get(family(w)) ?? 0, w.percent));
+  return [...m];
+};
+// The account has the room of the freest family.
 export const maxPercent = (account) => {
   const ws = account?.status?.windows ?? [];
-  if (account?.kind === 'gemini' && ws.length > 1) return Math.max(0, Math.min(...ws.map((w) => w.percent)));
+  if (account?.kind === 'gemini' && ws.length > 1) return Math.max(0, Math.min(...familyPercents(ws).map(([, p]) => p)));
   return Math.max(0, ...ws.map((w) => w.percent));
 };
-/** «40% usado», or per family on Antigravity («Gemini 0% · Claude/GPT 100%»). */
+/** «40% usado», or per family on Antigravity («Gemini 26% · Claude/GPT 100%»). */
 export const usageText = (account) => {
   const ws = account?.status?.windows ?? [];
-  if (account?.kind === 'gemini' && ws.length > 1) return ws.map((w) => `${w.label} ${Math.round(w.percent)}%`).join(' · ');
+  if (account?.kind === 'gemini' && ws.length > 1) return familyPercents(ws).map(([f, p]) => `${f} ${Math.round(p)}%`).join(' · ');
   return `${Math.round(maxPercent(account))}% usado`;
 };
 export const threadOf = (hostId, threadId) => host(hostId)?.data.threads.get(threadId);
