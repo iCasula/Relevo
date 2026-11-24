@@ -577,6 +577,8 @@ input[type=checkbox].check { accent-color: var(--accent); width: 14px; height: 1
 .team-line.removed { opacity: .6; }
 .team-fb { width: 210px; flex: none; font-size: 12px; }
 .team-effort { width: 118px; flex: none; font-size: 12px; }
+.team-daybreak { display: flex; align-items: center; gap: 4px; flex: none; font-size: 12px; white-space: nowrap; }
+.team-daybreak.off { opacity: .45; }
 .team-name { width: 96px; min-width: 0; font: inherit; color: inherit; background: transparent; border: 1px solid transparent; border-radius: 5px; padding: 2px 4px; margin-left: -4px; }
 .team-name:hover { border-color: var(--separator, rgba(128,128,128,.3)); }
 .team-name:focus { outline: none; border-color: var(--accent); background: var(--field-bg, transparent); }

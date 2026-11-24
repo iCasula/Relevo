@@ -59,7 +59,7 @@ export function modelScore(m, tier) {
   return 60;
 }
 /** What this host does beyond the shared protocol; clients show those controls only when listed. */
-export const HOST_FEATURES = ['askUser', 'effortSwitch', 'teamWorkDirs', 'teams', 'projects', 'threads', 'git', 'images', 'usage', 'login', 'settings', 'limitPlans', 'history', 'titles', 'accounts',
+export const HOST_FEATURES = ['askUser', 'effortSwitch', 'teamWorkDirs', 'daybreak', 'teams', 'projects', 'threads', 'git', 'images', 'usage', 'login', 'settings', 'limitPlans', 'history', 'titles', 'accounts',
   'turns', 'worktrees', 'pullRequests', 'suggest', 'quickActions', 'attachments', 'teamRename', 'teamDecisions', 'teamMemory', 'smartFallback', 'teamBudget', 'teamHeld', 'guard', 'push', 'waitHere', 'leadApproves', 'renewSessions', 'earlySwitch', 'renewPerAgent'];
 /**
  * A long session rereads its whole context every turn (most of what a subscription spends): past this many tokens
@@ -1479,6 +1479,15 @@ export class Host {
     return true;
   }
 
+  /** Daybreak for the thread's next Codex turn: the program its model accepts for this account (null: Codex decides). */
+  _cyber(t) {
+    if (!t.daybreak) return null;
+    const a = this._account(t);
+    if (a?.kind !== 'codex') return null;
+    const m = a.models?.find((x) => x.id === t.model);
+    return m && m.daybreak !== undefined ? m.daybreak || null : 'daybreakBlue';
+  }
+
   _agent(t) {
     let s = this.agents.get(t.id);
     if (s) return s;
@@ -1489,6 +1498,7 @@ export class Host {
     s = new Session({
       bin: account.bin, args: account.args, cwd: t.projectPath, env: account.env, model: t.model, effort: t.effort, mode: t.mode,
       resumeId: t.sessionId, agentName: account.agentName, loginHint: account.loginHint, guarded: this._guarded(t),
+      cyber: () => this._cyber(t),
     });
     this.agents.set(t.id, s);
     const r = this._rt(t);
@@ -2131,7 +2141,7 @@ export class Host {
         loggedIn: s.loggedIn, plan: s.plan, email: s.email, error: s.error, note: s.note,
         windows: (s.windows ?? []).map(remoteWindow), noPlan: false, exhausted: this._exhausted(a), updatedAt: s.updatedAt,
       }) : null,
-      models: a.models.map((m) => clean({ id: m.id, name: m.name, detail: m.detail, efforts: m.efforts, defaultEffort: m.defaultEffort, hidden: (a.def?.hiddenModels ?? []).includes(m.id) || undefined })),
+      models: a.models.map((m) => clean({ id: m.id, name: m.name, detail: m.detail, efforts: m.efforts, defaultEffort: m.defaultEffort, daybreak: m.daybreak, hidden: (a.def?.hiddenModels ?? []).includes(m.id) || undefined })),
       defaultModel: a.defaultModel, refreshing: a.refreshing,
     });
   }
@@ -2166,7 +2176,7 @@ export class Host {
         guard: x.members.every((m) => { const t = this.threads.get(m.threadId); return !t || this._guarded(t); }),
         leadApproves: x.leadApproves !== false,
         heldList: this.teams.heldList(x), pausedBy: x.pausedBy ?? undefined, workDirs: x.workDirs ?? [],
-        members: x.members.map((m) => { const t = this.threads.get(m.threadId); return clean({ threadId: m.threadId, role: m.role, name: m.name, notes: m.notes, accountId: t?.accountId, model: t?.model ?? 'default', effort: t?.effort ?? undefined, task: m.task ?? undefined, stash: m.stash?.length || undefined, fallback: t ? fallbackOf(t.limitPlan) : undefined, home: t?.home && this.accountsById.has(t.home.accountId) ? { accountId: t.home.accountId, model: t.home.model || 'default' } : undefined, today: t ? this._spendToday(t) : undefined }); }) })),
+        members: x.members.map((m) => { const t = this.threads.get(m.threadId); return clean({ threadId: m.threadId, role: m.role, name: m.name, notes: m.notes, accountId: t?.accountId, model: t?.model ?? 'default', effort: t?.effort ?? undefined, daybreak: t?.daybreak || undefined, task: m.task ?? undefined, stash: m.stash?.length || undefined, fallback: t ? fallbackOf(t.limitPlan) : undefined, home: t?.home && this.accountsById.has(t.home.accountId) ? { accountId: t.home.accountId, model: t.home.model || 'default' } : undefined, today: t ? this._spendToday(t) : undefined }); }) })),
       hostSettings: { ...settings, limitPlanSummary: this._planSummary(settings.limitPlan), accounts: this._accountDefs() },
       hostPush: { configured: !!this._apnsConfig(), teamId: this.state.push?.apns?.teamId ?? null, keyId: this.state.push?.apns?.keyId ?? null,
         devices: Object.entries(this.state.push?.devices ?? {}).map(([id, d]) => ({ id, name: d.name, environment: d.environment, at: d.at })) },

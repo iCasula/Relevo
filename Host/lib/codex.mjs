@@ -11,7 +11,17 @@ import { classify } from './claude.mjs';
 const APPROVAL = { ask: 'untrusted', autoEdit: 'on-request', plan: 'on-request', full: 'never', guarded: 'untrusted' };
 const SANDBOX = { ask: 'workspace-write', autoEdit: 'workspace-write', plan: 'read-only', full: 'danger-full-access', guarded: 'danger-full-access' };
 const SANDBOX_POLICY = { ask: { type: 'workspaceWrite' }, autoEdit: { type: 'workspaceWrite' }, plan: { type: 'readOnly' }, full: { type: 'dangerFullAccess' }, guarded: { type: 'dangerFullAccess' } };
-const CLIENT_INFO = { clientInfo: { name: 'relevo', title: 'Relevo', version: '1.0' } };
+// experimentalApi: Daybreak (`turn/start.cyberAccessProgram`) is experimental in app-server.
+const CLIENT_INFO = { clientInfo: { name: 'relevo', title: 'Relevo', version: '1.0' }, capabilities: { experimentalApi: true } };
+// «daybreak_blue» → «daybreakBlue»: older catalogs spell the programs in snake case.
+const camel = (s) => String(s).replace(/_(\w)/g, (_, c) => c.toUpperCase());
+/** The Daybreak program a model accepts for this account (Blue first), false when it accepts none, undefined when the catalog doesn't say. */
+export function daybreakOf(m) {
+  const cyber = m?.availableAccessPrograms?.cyber;
+  if (!Array.isArray(cyber)) return undefined;
+  const list = cyber.map(camel);
+  return ['daybreakBlue', 'daybreakRed'].find((p) => list.includes(p)) ?? false;
+}
 
 const cap = (s, n = 4000) => (s.length > n ? s.slice(0, n) + '\n…' : s);
 
@@ -138,9 +148,10 @@ class RPC extends EventEmitter {
 }
 
 export class CodexSession extends EventEmitter {
-  constructor({ bin, cwd, env, model, effort, mode, resumeId, guarded = false }) {
+  /** `cyber`: a function giving the Daybreak program for the next turn (null: Codex decides). */
+  constructor({ bin, cwd, env, model, effort, mode, resumeId, guarded = false, cyber = null }) {
     super();
-    Object.assign(this, { bin, cwd, env, model: model === 'default' ? '' : model, effort, mode, resumeId, guarded });
+    Object.assign(this, { bin, cwd, env, model: model === 'default' ? '' : model, effort, mode, resumeId, guarded, cyber });
     this.rpc = null;
     this.threadId = null;
     this.turnId = null;
@@ -210,6 +221,8 @@ export class CodexSession extends EventEmitter {
     };
     if (this.model) params.model = this.model;
     if (this.effort) params.effort = this.effort;
+    const cyber = this.cyber?.();
+    if (cyber) params.cyberAccessProgram = cyber;
     const r = await this.rpc?.request('turn/start', params);
     if (r?.error) this._fail(r.error.message);
     else if (r?.result?.turn?.id) this.turnId = r.result.turn.id;
@@ -423,7 +436,7 @@ export async function codexProbe({ bin, env, cwd }) {
     const list = (models.result?.data ?? []).filter((m) => !m.hidden).map((m) => ({
       id: m.model ?? m.id, name: m.displayName ?? m.model ?? m.id, detail: m.description ?? null,
       efforts: (m.supportedReasoningEfforts ?? []).map((e) => e.reasoningEffort).filter(Boolean),
-      defaultEffort: m.defaultReasoningEffort ?? null,
+      defaultEffort: m.defaultReasoningEffort ?? null, daybreak: daybreakOf(m),
     })).filter((m) => m.id).map((m) => ({ ...m, efforts: m.efforts.length ? m.efforts : null }));
     if (list.length) status.models = list;
   } finally {

@@ -463,6 +463,7 @@ export class Teams {
     t.accountId = account?.id ?? t.accountId;
     t.model = pick?.model || 'default';
     t.effort = pick?.effort || null;
+    t.daybreak = !!pick?.daybreak || undefined;
     // A Codex researcher runs read-only: it can read and search without asking, and can't write.
     t.mode = role === 'researcher' && account?.kind === 'codex' ? 'plan' : mode;
     t.title = `${name} · ${clip(team.goal.split('\n')[0], 48)}`;
@@ -571,6 +572,12 @@ export class Teams {
       if (account && (moved || (effort !== undefined && effort !== (t.effort ?? null)))) {
         h.select(t, account.id, model, false, false, effort);
         if (m.role !== 'orchestrator') news.push(`${m.name} pasa a ${account.name} · ${h._modelName(account, model)}${effort ? ` (esfuerzo ${effort})` : ''}`);
+      }
+      // Daybreak: from its next turn (Codex only; the program its model accepts with this account).
+      if (c.daybreak !== undefined && !!c.daybreak !== !!t.daybreak) {
+        t.daybreak = !!c.daybreak || undefined;
+        if (t.items.length) h._append(t, { id: h._uuid(), kind: 'notice', text: t.daybreak ? 'Daybreak activado: menos rechazos en trabajo de ciberseguridad defensiva desde el próximo turno' : 'Daybreak desactivado' });
+        h._changed(t);
       }
     }
 

@@ -1041,7 +1041,7 @@ export function openTeamEditor(hostId, teamId) {
   const ROLE_UI = { orchestrator: ['crown.fill', 'r-orchestrator'], executor: ['wrench.and.screwdriver', 'r-executor'], researcher: ['globe', 'r-researcher'] };
   const st = {
     goal: team.goal,
-    members: team.members.map((m) => ({ ...m, accountId: m.accountId ?? usable[0]?.id, model: m.model ?? 'default', effort: m.effort ?? '', notes: m.notes ?? '', fallback: m.fallback ?? '', remove: false })),
+    members: team.members.map((m) => ({ ...m, accountId: m.accountId ?? usable[0]?.id, model: m.model ?? 'default', effort: m.effort ?? '', daybreak: !!m.daybreak, notes: m.notes ?? '', fallback: m.fallback ?? '', remove: false })),
     workDirs: (team.workDirs ?? []).join('\n'),
     allFallback: null, // the "for everyone" picker, until a member's own differs
     adds: [], // { role, accountId, model, notes }
@@ -1050,7 +1050,8 @@ export function openTeamEditor(hostId, teamId) {
     leadApproves: team.leadApproves !== false,
     worktrees: true,
   };
-  const original = JSON.stringify(st.members.map(({ threadId, accountId, model, effort, notes, fallback, name }) => ({ threadId, accountId, model, effort, notes, fallback, name })));
+  const original = JSON.stringify(st.members.map(({ threadId, accountId, model, effort, daybreak, notes, fallback, name }) => ({ threadId, accountId, model, effort, daybreak, notes, fallback, name })));
+  const daybreaks = has(hostId, 'daybreak');
   const efforts = has(hostId, 'effortSwitch');
   const canRename = has(hostId, 'teamRename');
   const nameField = (key, m) => (canRename ? `<input class="team-name" data-name="${key}" value="${esc(m.name)}" maxlength="32" spellcheck="false" title="Nombre del agente: el orquestador lo usa para darle órdenes">` : esc(m.name));
@@ -1064,7 +1065,16 @@ export function openTeamEditor(hostId, teamId) {
     const list = accounts.some((x) => x.id === r.accountId) ? usable.concat(usable.some((x) => x.id === r.accountId) ? [] : [accountOf(hostId, r.accountId)]) : usable;
     return `<select class="field" style="width:190px" data-acc="${key}">${list.map((x) => `<option value="${esc(x.id)}"${x.id === r.accountId ? ' selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
       <select class="field grow" data-model="${key}">${visibleModels(a).map((m) => `<option value="${esc(m.id)}"${m.id === r.model ? ' selected' : ''}>${esc(m.name)}</option>`).join('')}${visibleModels(a).some((m) => m.id === r.model) ? '' : `<option value="${esc(r.model)}" selected>${esc(r.model)}</option>`}</select>`
-      + (efforts ? effortSelect(hostId, a?.id, r.model, r.effort, `data-effort="${key}"`, 'Esfuerzo de razonamiento con este modelo: se aplica al guardar (si está a mitad de un turno, al terminarlo)') : '');
+      + (efforts ? effortSelect(hostId, a?.id, r.model, r.effort, `data-effort="${key}"`, 'Esfuerzo de razonamiento con este modelo: se aplica al guardar (si está a mitad de un turno, al terminarlo)') : '')
+      + (daybreaks ? daybreakToggle(a, r, key) : '');
+  };
+  // Daybreak (OpenAI's access for cyber work): fewer refusals with the model chosen, on Codex accounts approved for it.
+  const daybreakToggle = (a, r, key) => {
+    if (a?.kind !== 'codex') return '';
+    const accepts = modelOf(a, r.model)?.daybreak;
+    const title = accepts === false ? 'Con tu acceso, este modelo no admite Daybreak (GPT‑6.1/6.2 y Astra necesitan Daybreak Red)'
+      : 'Daybreak: menos rechazos en trabajo de ciberseguridad defensiva con este modelo. Necesita una cuenta aprobada (Daybreak Blue o Red) con la sesión iniciada con llave de seguridad; se aplica desde su próximo turno';
+    return `<label class="team-daybreak${accepts === false ? ' off' : ''}" title="${esc(title)}"><input type="checkbox" class="check" data-daybreak="${key}"${r.daybreak && accepts !== false ? ' checked' : ''}${accepts === false ? ' disabled' : ''}> Daybreak</label>`;
   };
   // With «→ otro modelo» as the fallback, the effort for that model too.
   const fallbackEffort = (key, r) => {
@@ -1098,6 +1108,7 @@ export function openTeamEditor(hostId, teamId) {
     s.el.querySelectorAll('[data-acc]').forEach((el) => { el.onchange = () => { const r = target(el.dataset.acc); r.accountId = el.value; r.model = visibleModels(accountOf(hostId, el.value))[0]?.id ?? 'default'; r.effort = ''; keep(); draw(); }; });
     s.el.querySelectorAll('[data-model]').forEach((el) => { el.onchange = () => { const r = target(el.dataset.model); r.model = el.value; if (!(modelOf(accountOf(hostId, r.accountId), r.model)?.efforts ?? []).includes(r.effort)) r.effort = ''; keep(); draw(); }; });
     s.el.querySelectorAll('[data-effort]').forEach((el) => { el.onchange = () => { target(el.dataset.effort).effort = el.value; }; });
+    s.el.querySelectorAll('[data-daybreak]').forEach((el) => { el.onchange = () => { target(el.dataset.daybreak).daybreak = el.checked; }; });
     s.el.querySelectorAll('[data-fb-effort]').forEach((el) => { el.onchange = () => { const r = target(el.dataset.fbEffort); const [acc, model] = String(r.fallback).split('|'); r.fallback = el.value ? `${acc}|${model}|${el.value}` : `${acc}|${model}`; }; });
     s.el.querySelectorAll('[data-notes]').forEach((el) => { el.oninput = () => { target(el.dataset.notes).notes = el.value; }; });
     s.el.querySelectorAll('[data-fb]').forEach((el) => { el.onchange = () => { target(el.dataset.fb).fallback = el.value; keep(); draw(); }; });
@@ -1106,7 +1117,7 @@ export function openTeamEditor(hostId, teamId) {
     s.el.querySelectorAll('[data-rm]').forEach((b) => { b.onclick = () => { st.members[Number(b.dataset.rm)].remove = true; keep(); draw(); }; });
     s.el.querySelectorAll('[data-undo]').forEach((b) => { b.onclick = () => { st.members[Number(b.dataset.undo)].remove = false; keep(); draw(); }; });
     s.el.querySelectorAll('[data-rm-add]').forEach((b) => { b.onclick = () => { st.adds.splice(Number(b.dataset.rmAdd), 1); keep(); draw(); }; });
-    const fresh = (role) => { const a = usable[0]; return { role, accountId: a?.id, model: visibleModels(a)[0]?.id ?? 'default', effort: '', notes: '', fallback: has(hostId, 'smartFallback') ? 'auto' : '' }; };
+    const fresh = (role) => { const a = usable[0]; return { role, accountId: a?.id, model: visibleModels(a)[0]?.id ?? 'default', effort: '', daybreak: false, notes: '', fallback: has(hostId, 'smartFallback') ? 'auto' : '' }; };
     $('[data-add-exec]').onclick = () => { st.adds.push(fresh('executor')); keep(); draw(); };
     $('[data-add-res]')?.addEventListener('click', () => { st.adds.push(fresh('researcher')); keep(); draw(); });
     $('[data-wt]')?.addEventListener('change', (e) => { st.worktrees = e.target.checked; });
@@ -1120,7 +1131,7 @@ export function openTeamEditor(hostId, teamId) {
       if (new Set(names).size !== names.length) { toast('Dos agentes no pueden llamarse igual'); return; }
       const changes = {
         goal: st.goal.trim() !== team.goal ? st.goal.trim() : undefined,
-        members: st.members.filter((m, i) => !m.remove && JSON.stringify({ threadId: m.threadId, accountId: m.accountId, model: m.model, effort: m.effort, notes: m.notes, fallback: m.fallback, name: m.name }) !== JSON.stringify(before[i])).map(({ threadId, accountId, model, effort, notes, fallback, name }) => ({ threadId, accountId, model, effort: efforts ? effort || null : undefined, notes, fallback, name: canRename ? name : undefined })),
+        members: st.members.filter((m, i) => !m.remove && JSON.stringify({ threadId: m.threadId, accountId: m.accountId, model: m.model, effort: m.effort, daybreak: m.daybreak, notes: m.notes, fallback: m.fallback, name: m.name }) !== JSON.stringify(before[i])).map(({ threadId, accountId, model, effort, daybreak, notes, fallback, name }) => ({ threadId, accountId, model, effort: efforts ? effort || null : undefined, daybreak: daybreaks ? !!daybreak && modelOf(accountOf(hostId, accountId), model)?.daybreak !== false : undefined, notes, fallback, name: canRename ? name : undefined })),
         workDirs: has(hostId, 'teamWorkDirs') && st.workDirs.trim() !== (team.workDirs ?? []).join('\n') ? st.workDirs.split('\n').map((x) => x.trim()).filter(Boolean) : undefined,
         remove: st.members.filter((m) => m.remove).map((m) => m.threadId),
         add: { executors: st.adds.filter((a) => a.role === 'executor'), researcher: st.adds.find((a) => a.role === 'researcher') ?? null },
