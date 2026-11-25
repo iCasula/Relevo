@@ -1142,7 +1142,7 @@ export class Host {
 
   _guardRoots(t) {
     const main = t.worktree ? this.projects().find((p) => p.id === t.projectId)?.path : null;
-    const team = t.team ? this.teams.byId(t.team.id) : null;
+    const team = t.team ? this.teams.byId(t.team.id) : t.auditFor ? this.teams.byId(t.auditFor) : null;
     return guardRoots({ projectPath: t.projectPath, worktreePath: t.worktree?.path, extra: [main, this.config.dataDir, ...(team?.workDirs ?? [])].filter(Boolean) });
   }
 
@@ -1568,6 +1568,8 @@ export class Host {
       this._touch(t, it); this._changed(t, false);
     });
     s.on('approval', (req) => {
+      // The team's auditor only reads, and nobody waits by it: Relevo answers its requests at once.
+      if (t.auditFor && this.teams.auditApproval(t, req, req.questions?.length ? null : checkRequest(req, { roots: this._guardRoots(t), cwd: req.cwd ?? t.projectPath }))) { this._changed(t); return; }
       // The guard: in full access the agent goes on by itself unless what it asks can't be undone or leaves the
       // project folder; then it waits for you, in any mode, with the reason.
       const held = !req.questions?.length && this._guarded(t) ? checkRequest(req, { roots: this._guardRoots(t), cwd: req.cwd ?? t.worktree?.path ?? t.projectPath }) : null;

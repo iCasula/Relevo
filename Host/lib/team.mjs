@@ -16,7 +16,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import * as gitops from './gitops.mjs';
 import { elideCode, clip, threadBrief } from './handoff.mjs';
-import { isReadOnlyCommand } from './codex.mjs';
+import { isReadOnlyCommand, writesSomething, shellCommand } from './codex.mjs';
 import { workDir } from './guard.mjs';
 import { openLedger } from './ledger.mjs';
 
@@ -2236,7 +2236,7 @@ export class Teams {
     return {};
   }
 
-  /** Due audits: every N hours, and only if the team has done something since the last one. */
+  /** Due audits: N hours after the last one ended (or started, if it's still running), and only if the team has done something since. */
   watchAudits(now = Date.now() / 1000) {
     for (const team of this.list) {
       const a = team.audit;
@@ -2282,12 +2282,39 @@ Conclusión: una línea: ¿el equipo avanza hacia el objetivo? ¿Qué es lo más
 </relevo_auditoria>`;
   }
 
+  /**
+   * The auditor's permission requests, answered at once: nobody is there to answer them (an audit runs at night
+   * as well), and one left waiting loses the audit. Reads go (files, searches, git history, the web); what writes,
+   * deletes, builds or starts something, or what the guard would stop, is refused with what to do instead. Its
+   * questions are skipped, and a plan it hands in (Claude's plan mode) is its review.
+   */
+  auditApproval(t, req, held = null) {
+    const opt = (allow) => (req.options ?? []).find((o) => o.isAllow === allow && !/always|siempre|session|sesi/i.test(`${o.id} ${o.label}`))?.id ?? (req.options ?? []).find((o) => o.isAllow === allow)?.id ?? (allow ? 'allow' : 'deny');
+    const deny = (note) => { req.respond(opt(false), null, note); return 'denied'; };
+    if (req.questions?.length) return deny('Eres el auditor y nadie va a responder preguntas ahora: decide con lo que tienes y, si algo queda en duda, dilo en tu auditoría.');
+    const tool = String(req.toolName ?? '');
+    if (/^ExitPlanMode$/i.test(tool)) {
+      const plan = String(req.input?.plan ?? '').trim();
+      if (plan) t.auditPlan = plan;
+      return deny('Recibido: eso es tu auditoría. No hace falta nada más; termina aquí.');
+    }
+    const raw = req.input?.command ?? req.command ?? '';
+    const cmd = raw ? String(shellCommand(raw) ?? raw) : '';
+    const readTool = /^(Read|Glob|Grep|LS|WebSearch|WebFetch|NotebookRead|TodoWrite|Task|Agent)$/i.test(tool);
+    const ok = !held && (cmd ? isReadOnlyCommand(cmd) || !writesSomething(cmd) : readTool);
+    if (ok) { req.respond(opt(true)); return 'allowed'; }
+    return deny(`Eres el auditor y solo lees: ${held ? `Relevo lo detiene (${held.reason})` : cmd ? 'ese comando escribe, compila o arranca algo' : `${tool || 'esa herramienta'} cambia cosas`}. Sigue con lecturas: git log/show/diff, rg, cat, ls, Read.`);
+  }
+
   /** The audit is in: to the ledger, to a file in the project, to the orchestrator, and a notice for you. */
   onAuditFinished(t, { messages = [], errors = [] } = {}) {
     const team = this.byId(t.auditFor);
     if (!team) return;
     const h = this.host;
-    const report = withoutOrders(researchReport(messages)).trim();
+    // The next one counts from now: an audit that ran late doesn't make another one due at once.
+    if (team.audit) { team.audit.lastAt = Date.now() / 1000; team.audit.lastTurns = team.leadTurns ?? 0; }
+    const report = withoutOrders(researchReport(messages)).trim() || String(t.auditPlan ?? '').trim();
+    t.auditPlan = null;
     const lead = team.members.find((m) => m.role === 'orchestrator');
     const leadThread = this._lead(team);
     if (!report) {

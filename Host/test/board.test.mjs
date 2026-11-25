@@ -198,6 +198,56 @@ test('the auditor: set up, due only after the team worked, its review goes to th
   assert.equal(teams.boardFor(team).audits.length, 1);
 });
 
+test('the auditor never waits for you: reads go, writes are refused with why, its questions skipped, its plan is its review', () => {
+  const { teams, team, delivered } = stand();
+  const A = { id: 'A', title: 'x', queued: [], items: [], auditFor: 'T1' };
+  const ask = (extra, held = null) => {
+    let got = null;
+    teams.auditApproval(A, { options: [{ id: 'allow', label: 'Permitir', isAllow: true }, { id: 'session', label: 'Permitir en esta sesión', isAllow: true }, { id: 'deny', label: 'Denegar', isAllow: false }], respond: (c, a, note) => { got = { c, note }; }, ...extra }, held);
+    return got;
+  };
+  assert.equal(ask({ toolName: 'Bash', input: { command: 'git log --oneline -20 && rg -n "OOM" docs' } }).c, 'allow');
+  assert.equal(ask({ toolName: 'Bash', input: { command: 'git worktree list --porcelain' } }).c, 'allow');
+  assert.equal(ask({ toolName: 'Bash', input: { command: "wsl -- bash -lc 'cd ~/me1 && git -C . log -5'" } }).c, 'allow');
+  assert.equal(ask({ toolName: 'Read', input: { file_path: 'V:/x/PROGRESS.md' } }).c, 'allow');
+  const rm = ask({ toolName: 'Bash', input: { command: 'rm -rf build' } });
+  assert.equal(rm.c, 'deny');
+  assert.match(rm.note, /Eres el auditor y solo lees: ese comando escribe/);
+  assert.equal(ask({ toolName: 'Bash', input: { command: 'make -j8' } }).c, 'deny');
+  assert.equal(ask({ toolName: 'Write', input: { file_path: 'a.md' } }).c, 'deny');
+  assert.match(ask({ toolName: 'Bash', input: { command: 'cat x' } }, { reason: 'fuera del proyecto' }).note, /Relevo lo detiene \(fuera del proyecto\)/);
+  assert.equal(ask({ questions: [{ question: '¿Sigo?' }] }).c, 'deny');
+  const plan = ask({ toolName: 'ExitPlanMode', input: { plan: 'Conclusión: el equipo se ha desviado del subhito 7.1.\n1. …' } });
+  assert.equal(plan.c, 'deny');
+  teams.onAuditFinished(A, { messages: [] });
+  assert.match(delivered.at(-1).text, /^Conclusión: el equipo se ha desviado del subhito 7\.1/);
+});
+
+test('the next audit is due N hours after the last one ended, not after it started', () => {
+  const { teams, team } = stand();
+  const started = [];
+  const A = { id: 'A', title: 'x', queued: [], items: [] };
+  Object.assign(teams.host, {
+    accountsById: new Map([['ACC', { id: 'ACC', name: 'Claude' }]]), _modelName: (a, m) => m,
+    createThread: () => { teams.host.threads.set('A', A); return A; }, agents: new Map(),
+    _startTurn: (t) => started.push(t), _push() {},
+  });
+  teams.setAudit(team, { accountId: 'acc', model: 'opus', every: 4 });
+  team.leadTurns = 10;
+  const t0 = team.audit.lastAt;
+  teams.watchAudits(t0 + 5 * 3600);
+  assert.equal(started.length, 1);
+  // It ran late (it finished 3 h after starting) while the team went on working.
+  const realNow = Date.now;
+  Date.now = () => (t0 + 8 * 3600) * 1000;
+  try { teams.onAuditFinished(A, { messages: ['Conclusión: bien.'] }); } finally { Date.now = realNow; }
+  team.leadTurns = 20;
+  teams.watchAudits(t0 + 9.5 * 3600);
+  assert.equal(started.length, 1, 'not two in a row');
+  teams.watchAudits(t0 + 12.5 * 3600);
+  assert.equal(started.length, 2);
+});
+
 test('the ledger without SQLite keeps the same board and log in a JSON file', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'relevo-ledger-'));
   for (const json of [true, false]) {

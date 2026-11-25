@@ -42,8 +42,13 @@ const unquote = (quote, s) => (quote === "'" ? s.replaceAll(`'\\''`, `'`) : s.re
  * orchestrator runs. Anything that writes, deletes, installs, builds, starts processes or redirects output to a
  * file is not. Conservative: when in doubt, it asks.
  */
-const WRITES = /(^|[^-<>=!])>{1,2}(?!&)|\b(Out-File|Set-Content|Add-Content|New-Item|Remove-Item|Move-Item|Copy-Item|Rename-Item|Clear-Content|Start-Process|Stop-Process|Invoke-WebRequest|Invoke-RestMethod|Invoke-Expression|iex|Set-ItemProperty|New-ItemProperty|Register-|Unregister-|Install-|Uninstall-)\b|\b(rm|del|erase|rmdir|rd|mkdir|md|mv|move|cp|copy|xcopy|robocopy|ren|rename|touch|chmod|chown|ln|tee|dd|kill|taskkill|shutdown|reboot|format|diskpart|reg|sc|schtasks|setx|curl|wget|scp|ssh|npm|npx|pnpm|yarn|pip|pip3|python3? -m pip|cargo|go|make|cmake|ninja|msbuild|cl|gcc|clang|docker|winget|choco|scoop|brew|apt|apt-get|powershell -c.*Set-|sed -i|perl -i)\b|\bgit\s+(?!log|show|diff|status|blame|grep|ls-files|ls-tree|rev-parse|branch\s*$|branch\s+-[av]+\s*$|describe|shortlog|cat-file|config\s+--get)\w/i;
+const WRITES = /(^|[^-<>=!])>{1,2}(?!&)|\b(Out-File|Set-Content|Add-Content|New-Item|Remove-Item|Move-Item|Copy-Item|Rename-Item|Clear-Content|Start-Process|Stop-Process|Invoke-WebRequest|Invoke-RestMethod|Invoke-Expression|iex|Set-ItemProperty|New-ItemProperty|Register-|Unregister-|Install-|Uninstall-)\b|\b(rm|del|erase|rmdir|rd|mkdir|md|mv|move|cp|copy|xcopy|robocopy|ren|rename|touch|chmod|chown|ln|tee|dd|kill|taskkill|shutdown|reboot|format|diskpart|reg|sc|schtasks|setx|curl|wget|scp|ssh|npm|npx|pnpm|yarn|pip|pip3|python3? -m pip|cargo|go|make|cmake|ninja|msbuild|cl|gcc|clang|docker|winget|choco|scoop|brew|apt|apt-get|powershell -c.*Set-|sed -i|perl -i)\b|\bgit\s+(?!log|show|diff|status|blame|grep|ls-files|ls-tree|rev-parse|branch\s*$|branch\s+-[av]+\s*$|describe|shortlog|cat-file|config\s+--get|worktree\s+list|for-each-ref|rev-list|merge-base|reflog|stash\s+list|remote\s+-v|count-objects|-C\s)\w/i;
 const READS = /^\s*(\$\w+\s*=|rg|grep|findstr|Select-String|Get-Content|gc|cat|type|head|tail|less|more|ls|dir|Get-ChildItem|gci|tree|find|where|which|Get-Command|Get-Item|gi|Test-Path|Resolve-Path|wc|sort|uniq|echo|Write-Output|Format-|Measure-Object|git\s|sed\s+-n|awk|jq|python3? -c|node -e|stat|file|du|Split-Path|Join-Path|\$\w+\[|\(|foreach|ForEach-Object|%|Select-Object|Where-Object)/i;
+/** A command that writes, deletes, installs, builds or starts something, as far as Relevo can tell. */
+export function writesSomething(command) {
+  return WRITES.test(String(command ?? ''));
+}
+
 export function isReadOnlyCommand(command) {
   const c = String(command ?? '').trim();
   if (!c || WRITES.test(c)) return false;
