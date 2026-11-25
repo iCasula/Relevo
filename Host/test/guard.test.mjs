@@ -159,3 +159,12 @@ test('quoted text is no redirect: a perl substitution with «<algorithm>/#includ
   assert.equal(held(`wsl -e bash -lc "cd /tmp/x; perl -0pi -e 's/#include <algorithm>/#include <new>/' scripts/x.py; git diff --stat"`), null);
   assert.match(held('echo hola > "C:\\Users\\x\\a.txt"'), /fuera de la carpeta/);
 });
+
+test("the user's mailbox to the orchestrator: an agent may read it, not write in it", async () => {
+  const { checkRequest } = await import('../lib/guard.mjs');
+  const roots = ['/p'];
+  assert.equal(checkRequest({ toolName: 'Write', input: { file_path: '/p/.relevo/al-orquestador/nota.md' } }, { roots, cwd: '/p', platform: 'linux' })?.mailbox, true);
+  assert.equal(checkRequest({ toolName: 'Bash', input: { command: "printf 'T96 E3: coordinad QEMU' > /p/.relevo/al-orquestador/e3.txt" } }, { roots, cwd: '/p', platform: 'linux' })?.mailbox, true);
+  assert.equal(checkRequest({ toolName: 'Bash', input: { command: 'ls /p/.relevo/al-orquestador' } }, { roots, cwd: '/p', platform: 'linux' }), null);
+  assert.equal(checkRequest({ toolName: 'Write', input: { file_path: '/p/docs/x.md' } }, { roots, cwd: '/p', platform: 'linux' }), null);
+});

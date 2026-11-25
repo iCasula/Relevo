@@ -1573,6 +1573,14 @@ export class Host {
       // The guard: in full access the agent goes on by itself unless what it asks can't be undone or leaves the
       // project folder; then it waits for you, in any mode, with the reason.
       const held = !req.questions?.length && this._guarded(t) ? checkRequest(req, { roots: this._guardRoots(t), cwd: req.cwd ?? t.worktree?.path ?? t.projectPath }) : null;
+      // A team agent writing in your mailbox to the orchestrator would speak as you: refused at once, with the way.
+      if (held?.mailbox && t.team) {
+        const deny = (req.options ?? []).find((o) => !o.isAllow)?.id ?? 'deny';
+        req.respond(deny, null, 'La carpeta .relevo/al-orquestador es el buzón del usuario y de su auditor externo: no escribas en ella. Para hablar con el orquestador, termina tu turno con tu informe o con <relevo:pregunta>.');
+        this._append(t, { id: uuid(), kind: 'notice', text: 'Relevo ha impedido que escriba en tu buzón al orquestador (.relevo/al-orquestador)' });
+        this._changed(t);
+        return;
+      }
       if (!held && t.mode === 'full' && this._guarded(t) && !req.questions?.length) {
         const allow = (req.options ?? []).find((o) => o.isAllow && !/always|siempre/i.test(`${o.id} ${o.label}`)) ?? (req.options ?? []).find((o) => o.isAllow);
         if (allow) { req.respond(allow.id); return; }

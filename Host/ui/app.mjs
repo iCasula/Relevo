@@ -670,7 +670,17 @@ const ORDER = {
   descartar: ['Descartar', 'xmark.circle', true], hito: ['Hito', 'checklist', true], hecho: ['Hecho', 'checkmark.circle.fill', true],
   aprobar: ['Permitir', 'checkmark.shield'], denegar: ['Denegar', 'xmark.octagon'], consultar: ['Consultar al usuario', 'hand.raised'],
   pedir: ['Te pide', 'hand.raised.fill'],
+  cerrar: ['Cerrar', 'checkmark.circle', true], registro: ['Registro', 'doc.text', true], buscar: ['Buscar', 'magnifyingglass', true],
+  fijar: ['Fijar', 'pin.fill', true], soltar: ['Soltar', 'pin', true],
 };
+/** The task, milestone or decision an order is about, for its folded row: «Cerrar T81», «Hito · del #7». */
+function orderLabel(x) {
+  const [label] = ORDER[x.type] ?? [x.type];
+  if (x.type === 'cerrar') return `${/descart/i.test(x.estado ?? '') ? 'Descartar' : 'Cerrar'}${x.tarea ? ` T${x.tarea.replace(/^T/i, '')}` : ''}`;
+  if (x.type === 'integrar' && x.tarea) return `Integrar T${x.tarea.replace(/^T/i, '')}`;
+  if (x.type === 'hito' && x.padre) return `Subhito del #${x.padre}`;
+  return `${label}${x.to ? ` → ${x.to}` : ''}${x.type === 'tarea' && x.hito ? ` · #${x.hito}` : ''}`;
+}
 /** The role of whoever an order goes to: from the team when the name is known, else from the name or the kind. */
 function recipientRole(o, roles) {
   const to = o.to?.toLowerCase() ?? '';
@@ -681,7 +691,7 @@ const teamRoles = (hostId) => {
   const team = id && teamOf(hostId, id);
   return team ? new Map(team.members.map((m) => [m.name.toLowerCase(), m.role])) : null;
 };
-const ORDER_TAG = /<relevo:(tarea|urgente|investigar|respuesta|pregunta|integrar|fin|decisi[oó]n|descartar|hito|hecho|aprobar|denegar|consultar|pedir)\b([^>]*?)(?:\/>|>([\s\S]*?)<\/relevo:\1\s*>)/gi;
+const ORDER_TAG = /<relevo:(tarea|urgente|investigar|respuesta|pregunta|integrar|fin|decisi[oó]n|descartar|hito|hecho|aprobar|denegar|consultar|pedir|cerrar|registro|buscar|fijar|soltar)\b([^>]*?)(?:\/>|>([\s\S]*?)<\/relevo:\1\s*>)/gi;
 const ORDER_TO = /\b(?:para|de)\s*=\s*(?:["“']([^"”']+)["”']|([^\s"”'>/]+))/i;
 
 /** The reply cut into prose and orders, in order; tags inside code blocks stay text (as the host reads them). */
@@ -695,7 +705,8 @@ function orderSegments(text) {
     if (code.some(([a, b]) => m.index < b && m.index + m[0].length > a)) continue;
     prose(m.index);
     const to = ORDER_TO.exec(m[2] ?? '');
-    out.push({ type: m[1].toLowerCase().replace('ó', 'o'), to: (to?.[1] ?? to?.[2])?.trim(), body: (m[3] ?? '').trim() });
+    const attr = (name) => { const a = new RegExp(`\\b${name}\\s*=\\s*(?:["“']([^"”']+)["”']|([^\\s"”'>/]+))`, 'i').exec(m[2] ?? ''); return (a?.[1] ?? a?.[2])?.trim(); };
+    out.push({ type: m[1].toLowerCase().replace('ó', 'o'), to: (to?.[1] ?? to?.[2])?.trim(), body: (m[3] ?? '').trim(), tarea: attr('tarea'), estado: attr('estado'), padre: attr('padre'), hito: attr('hito') });
     cursor = m.index + m[0].length;
   }
   if (!out.some((x) => x.type)) return null;
@@ -712,7 +723,7 @@ function previewLine(text) {
 /** A long message from another agent, folded: its orders as «Tarea → X», the rest as plain text. */
 function folded(text) {
   const segs = orderSegments(text);
-  const plain = segs ? segs.map((x) => x.type ? `${ORDER[x.type]?.[0] ?? x.type}${x.to ? ` → ${x.to}` : ''}: ${previewLine(x.body)}` : x.text).join('\n') : text;
+  const plain = segs ? segs.map((x) => x.type ? `${orderLabel(x)}: ${previewLine(x.body)}` : x.text).join('\n') : text;
   return plain.replace(/<\/?relevo:[^>]*>/g, '').replace(/[*`#>]/g, '').replace(/\n{2,}/g, '\n').trim();
 }
 
@@ -726,9 +737,11 @@ function replyHTML(text, id, roles) {
     // What it asks you is for you to read: always open, in its own colour.
     const ask = x.type === 'pedir';
     const open = ask || app.expandedItems.has(key);
-    const [label, sym, memo] = ORDER[x.type] ?? [x.type, 'text.bubble'];
+    const [, sym0, memo] = ORDER[x.type] ?? [x.type, 'text.bubble'];
+    const sym = x.type === 'cerrar' && /descart/i.test(x.estado ?? '') ? 'xmark.circle' : sym0;
+    const label = orderLabel(x);
     const cls = memo ? 'memo' : ask ? 'msg ask' : x.type === 'urgente' ? 'msg urgent' : `msg r-${recipientRole(x, roles)}`;
-    const head = `<button class="order-head" data-toggle-item="${esc(key)}"${x.body && !ask ? '' : ' disabled'}>${icon(sym, { size: 12, cls: 'sym' })}<b>${esc(label)}${x.to ? ` → ${esc(x.to)}` : ''}</b>`
+    const head = `<button class="order-head" data-toggle-item="${esc(key)}"${x.body && !ask ? '' : ' disabled'}>${icon(sym, { size: 12, cls: 'sym' })}<b>${esc(label)}</b>`
       + `${!open && x.body ? `<span class="pv">${esc(previewLine(x.body))}</span>` : '<span class="grow"></span>'}${x.body && !ask ? icon(open ? 'chevron.down' : 'chevron.right', { size: 9, cls: 'chev' }) : ''}</button>`;
     return `<div class="order ${cls}">${head}${open && x.body ? `<div class="md order-body">${markdown(x.body)}</div>` : ''}</div>`;
   }).join('')}</div>`;

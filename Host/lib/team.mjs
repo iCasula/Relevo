@@ -349,7 +349,7 @@ ${roster}
 - Si dejas algo en segundo plano (una compilación, un emulador) y terminas el turno para esperarlo, no hace falta que informes: Relevo lo sabe y el orquestador no te escribirá hasta que acabes.
 - Si te bloqueas o necesitas una decisión, termina tu respuesta con <relevo:pregunta>tu duda concreta</relevo:pregunta> y espera la respuesta.${researcher ? ` Si llevas dos intentos fallidos con el mismo problema, pregunta: el ${researcher.name} puede buscar soluciones que ya existan.` : ''}
 - Otros agentes pueden estar trabajando en el mismo proyecto: toca solo lo que te pidan.
-- No crees documentos de estado, seguimiento ni informes en el repositorio salvo que tu tarea lo pida: tu informe final llega al orquestador y Relevo lo guarda.
+- No crees documentos de estado, seguimiento ni informes en el repositorio salvo que tu tarea lo pida: tu informe final llega al orquestador y Relevo lo guarda. La carpeta ${DECISIONS_DIR}/ es de Relevo: no escribas en ella (salvo tus worktrees en ${DECISIONS_DIR}/worktrees); ${DECISIONS_DIR}/${INBOX} es el buzón del usuario. Al orquestador le hablas con tu informe o con <relevo:pregunta>.
 - Si tu tarea lo necesita, puedes trabajar en una rama o un worktree propios: uno por tarea y con su número en el nombre (t12-audio, o con prefijo: e1/t12-audio), p. ej. \`git worktree add .relevo/worktrees/t12-audio -b t12-audio\` desde la carpeta del proyecto (.relevo no entra en git). Haz commits en ella y di en tu informe la rama y si queda lista para integrar. No la borres ni la fusiones tú salvo que te lo pidan: al cerrarse la tarea con todo integrado, Relevo retira la rama y el worktree. Nada de ramas ni worktrees sin número de tarea.
 - Cada mensaje del equipo trae al final el estado de los demás (trabajando, en segundo plano, libre, BLOQUEADO esperando al usuario, SIN CUOTA y cuándo retoma): no esperes una respuesta de quien no puede darla; dilo en tu informe.
 ${notesOf(member)}${decisionsBlock(team)}${taskLine}${carried}</relevo_equipo>
@@ -1090,10 +1090,16 @@ export class Teams {
       member.inquiry = null;
     }
     // Executors sharing one folder: uncommitted work piles up and gets mixed.
+    // Said once each time it changes (not with every report): the files, so whoever made them can be found.
     if (member.role === 'executor' && !thread.worktree) {
       const others = team.members.filter((m) => m !== member && m.role === 'executor' && !h.threads.get(m.threadId)?.worktree);
-      const files = others.length && gitops.isRepo(thread.projectPath) ? gitops.status(thread.projectPath).files.length : 0;
-      if (files >= 1) report.push(`Carpeta compartida con ${others.map((m) => m.name).join(', ')}: ${files} fichero${files === 1 ? '' : 's'} sin commit. Pide que cada uno haga commit de lo suyo al cerrar cada tarea, para no mezclar trabajo.`);
+      const list = others.length && gitops.isRepo(thread.projectPath) ? gitops.status(thread.projectPath).files : [];
+      const sig = list.map((f) => f.path).sort().join('|');
+      if (!list.length) team.dirtySig = '';
+      else if (sig !== team.dirtySig) {
+        team.dirtySig = sig;
+        report.push(`(Relevo: la carpeta del proyecto, que comparten los ejecutores, tiene ${list.length} fichero${list.length === 1 ? '' : 's'} sin commit: ${list.slice(0, 6).map((f) => f.path).join(', ')}${list.length > 6 ? '…' : ''}. Si son de una tarea, que su responsable haga commit de lo suyo; no volveré a decirlo hasta que cambie.)`);
+      }
     }
     // What it said last, for the orchestrator's next fresh session.
     member.lastReport = { text: clip(headTail(elideCode(body, 4), 900).replace(/\n{2,}/g, '\n'), 900), at: Date.now() / 1000 };
@@ -2018,7 +2024,12 @@ export class Teams {
       repos.push({ repo: r.repo, base: r.base });
       for (const it of r.items) {
         const ready = this._gitReady?.get(`${r.repo}|${it.branch ?? it.path}`);
-        items.push({ ...it, repo: r.repo, base: r.base, task: taskOfRef(it.branch) || taskOfRef(it.path && path.basename(it.path)) || null, ...(ready ? { ready } : {}) });
+        // Its task, if that task existed when it was made: an older t8-… is not today's T8.
+        const n = taskOfRef(it.branch) || taskOfRef(it.path && path.basename(it.path)) || null;
+        const task = n ? this.ledger.task(team.id, n) : null;
+        const made = it.made ?? it.when ?? null;
+        const ok = task && (made == null || made >= task.created - 600);
+        items.push({ ...it, repo: r.repo, base: r.base, task: ok ? n : null, ...(ready ? { ready } : {}) });
       }
     }
     const state = { at: Date.now() / 1000, repos, items };
@@ -2298,7 +2309,8 @@ Conclusión: una línea: ¿el equipo avanza hacia el objetivo? ¿Qué es lo más
       if (plan) t.auditPlan = plan;
       return deny('Recibido: eso es tu auditoría. No hace falta nada más; termina aquí.');
     }
-    const raw = req.input?.command ?? req.command ?? '';
+    // Antigravity (headless) asks afterwards, to run again what it denied: the denied actions are in its text.
+    const raw = req.input?.command ?? req.command ?? (/^agy$/i.test(tool) ? req.text : '') ?? '';
     const cmd = raw ? String(shellCommand(raw) ?? raw) : '';
     const readTool = /^(Read|Glob|Grep|LS|WebSearch|WebFetch|NotebookRead|TodoWrite|Task|Agent)$/i.test(tool);
     const ok = !held && (cmd ? isReadOnlyCommand(cmd) || !writesSomething(cmd) : readTool);

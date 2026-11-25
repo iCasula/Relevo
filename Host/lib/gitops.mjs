@@ -371,6 +371,18 @@ export function taskRefs(cwd, pick) {
     it.ahead = best ? best.n : null;
     if (best && best.n === 0 && best.t !== base) it.into = best.t;
   }
+  // When each one was made: the branch's first reflog entry, else its worktree folder's birth (to tell a task's
+  // branch from an older one that happens to carry the same number).
+  for (const it of items.values()) {
+    let made = null;
+    if (it.branch) {
+      const r = git(cwd, ['reflog', 'show', '--format=%ct', `refs/heads/${it.branch}`, '--']);
+      const last = r.ok ? r.out.trim().split('\n').filter(Boolean).at(-1) : null;
+      if (last) made = Number(last) || null;
+    }
+    if (!made && it.path) { try { const st = fs.statSync(it.path); made = (st.birthtimeMs || st.ctimeMs) / 1000 || null; } catch {} }
+    it.made = made;
+  }
   return { repo: main.path, base, integration: targets.filter((t) => t !== base), items: [...items.values()] };
 }
 

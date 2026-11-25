@@ -241,8 +241,15 @@ const FILE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
 export function checkRequest(req, { roots, cwd, platform = process.platform } = {}) {
   const input = req.input && typeof req.input === 'object' ? req.input : {};
   const command = req.command ?? input.command ?? (Array.isArray(input) ? null : input.cmd) ?? null;
-  if (command) { const v = checkCommand(command, { roots, cwd, platform }); if (v) return v; }
   const file = input.file_path ?? input.notebook_path ?? input.path ?? null;
+  // The user's mailbox to the orchestrator (.relevo/al-orquestador): only the user and their outside auditor
+  // write there; an agent that does speaks to the orchestrator as if it were the user.
+  const MAILBOX = /\.relevo[\\/]+al-orquestador/i;
+  if ((file && MAILBOX.test(String(file)) && (FILE_TOOLS.has(req.toolName) || req.toolName === 'fileChange'))
+    || (command && MAILBOX.test(command) && /(^|[^-<>=!])>{1,2}|\b(tee|cp|mv|copy|move|Set-Content|Out-File|Add-Content|Copy-Item|Move-Item|New-Item|rename|ren)\b/i.test(command))) {
+    return { reason: 'escribe en el buzón del usuario (.relevo/al-orquestador)', mailbox: true };
+  }
+  if (command) { const v = checkCommand(command, { roots, cwd, platform }); if (v) return v; }
   if (file && (FILE_TOOLS.has(req.toolName) || req.toolName === 'fileChange' || !command)) {
     const abs = /^(?:[A-Za-z]:[\\/]|\/|~)/.test(file) ? file : cwd ? resolveFrom(cwd, file) : file;
     if (!inside(abs, roots, platform)) return { reason: `escribe fuera de la carpeta del proyecto (${file})` };

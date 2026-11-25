@@ -189,3 +189,19 @@ test('a task branch merged into an integration branch (integration/me1) counts a
   assert.equal(branches(dir).includes('e1/t1-gc'), false);
   assert.equal(branches(dir).includes('integration/me1'), true);
 });
+
+test("an older branch that happens to carry a task's number (t8-… from before the board) is not that task's", async () => {
+  const dir = repo();
+  const { teams, team, task } = stand(dir);
+  git(dir, 'branch', 'e2/t1-vieja');
+  const t1 = task('nueva');
+  teams.ledger.updateTask(team.id, t1.id, {});
+  // The task is newer than the branch: pretend it was created an hour after.
+  const real = teams.ledger.task.bind(teams.ledger);
+  teams.ledger.task = (tm, id) => { const x = real(tm, id); return x ? { ...x, created: x.created + 3600 } : x; };
+  const it = teams.gitScan(team).items.find((x) => x.branch === 'e2/t1-vieja');
+  assert.equal(it.task, null);
+  teams.closeTasks(team, [t1.id], 'verificada', 'ok', 'Orquestador');
+  await teams.gitTidy(team);
+  assert.equal(branches(dir).includes('e2/t1-vieja'), true, 'never taken away as T1');
+});

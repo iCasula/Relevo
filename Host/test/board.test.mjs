@@ -217,6 +217,10 @@ test('the auditor never waits for you: reads go, writes are refused with why, it
   assert.equal(ask({ toolName: 'Write', input: { file_path: 'a.md' } }).c, 'deny');
   assert.match(ask({ toolName: 'Bash', input: { command: 'cat x' } }, { reason: 'fuera del proyecto' }).note, /Relevo lo detiene \(fuera del proyecto\)/);
   assert.equal(ask({ questions: [{ question: '¿Sigo?' }] }).c, 'deny');
+  // Antigravity offers to run again what it denied: a read goes, a write doesn't.
+  const agy = (text) => { let got = null; teams.auditApproval(A, { toolName: 'agy', text, options: [{ id: 'retry', label: 'Permitir y reintentar', isAllow: true }, { id: 'deny', label: 'Ignorar', isAllow: false }], respond: (c) => { got = c; } }); return got; };
+  assert.equal(agy('Bash run_command git log --oneline -30'), 'retry');
+  assert.equal(agy('Bash run_command rm -rf out/wt-old'), 'deny');
   const plan = ask({ toolName: 'ExitPlanMode', input: { plan: 'Conclusión: el equipo se ha desviado del subhito 7.1.\n1. …' } });
   assert.equal(plan.c, 'deny');
   teams.onAuditFinished(A, { messages: [] });

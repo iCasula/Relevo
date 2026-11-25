@@ -1038,84 +1038,130 @@ export function openTeamEditor(hostId, teamId) {
   if (!team) { toast('Equipo desconocido'); return; }
   const accounts = snap(hostId)?.accounts ?? [];
   const usable = accounts.filter((a) => a.status?.loggedIn !== false);
-  const ROLE_UI = { orchestrator: ['crown.fill', 'r-orchestrator'], executor: ['wrench.and.screwdriver', 'r-executor'], researcher: ['globe', 'r-researcher'] };
+  const ROLE_UI = { orchestrator: ['crown.fill', 'r-orchestrator', 'Orquestador'], executor: ['wrench.and.screwdriver', 'r-executor', 'Ejecutor'], researcher: ['globe', 'r-researcher', 'Investigador'] };
   const st = {
     goal: team.goal,
     members: team.members.map((m) => ({ ...m, accountId: m.accountId ?? usable[0]?.id, model: m.model ?? 'default', effort: m.effort ?? '', daybreak: !!m.daybreak, notes: m.notes ?? '', fallback: m.fallback ?? '', remove: false })),
     workDirs: (team.workDirs ?? []).join('\n'),
     audit: { accountId: team.audit?.accountId ?? '', model: team.audit?.model ?? 'default', effort: team.audit?.effort ?? '', every: team.audit?.every ?? 0 },
-    allFallback: null, // the "for everyone" picker, until a member's own differs
     adds: [], // { role, accountId, model, notes }
     budget: { usd: team.budget?.usd ?? '', action: team.budget?.action ?? 'pause' },
     guard: team.guard !== false,
     leadApproves: team.leadApproves !== false,
     worktrees: true,
+    open: new Set(), // the cards unfolded
+    more: false,
   };
   const original = JSON.stringify(st.members.map(({ threadId, accountId, model, effort, daybreak, notes, fallback, name }) => ({ threadId, accountId, model, effort, daybreak, notes, fallback, name })));
   const daybreaks = has(hostId, 'daybreak');
   const efforts = has(hostId, 'effortSwitch');
   const canRename = has(hostId, 'teamRename');
-  const nameField = (key, m) => (canRename ? `<input class="team-name" data-name="${key}" value="${esc(m.name)}" maxlength="32" spellcheck="false" title="Nombre del agente: el orquestador lo usa para darle órdenes">` : esc(m.name));
   const everyone = () => [...st.members.filter((m) => !m.remove), ...st.adds];
-  // The "for everyone" picker shows the shared value when all have the same one.
   const sharedFallback = () => { const v = everyone().map((m) => m.fallback ?? ''); return v.every((x) => x === v[0]) ? v[0] : null; };
   const hasResearcher = () => st.members.some((m) => m.role === 'researcher' && !m.remove) || st.adds.some((a) => a.role === 'researcher');
-  const s = openSheet({ width: 700 });
-  const selects = (key, r) => {
+  const s = openSheet({ width: 820 });
+  const target = (key) => (key[0] === 'm' ? st.members[Number(key.slice(1))] : st.adds[Number(key.slice(1))]);
+  // Daybreak (OpenAI's access for cyber work) on a Codex account: switched on, only the models that accept it.
+  const daybreakOn = (a, r) => daybreaks && a?.kind === 'codex' && r.daybreak;
+  const models = (a, r) => { const all = visibleModels(a); return daybreakOn(a, r) ? all.filter((m) => m.daybreak !== false) : all; };
+  const field = (label, control, wide = false) => `<label class="te-field${wide ? ' wide' : ''}"><span>${label}</span>${control}</label>`;
+  const accountSelect = (key, r) => {
+    const list = usable.concat(accounts.some((x) => x.id === r.accountId) && !usable.some((x) => x.id === r.accountId) ? [accountOf(hostId, r.accountId)] : []);
+    return `<select class="field" data-acc="${key}">${list.map((x) => `<option value="${esc(x.id)}"${x.id === r.accountId ? ' selected' : ''}>${esc(x.name)}</option>`).join('')}</select>`;
+  };
+  const modelSelect = (key, a, r) => {
+    const list = models(a, r);
+    return `<select class="field" data-model="${key}">${list.map((m) => `<option value="${esc(m.id)}"${m.id === r.model ? ' selected' : ''}>${esc(m.name)}</option>`).join('')}${list.some((m) => m.id === r.model) ? '' : `<option value="${esc(r.model)}" selected>${esc(modelOf(a, r.model)?.name ?? r.model)}</option>`}</select>`;
+  };
+  const daybreakField = (key, a, r) => {
+    if (!daybreaks || a?.kind !== 'codex') return '';
+    const any = visibleModels(a).some((m) => m.daybreak !== false);
+    return `<label class="te-check wide${any ? '' : ' off'}"><input type="checkbox" class="check" data-daybreak="${key}"${r.daybreak && any ? ' checked' : ''}${any ? '' : ' disabled'}><span><b>Daybreak</b> · menos rechazos en trabajo de ciberseguridad defensiva. Necesita una cuenta aprobada (Blue o Red) y se aplica desde su próximo turno.${r.daybreak ? ' Solo se listan los modelos que lo admiten con tu acceso.' : ''}${any ? '' : ' Tu acceso no lo admite con ningún modelo de esta cuenta.'}</span></label>`;
+  };
+  const summary = (a, r) => [a?.name ?? '?', modelOf(a, r.model)?.name ?? r.model, r.effort ? effortName(r.effort) : null, daybreakOn(a, r) ? 'Daybreak' : null].filter(Boolean).join(' · ');
+  const card = (key, r, { title, role, removable, removeTitle, removed, isNew }) => {
+    const [ic, cls, roleName] = ROLE_UI[role] ?? ROLE_UI.executor;
+    if (removed) return `<div class="te-card removed"><div class="te-head"><span class="role-chip ${cls}">${icon(ic, { size: 11 })} ${esc(roleName)}</span><b>${esc(title)}</b><span class="te-sum">Sale del equipo: su hilo se conserva como uno normal</span><button class="btn small" data-undo="${key.slice(1)}">Deshacer</button></div></div>`;
     const a = accountOf(hostId, r.accountId) ?? usable[0];
-    const list = accounts.some((x) => x.id === r.accountId) ? usable.concat(usable.some((x) => x.id === r.accountId) ? [] : [accountOf(hostId, r.accountId)]) : usable;
-    return `<select class="field" style="width:190px" data-acc="${key}">${list.map((x) => `<option value="${esc(x.id)}"${x.id === r.accountId ? ' selected' : ''}>${esc(x.name)}</option>`).join('')}</select>
-      <select class="field grow" data-model="${key}">${visibleModels(a).map((m) => `<option value="${esc(m.id)}"${m.id === r.model ? ' selected' : ''}>${esc(m.name)}</option>`).join('')}${visibleModels(a).some((m) => m.id === r.model) ? '' : `<option value="${esc(r.model)}" selected>${esc(r.model)}</option>`}</select>`
-      + (efforts ? effortSelect(hostId, a?.id, r.model, r.effort, `data-effort="${key}"`, 'Esfuerzo de razonamiento con este modelo: se aplica al guardar (si está a mitad de un turno, al terminarlo)') : '')
-      + (daybreaks ? daybreakToggle(a, r, key) : '');
+    const open = st.open.has(key) || isNew;
+    const notesPv = String(r.notes ?? '').replace(/\s+/g, ' ').trim();
+    return `<div class="te-card${open ? ' open' : ''}">
+      <button class="te-head" data-open="${key}"><span class="role-chip ${cls}">${icon(ic, { size: 11 })} ${esc(roleName)}</span><b>${esc(title)}</b><span class="te-sum">${esc(summary(a, r))}${notesPv && !open ? `<i>${esc(notesPv)}</i>` : ''}</span>${icon(open ? 'chevron.down' : 'chevron.right', { size: 10, cls: 'te-chev' })}</button>
+      ${open ? `<div class="te-body">
+        <div class="te-grid">
+          ${canRename && key[0] === 'm' ? field('Nombre', `<input class="field-input" data-name="${key}" value="${esc(r.name)}" maxlength="32" spellcheck="false" title="El orquestador lo usa para darle órdenes">`) : ''}
+          ${field('Suscripción', accountSelect(key, r))}
+          ${field('Modelo', modelSelect(key, a, r))}
+          ${efforts ? field('Esfuerzo', effortSelect(hostId, a?.id, r.model, r.effort, `data-effort="${key}"`, 'Esfuerzo de razonamiento: se aplica al guardar (si está a mitad de un turno, al terminarlo)') || '<span class="caption">Este modelo no tiene niveles</span>') : ''}
+          ${field('Si se acaba la cuota', `<div class="te-row">${fallbackSelect(hostId, `data-fb="${key}"`, r.fallback)}${fallbackEffort(key, r)}</div>`)}
+          ${daybreakField(key, a, r)}
+        </div>
+        ${field('Indicaciones para este agente', `<textarea class="field te-notes" data-notes="${key}" rows="3" placeholder="Su papel, cómo informar, qué evitar… (opcional)">${esc(r.notes ?? '')}</textarea>`, true)}
+        ${removable ? `<div class="te-actions"><span class="grow"></span><button class="btn small" ${removable}>${icon('minus.circle', { size: 12 })} ${removeTitle}</button></div>` : ''}
+      </div>` : ''}
+    </div>`;
   };
-  // Daybreak (OpenAI's access for cyber work): fewer refusals with the model chosen, on Codex accounts approved for it.
-  const daybreakToggle = (a, r, key) => {
-    if (a?.kind !== 'codex') return '';
-    const accepts = modelOf(a, r.model)?.daybreak;
-    const title = accepts === false ? 'Con tu acceso, este modelo no admite Daybreak (GPT‑6.1/6.2 y Astra necesitan Daybreak Red)'
-      : 'Daybreak: menos rechazos en trabajo de ciberseguridad defensiva con este modelo. Necesita una cuenta aprobada (Daybreak Blue o Red) con la sesión iniciada con llave de seguridad; se aplica desde su próximo turno';
-    return `<label class="team-daybreak${accepts === false ? ' off' : ''}" title="${esc(title)}"><input type="checkbox" class="check" data-daybreak="${key}"${r.daybreak && accepts !== false ? ' checked' : ''}${accepts === false ? ' disabled' : ''}> Daybreak</label>`;
-  };
-  // With «→ otro modelo» as the fallback, the effort for that model too.
   const fallbackEffort = (key, r) => {
     const [acc, model, effort] = String(r?.fallback ?? '').split('|');
     return efforts && model ? effortSelect(hostId, acc, model, effort ?? '', `data-fb-effort="${key}"`, 'Esfuerzo con el modelo de reserva') : '';
   };
-  const notesRow = (key, value) => `<div class="team-line"><span class="team-role"></span><input class="field-input grow team-notes" data-notes="${key}" placeholder="Indicaciones para este agente (opcional)" value="${esc(value ?? '')}">${fallbackSelect(hostId, `data-fb="${key}"`, (key[0] === 'm' ? st.members[Number(key.slice(1))] : st.adds[Number(key.slice(1))])?.fallback)}${fallbackEffort(key, key[0] === 'm' ? st.members[Number(key.slice(1))] : st.adds[Number(key.slice(1))])}<span class="tb-spacer"></span></div>`;
+  const auditCard = () => {
+    const a = st.audit.accountId ? accountOf(hostId, st.audit.accountId) : null;
+    const open = st.open.has('audit');
+    const sum = a ? `${a.name} · ${modelOf(a, st.audit.model)?.name ?? st.audit.model}${st.audit.effort ? ` · ${effortName(st.audit.effort)}` : ''} · ${st.audit.every ? `cada ${st.audit.every} h` : 'solo a mano'}` : 'Sin auditor';
+    return `<div class="te-card${open ? ' open' : ''}">
+      <button class="te-head" data-open="audit"><span class="role-chip r-researcher">${icon('checklist', { size: 11 })} Auditor</span><b>Revisión del rumbo</b><span class="te-sum">${esc(sum)}</span>${icon(open ? 'chevron.down' : 'chevron.right', { size: 10, cls: 'te-chev' })}</button>
+      ${open ? `<div class="te-body">
+        <div class="caption">Un modelo con ojos frescos y solo lectura revisa si el equipo avanza hacia el objetivo y le pasa al orquestador prioridades y desvíos. Mejor de otra familia que el orquestador. Solo audita si el equipo ha trabajado desde la última vez, y también al conseguirse un hito.</div>
+        <div class="te-grid">
+          ${field('Suscripción', `<select class="field" data-audit-acc><option value="">Sin auditor</option>${usable.map((x) => `<option value="${esc(x.id)}"${x.id === st.audit.accountId ? ' selected' : ''}>${esc(x.name)}</option>`).join('')}</select>`)}
+          ${a ? field('Modelo', `<select class="field" data-audit-model>${visibleModels(a).map((m) => `<option value="${esc(m.id)}"${m.id === st.audit.model ? ' selected' : ''}>${esc(m.name)}</option>`).join('')}</select>`) : ''}
+          ${a && efforts ? field('Esfuerzo', effortSelect(hostId, st.audit.accountId, st.audit.model, st.audit.effort, 'data-audit-effort', 'Esfuerzo del auditor') || '<span class="caption">Este modelo no tiene niveles</span>') : ''}
+          ${a ? field('Cada cuánto', `<select class="field" data-audit-every>${[[0, 'Solo a mano'], [2, 'Cada 2 h'], [3, 'Cada 3 h'], [4, 'Cada 4 h'], [6, 'Cada 6 h'], [8, 'Cada 8 h'], [12, 'Cada 12 h'], [24, 'Cada 24 h']].map(([v, l]) => `<option value="${v}"${v === Number(st.audit.every) ? ' selected' : ''}>${l}</option>`).join('')}</select>`) : ''}
+        </div>
+      </div>` : ''}
+    </div>`;
+  };
   const draw = () => {
+    const scroll = s.el.scrollTop;
     const live = st.members.filter((m) => !m.remove);
     const executors = live.filter((m) => m.role === 'executor').length + st.adds.filter((a) => a.role === 'executor').length;
+    const shared = sharedFallback();
+    const allSelect = fallbackSelect(hostId, 'data-fb-all', shared ?? '*').replace('<option value=""', `${shared === null ? '<option value="*" selected>Cada uno el suyo</option>' : ''}<option value=""`);
     s.el.innerHTML = `<div class="sheet-title">${icon('person.3.sequence', { size: 16 })} Editar el equipo</div>
-      <div class="sheet-sub">Los cambios se aplican sin perder nada: cada hilo conserva su historial y su sesión (cambiar de proveedor le pasa el contexto, como un relevo), y el orquestador recibe un aviso con lo que ha cambiado.</div>
-      <h3>Objetivo</h3><textarea class="field" data-goal style="min-height:70px;font-family:var(--font);font-size:13px">${esc(st.goal)}</textarea>
-      <div class="team-form">
-        ${st.members.map((m, i) => { const [ic, cls] = ROLE_UI[m.role] ?? ROLE_UI.executor; return m.remove
-          ? `<div class="team-line removed"><span class="team-role ${cls}">${icon(ic, { size: 12 })} ${esc(m.name)}</span><span class="caption grow">Sale del equipo (su hilo se conserva como uno normal)</span><button class="btn small" data-undo="${i}">Deshacer</button></div>`
-          : `<div class="team-line"><span class="team-role ${cls}">${icon(ic, { size: 12 })} ${nameField(`m${i}`, m)}</span>${selects(`m${i}`, m)}${m.role === 'orchestrator' ? '<span class="tb-spacer"></span>' : `<button class="tb-btn" data-rm="${i}" title="Sacar del equipo"${m.role === 'executor' && executors <= 1 ? ' disabled' : ''}>${icon('minus.circle', { size: 15 })}</button>`}</div>${notesRow(`m${i}`, m.notes)}`; }).join('')}
-        ${st.adds.map((a, i) => { const [ic, cls] = ROLE_UI[a.role]; return `<div class="team-line"><span class="team-role ${cls}">${icon(ic, { size: 12 })} ${a.role === 'executor' ? 'Ejecutor nuevo' : 'Investigador'}</span>${selects(`a${i}`, a)}<button class="tb-btn" data-rm-add="${i}" title="Quitar">${icon('minus.circle', { size: 15 })}</button></div>${notesRow(`a${i}`, a.notes)}`; }).join('')}
-        <div class="team-line"><span class="team-role"></span><button class="btn small" data-add-exec${executors >= 4 ? ' disabled' : ''}>${icon('plus', { size: 10 })} Añadir ejecutor</button>${hasResearcher() ? '' : `<button class="btn small" data-add-res>${icon('plus', { size: 10 })} Añadir investigador</button>`}</div>
-        ${allFallbackRow(hostId, sharedFallback())}
-      </div>
-      ${has(hostId, 'guard') ? `<div class="form-group" style="margin-top:12px"><div class="form-row"><label style="display:flex;gap:8px;align-items:center"><input type="checkbox" class="check" data-guard${st.guard ? ' checked' : ''}> Guardarraíl: Relevo detiene y te pregunta antes de borrados recursivos, descartes de git o escrituras fuera de la carpeta del proyecto (recomendado, también con acceso total)</label></div></div>` : ''}
-      ${has(hostId, 'teamWorkDirs') ? `<div class="form-group" style="margin-top:12px"><div class="form-row" style="align-items:flex-start"><span class="grow">Carpetas de trabajo además del proyecto<div class="caption">Una por línea, p. ej. sus copias en WSL (/home/usuario). El guardarraíl deja escribir en ellas como en el proyecto; los borrados recursivos siguen pasando por el orquestador y borrar una carpeta entera te llega siempre a ti. Nunca la raíz de un disco, /, /home ni /mnt/x.</div></span><textarea class="field" data-workdirs spellcheck="false" placeholder="/home/usuario" style="width:260px;min-height:44px;font-family:var(--mono, monospace);font-size:12px">${esc(st.workDirs)}</textarea></div></div>` : ''}
-      ${has(hostId, 'teamAudit') ? `<div class="form-group" style="margin-top:12px"><div class="form-row" style="align-items:flex-start"><span class="grow">Auditor<div class="caption">Cada cierto tiempo, un modelo con ojos frescos y solo lectura revisa si el equipo avanza hacia el objetivo y le pasa al orquestador prioridades y desvíos (lo que haces a mano con una IA externa). Mejor de otra familia que el orquestador. Solo audita si el equipo ha trabajado desde la última vez.</div></span></div>
-        <div class="team-line" style="padding:0 10px 8px"><select class="field" style="width:190px" data-audit-acc><option value="">Sin auditor</option>${usable.map((x) => `<option value="${esc(x.id)}"${x.id === st.audit.accountId ? ' selected' : ''}>${esc(x.name)}</option>`).join('')}</select>${st.audit.accountId ? `<select class="field grow" data-audit-model>${visibleModels(accountOf(hostId, st.audit.accountId)).map((m) => `<option value="${esc(m.id)}"${m.id === st.audit.model ? ' selected' : ''}>${esc(m.name)}</option>`).join('')}</select>${efforts ? effortSelect(hostId, st.audit.accountId, st.audit.model, st.audit.effort, 'data-audit-effort', 'Esfuerzo del auditor') : ''}<select class="field" style="width:130px" data-audit-every>${[[0, 'Solo a mano'], [2, 'Cada 2 h'], [3, 'Cada 3 h'], [4, 'Cada 4 h'], [6, 'Cada 6 h'], [8, 'Cada 8 h'], [12, 'Cada 12 h'], [24, 'Cada 24 h']].map(([v, l]) => `<option value="${v}"${v === Number(st.audit.every) ? ' selected' : ''}>${l}</option>`).join('')}</select>` : '<span class="grow"></span>'}</div></div>` : ''}
-      ${has(hostId, 'leadApproves') ? `<div class="form-group" style="margin-top:12px"><div class="form-row"><label style="display:flex;gap:8px;align-items:center"><input type="checkbox" class="check" data-lead-approves${st.leadApproves ? ' checked' : ''}> El orquestador decide los permisos de los demás agentes: permite lo que encaja con su tarea y te pasa lo delicado. Los borrados también: permite los que sobran claramente y, si no lo ve claro, el agente busca otra forma o lo anota en .relevo/borrados-pendientes.md. Formatear discos, tocar la raíz de un disco o un push forzado te llegan siempre a ti</label></div></div>` : ''}
-      ${has(hostId, 'teamBudget') ? `<div class="form-group" style="margin-top:12px"><div class="form-row"><span class="grow">Presupuesto diario <span class="caption">(${team.members.some((m) => m.today?.cost) ? `hoy van ${usd(team.members.reduce((n, m) => n + (m.today?.cost ?? 0), 0))}` : 'coste equivalente a la API'})</span></span><input class="field-input" data-budget type="number" min="0" step="1" placeholder="sin límite" style="width:110px" value="${st.budget.usd || ''}"> USD <select class="field" data-budget-action>${[['pause', 'y entonces pausar'], ['light', 'y entonces abaratar']].map(([v, l]) => `<option value="${v}"${st.budget.action === v ? ' selected' : ''}>${l}</option>`).join('')}</select></div><div class="caption" style="padding:0 10px 8px">Abaratar: el orquestador y el investigador pasan a modelos ligeros; los ejecutores siguen igual.</div></div>` : ''}
-      ${st.adds.some((a) => a.role === 'executor') && has(hostId, 'worktrees') ? `<div class="form-group" style="margin-top:12px"><div class="form-row"><label style="display:flex;gap:8px;align-items:center"><input type="checkbox" class="check" data-wt${st.worktrees ? ' checked' : ''}> Los ejecutores nuevos, cada uno en su worktree (si el proyecto es un repositorio git)</label></div></div>` : ''}
+      <div class="sheet-sub">Cada hilo conserva su historial y su sesión (cambiar de proveedor le pasa el contexto, como un relevo), y el orquestador recibe un aviso con lo que cambie.</div>
+      <section class="te-section"><h3>Objetivo</h3><textarea class="field te-goal" data-goal>${esc(st.goal)}</textarea></section>
+      <section class="te-section"><h3>Agentes <span class="caption">Toca uno para cambiar su modelo o sus indicaciones</span></h3>
+        ${st.members.map((m, i) => card(`m${i}`, m, { title: m.name, role: m.role, removed: m.remove, removable: m.role === 'orchestrator' || (m.role === 'executor' && executors <= 1) ? '' : `data-rm="${i}"`, removeTitle: 'Sacar del equipo' })).join('')}
+        ${st.adds.map((a, i) => card(`a${i}`, a, { title: a.role === 'executor' ? 'Ejecutor nuevo' : 'Investigador nuevo', role: a.role, isNew: true, removable: `data-rm-add="${i}"`, removeTitle: 'Quitar' })).join('')}
+        <div class="te-row"><button class="btn small" data-add-exec${executors >= 4 ? ' disabled' : ''}>${icon('plus', { size: 10 })} Añadir ejecutor</button>${hasResearcher() ? '' : `<button class="btn small" data-add-res>${icon('plus', { size: 10 })} Añadir investigador</button>`}</div>
+        <div class="te-row te-all"><span class="grow">Si a un agente se le acaba la cuota <span class="caption">(para todos; cada uno puede tener el suyo)</span></span>${allSelect}</div>
+      </section>
+      ${has(hostId, 'teamAudit') ? `<section class="te-section"><h3>Auditor</h3>${auditCard()}</section>` : ''}
+      <details class="te-section te-more"${st.more ? ' open' : ''}><summary><h3>Más opciones</h3><span class="caption">Guardarraíl, permisos, carpetas de trabajo y presupuesto</span></summary>
+        ${has(hostId, 'guard') ? `<label class="te-check"><input type="checkbox" class="check" data-guard${st.guard ? ' checked' : ''}><span><b>Guardarraíl</b> · Relevo detiene y pregunta antes de borrados recursivos, descartes de git o escrituras fuera de la carpeta del proyecto (recomendado, también con acceso total).</span></label>` : ''}
+        ${has(hostId, 'leadApproves') ? `<label class="te-check"><input type="checkbox" class="check" data-lead-approves${st.leadApproves ? ' checked' : ''}><span><b>El orquestador decide los permisos</b> de los demás: permite lo que encaja con su tarea y te pasa lo delicado. Formatear discos, tocar la raíz de un disco o un push forzado te llegan siempre a ti.</span></label>` : ''}
+        ${has(hostId, 'teamWorkDirs') ? field('Carpetas de trabajo además del proyecto <span class="caption">— una por línea, p. ej. sus copias en WSL (/home/usuario); nunca la raíz de un disco, /, /home ni /mnt/x</span>', `<textarea class="field te-mono" data-workdirs spellcheck="false" placeholder="/home/usuario">${esc(st.workDirs)}</textarea>`, true) : ''}
+        ${has(hostId, 'teamBudget') ? field(`Presupuesto diario <span class="caption">— ${team.members.some((m) => m.today?.cost) ? `hoy van ${usd(team.members.reduce((n, m) => n + (m.today?.cost ?? 0), 0))}` : 'coste equivalente a la API'}; abaratar pasa el orquestador y el investigador a modelos ligeros</span>`, `<div class="te-row"><input class="field-input" data-budget type="number" min="0" step="1" placeholder="sin límite" style="width:120px" value="${st.budget.usd || ''}"> USD <select class="field" data-budget-action>${[['pause', 'y entonces pausar'], ['light', 'y entonces abaratar']].map(([v, l]) => `<option value="${v}"${st.budget.action === v ? ' selected' : ''}>${l}</option>`).join('')}</select></div>`, true) : ''}
+        ${st.adds.some((a) => a.role === 'executor') && has(hostId, 'worktrees') ? `<label class="te-check"><input type="checkbox" class="check" data-wt${st.worktrees ? ' checked' : ''}><span>Los ejecutores nuevos, cada uno en su worktree (si el proyecto es un repositorio git)</span></label>` : ''}
+      </details>
       <div class="sheet-buttons"><button class="btn" data-no>Cancelar</button><span class="grow"></span><button class="btn primary" data-go>Guardar cambios</button></div>`;
+    s.el.scrollTop = scroll;
     const $ = (q) => s.el.querySelector(q);
-    const target = (key) => (key[0] === 'm' ? st.members[Number(key.slice(1))] : st.adds[Number(key.slice(1))]);
-    const keep = () => { st.goal = $('[data-goal]').value; const wd = $('[data-workdirs]'); if (wd) st.workDirs = wd.value; const g = $('[data-guard]'); if (g) st.guard = g.checked; const la = $('[data-lead-approves]'); if (la) st.leadApproves = la.checked; const b = $('[data-budget]'); if (b) { st.budget.usd = b.value; st.budget.action = $('[data-budget-action]').value; } };
-    s.el.querySelectorAll('[data-acc]').forEach((el) => { el.onchange = () => { const r = target(el.dataset.acc); r.accountId = el.value; r.model = visibleModels(accountOf(hostId, el.value))[0]?.id ?? 'default'; r.effort = ''; keep(); draw(); }; });
+    const grow = (el) => { el.style.height = 'auto'; el.style.height = `${Math.min(el.scrollHeight + 2, 360)}px`; };
+    s.el.querySelectorAll('textarea.te-notes, textarea.te-goal').forEach((el) => { grow(el); el.addEventListener('input', () => grow(el)); });
+    const keep = () => { st.goal = $('[data-goal]').value; const wd = $('[data-workdirs]'); if (wd) st.workDirs = wd.value; const g = $('[data-guard]'); if (g) st.guard = g.checked; const la = $('[data-lead-approves]'); if (la) st.leadApproves = la.checked; const b = $('[data-budget]'); if (b) { st.budget.usd = b.value; st.budget.action = $('[data-budget-action]').value; } st.more = !!$('.te-more')?.open; };
+    s.el.querySelectorAll('[data-open]').forEach((b) => { b.onclick = () => { const k = b.dataset.open; if (st.open.has(k)) st.open.delete(k); else st.open.add(k); keep(); draw(); }; });
+    // A model the account's catalog offers with Daybreak on (or any model with it off).
+    const fitModel = (r) => { const a = accountOf(hostId, r.accountId); const list = models(a, r); if (!list.some((m) => m.id === r.model)) { r.model = list[0]?.id ?? 'default'; r.effort = ''; } };
+    s.el.querySelectorAll('[data-acc]').forEach((el) => { el.onchange = () => { const r = target(el.dataset.acc); r.accountId = el.value; r.model = models(accountOf(hostId, el.value), r)[0]?.id ?? 'default'; r.effort = ''; keep(); draw(); }; });
     s.el.querySelectorAll('[data-model]').forEach((el) => { el.onchange = () => { const r = target(el.dataset.model); r.model = el.value; if (!(modelOf(accountOf(hostId, r.accountId), r.model)?.efforts ?? []).includes(r.effort)) r.effort = ''; keep(); draw(); }; });
-    s.el.querySelectorAll('[data-effort]').forEach((el) => { el.onchange = () => { target(el.dataset.effort).effort = el.value; }; });
+    s.el.querySelectorAll('[data-effort]').forEach((el) => { el.onchange = () => { target(el.dataset.effort).effort = el.value; keep(); draw(); }; });
+    s.el.querySelectorAll('[data-daybreak]').forEach((el) => { el.onchange = () => { const r = target(el.dataset.daybreak); r.daybreak = el.checked; fitModel(r); keep(); draw(); }; });
     $('[data-audit-acc]')?.addEventListener('change', (e) => { st.audit.accountId = e.target.value; st.audit.model = visibleModels(accountOf(hostId, e.target.value))[0]?.id ?? 'default'; st.audit.effort = ''; if (e.target.value && !st.audit.every) st.audit.every = 4; keep(); draw(); });
     $('[data-audit-model]')?.addEventListener('change', (e) => { st.audit.model = e.target.value; if (!(modelOf(accountOf(hostId, st.audit.accountId), st.audit.model)?.efforts ?? []).includes(st.audit.effort)) st.audit.effort = ''; keep(); draw(); });
-    $('[data-audit-effort]')?.addEventListener('change', (e) => { st.audit.effort = e.target.value; });
-    $('[data-audit-every]')?.addEventListener('change', (e) => { st.audit.every = Number(e.target.value); });
-    s.el.querySelectorAll('[data-daybreak]').forEach((el) => { el.onchange = () => { target(el.dataset.daybreak).daybreak = el.checked; }; });
+    $('[data-audit-effort]')?.addEventListener('change', (e) => { st.audit.effort = e.target.value; keep(); draw(); });
+    $('[data-audit-every]')?.addEventListener('change', (e) => { st.audit.every = Number(e.target.value); keep(); draw(); });
     s.el.querySelectorAll('[data-fb-effort]').forEach((el) => { el.onchange = () => { const r = target(el.dataset.fbEffort); const [acc, model] = String(r.fallback).split('|'); r.fallback = el.value ? `${acc}|${model}|${el.value}` : `${acc}|${model}`; }; });
     s.el.querySelectorAll('[data-notes]').forEach((el) => { el.oninput = () => { target(el.dataset.notes).notes = el.value; }; });
     s.el.querySelectorAll('[data-fb]').forEach((el) => { el.onchange = () => { target(el.dataset.fb).fallback = el.value; keep(); draw(); }; });
@@ -1128,6 +1174,7 @@ export function openTeamEditor(hostId, teamId) {
     $('[data-add-exec]').onclick = () => { st.adds.push(fresh('executor')); keep(); draw(); };
     $('[data-add-res]')?.addEventListener('click', () => { st.adds.push(fresh('researcher')); keep(); draw(); });
     $('[data-wt]')?.addEventListener('change', (e) => { st.worktrees = e.target.checked; });
+    $('.te-more')?.addEventListener('toggle', (e) => { st.more = e.target.open; });
     $('[data-no]').onclick = s.close;
     $('[data-go]').onclick = async () => {
       keep();
@@ -1211,6 +1258,10 @@ export function openTeamMemory(hostId, teamId, tab = undefined) {
   const boards = has(hostId, 'teamBoard');
   tab ??= boards ? 'board' : 'milestones';
   let query = '', results = null, searching = false, showClosed = false;
+  let ownerFilter = '', msFilter = '', gitOpen = false;
+  const baseWidth = s.el.style.width;
+  const expandedCards = new Set();
+  const clipText = (t, n) => (String(t).length > n ? `${String(t).slice(0, n - 1)}…` : String(t));
   const draw = () => {
     const team = snap(hostId)?.hostTeams?.find((x) => x.id === teamId);
     if (!team) { s.close(); return; }
@@ -1237,20 +1288,51 @@ export function openTeamMemory(hostId, teamId, tab = undefined) {
       ? `<button class="tb-btn" data-task-ok="${t.id}" title="Darla por comprobada y cerrarla (el orquestador se entera)">${icon('checkmark.circle', { size: 14 })}</button><button class="tb-btn" data-task-drop="${t.id}" title="Descartarla: ya no hace falta (el orquestador se entera)">${icon('xmark.circle.fill', { size: 13 })}</button>`
       : `<button class="tb-btn" data-task-reopen="${t.id}" title="Reabrirla">${icon('arrow.uturn.backward', { size: 12 })}</button>`}</div>`;
     if (tab === 'board') {
-      const rank = { hecha: 0, bloqueada: 1, 'en curso': 2, pendiente: 3 };
-      const open = [...board.open].sort((a, b) => rank[a.state] - rank[b.state] || a.id - b.id);
-      body = `<div class="caption" style="margin-bottom:6px">Cada tarea que da el orquestador, con su responsable, su hito y su estado. Las «hechas» esperan a que el orquestador las compruebe y las cierre; puedes cerrarlas o descartarlas tú.</div>
-        <div class="decisions">${open.length ? open.map((t) => taskRow(t, true)).join('') : '<div class="caption" style="padding:10px 2px">No hay tareas abiertas.</div>'}</div>
-        ${board.closed.length ? `<button class="btn small" data-closed style="margin-top:8px">${showClosed ? 'Ocultar' : 'Ver'} las cerradas hace poco (${board.closed.length})</button>${showClosed ? `<div class="decisions" style="margin-top:6px">${board.closed.map((t) => taskRow(t, false)).join('')}</div>` : ''}` : ''}
-        ${has(hostId, 'teamGit') ? (() => {
-          const closedIds = new Set(board.closed.map((t) => t.id));
-          const left = gits.filter((g) => g.task && closedIds.has(g.task));
-          const loose = gits.filter((g) => !g.task);
-          return `<div class="caption" style="margin:14px 0 4px">Ramas y worktrees. Los ejecutores pueden abrir uno por tarea (t12-…); Relevo los retira al cerrarse la tarea si todo está integrado. <button class="link-btn" data-git-scan>Revisar ahora</button></div>
-            ${left.length ? `<div class="caption" style="margin-top:6px">De tareas cerradas, con algo sin integrar (${left.length}):</div><div class="decisions">${left.map((g) => `<div class="decision"><span class="d-id">T${g.task}</span><div class="grow">${gitRow(g)}</div></div>`).join('')}</div>` : ''}
-            ${loose.length ? `<div class="caption" style="margin-top:6px">Sin tarea (${loose.length}):</div><div class="decisions">${loose.map((g) => `<div class="decision"><div class="grow">${gitRow(g)}</div></div>`).join('')}</div>` : ''}
-            ${!left.length && !loose.length ? '<div class="caption">Nada suelto.</div>' : ''}`;
-        })() : ''}`;
+      // A kanban: a column per state, a card per task. Filters by who has it and by milestone.
+      const role = new Map(team.members.map((m) => [m.name, m.role]));
+      const all = [...board.open, ...board.closed];
+      const owners = [...new Set(all.map((t) => t.owner))].sort((a, b) => (team.members.findIndex((m) => m.name === a) + 1 || 99) - (team.members.findIndex((m) => m.name === b) + 1 || 99));
+      const msIds = [...new Set(all.map((t) => t.milestone).filter(Boolean))].sort((a, b) => a - b);
+      const pass = (t) => (!ownerFilter || t.owner === ownerFilter) && (!msFilter || String(t.milestone) === msFilter);
+      const msText = (id) => ms.find((m) => m.id === id)?.text ?? '';
+      const ago = (at) => { const s0 = Date.now() / 1000 - at; return s0 < 90 ? 'ahora' : s0 < 3600 ? `hace ${Math.round(s0 / 60)} min` : s0 < 86400 ? `hace ${Math.round(s0 / 3600)} h` : when(at); };
+      const COLS = [
+        ['pendiente', 'Pendiente', 'Esperan a que su agente termine lo que hace'],
+        ['en curso', 'En curso', 'Su agente trabaja en ellas'],
+        ['bloqueada', 'Bloqueada', 'Esperan una respuesta'],
+        ['hecha', 'Por comprobar', 'Hechas: el orquestador las comprueba y las cierra'],
+        ['cerrada', 'Cerradas', 'Comprobadas o descartadas, las últimas'],
+      ];
+      const card = (t) => {
+        const open = ['pendiente', 'en curso', 'bloqueada', 'hecha'].includes(t.state);
+        const big = expandedCards.has(t.id);
+        const g = gits.filter((x) => x.task === t.id);
+        return `<div class="kb-card st-${esc(t.state.replace(' ', '-'))}${big ? ' big' : ''}">
+          <div class="kb-top"><span class="kb-id">T${t.id}</span><span class="role-chip ${esc(`r-${role.get(t.owner) ?? 'executor'}`)}">${esc(t.owner)}</span>${t.milestone ? `<span class="kb-ms" title="${esc(msText(t.milestone))}">#${t.milestone}</span>` : ''}<span class="grow"></span><span class="kb-when" title="${esc(when(t.updated))}">${esc(ago(t.updated))}</span></div>
+          <button class="kb-text selectable" data-card="${t.id}" title="${big ? 'Plegar' : 'Ver entera'}">${esc(t.text)}</button>
+          ${t.result ? `<div class="kb-result${big ? '' : ' clamp'}">${t.state === 'descartada' ? 'Descartada: ' : '→ '}${esc(t.result)}</div>` : ''}
+          ${g.length ? `<div class="kb-git">${g.map(gitRow).join('')}</div>` : ''}
+          <div class="kb-actions">${open
+            ? `${t.state === 'hecha' ? `<button class="btn small" data-task-ok="${t.id}" title="Darla por comprobada y cerrarla (el orquestador se entera)">${icon('checkmark.circle', { size: 12 })} Comprobada</button>` : `<button class="tb-btn" data-task-ok="${t.id}" title="Darla por comprobada y cerrarla (el orquestador se entera)">${icon('checkmark.circle', { size: 13 })}</button>`}<button class="tb-btn" data-task-drop="${t.id}" title="Descartarla: ya no hace falta (el orquestador se entera)">${icon('xmark.circle', { size: 13 })}</button>`
+            : `<span class="caption">${t.state === 'verificada' ? 'Comprobada' : 'Descartada'}</span><button class="tb-btn" data-task-reopen="${t.id}" title="Reabrirla">${icon('arrow.uturn.backward', { size: 12 })}</button>`}</div>
+        </div>`;
+      };
+      const closedShown = board.closed.filter(pass).slice(0, showClosed ? 25 : 8);
+      const cols = COLS.map(([key, label, help]) => {
+        const list = key === 'cerrada' ? closedShown : board.open.filter((t) => t.state === key && pass(t)).sort((a, b) => a.id - b.id);
+        const total = key === 'cerrada' ? board.closed.filter(pass).length : list.length;
+        return `<div class="kb-col kb-${esc(key.replace(' ', '-'))}"><div class="kb-head" title="${esc(help)}"><b>${label}</b><span class="n">${total}</span></div><div class="kb-list">${list.map(card).join('') || '<div class="kb-empty">—</div>'}${key === 'cerrada' && board.closed.filter(pass).length > 8 ? `<button class="link-btn" data-closed>${showClosed ? 'Ver menos' : 'Ver más'}</button>` : ''}</div></div>`;
+      }).join('');
+      const closedIds = new Set(board.closed.map((t) => t.id));
+      const left = gits.filter((g) => g.task && closedIds.has(g.task));
+      const loose = gits.filter((g) => !g.task);
+      body = `<div class="kb-filters"><div class="seg kb-owners"><button class="${ownerFilter ? '' : 'on'}" data-owner="">Todos</button>${owners.map((o) => `<button class="${ownerFilter === o ? 'on' : ''}" data-owner="${esc(o)}">${esc(o)}</button>`).join('')}</div>
+          ${msIds.length ? `<select class="field" data-ms-filter><option value="">Todos los hitos</option>${msIds.map((id) => `<option value="${id}"${msFilter === String(id) ? ' selected' : ''}>#${id} ${esc(clipText(msText(id), 60))}</option>`).join('')}</select>` : ''}</div>
+        <div class="kb">${cols}</div>
+        ${has(hostId, 'teamGit') ? `<details class="kb-gits"${gitOpen ? ' open' : ''}><summary>${icon('arrow.triangle.branch', { size: 12 })} Ramas y worktrees${left.length + loose.length ? ` · <b>${left.length + loose.length} por revisar</b>` : ' · nada suelto'} <span class="caption">Los ejecutores pueden abrir uno por tarea (t12-…); Relevo los retira al cerrarse la tarea si todo está integrado.</span> <button class="link-btn" data-git-scan>Revisar ahora</button></summary>
+            ${left.length ? `<div class="caption" style="margin-top:8px">De tareas cerradas, con algo sin integrar (${left.length}):</div><div class="decisions">${left.map((g) => `<div class="decision"><span class="d-id">T${g.task}</span><div class="grow">${gitRow(g)}</div></div>`).join('')}</div>` : ''}
+            ${loose.length ? `<div class="caption" style="margin-top:8px">Sin tarea (${loose.length}):</div><div class="decisions">${loose.map((g) => `<div class="decision"><div class="grow">${gitRow(g)}</div></div>`).join('')}</div>` : ''}
+          </details>` : ''}`;
     } else if (tab === 'log') {
       const list = results ?? board.log.map((e) => ({ kind: 'registro', ...e }));
       const KIND = { registro: 'Registro', informe: 'Informe', decision: 'Decisión antigua', auditoria: 'Auditoría', tarea: 'Tablero' };
@@ -1285,10 +1367,14 @@ export function openTeamMemory(hostId, teamId, tab = undefined) {
         <div class="decisions">${fs.length ? [...fs].reverse().map((f) => `<div class="decision"><span class="d-id">#${f.id}</span><div class="grow"><div class="d-text selectable"><b>${esc(f.topic)}</b></div><div class="f-sum selectable">${esc(f.summary)}</div>${f.links?.length ? `<div class="f-links">${f.links.map((l) => `<a href="${esc(l)}" target="_blank" rel="noopener">${esc(l.replace(/^https?:\/\/(www\.)?/, '').slice(0, 60))}</a>`).join('')}</div>` : ''}<div class="caption">${esc(f.by ?? '')} · ${esc(when(f.at))}</div></div><button class="tb-btn" data-drop="${f.id}" title="Quitar de la biblioteca">${icon('trash', { size: 12 })}</button></div>`).join('')
           : '<div class="caption" style="padding:10px 2px">Aún no hay informes. Cuando el investigador termine uno, aparecerá aquí.</div>'}</div>`;
     }
+    s.el.style.width = tab === 'board' ? 'min(1240px, calc(100vw - 32px))' : baseWidth;
+    const scrolls = [...s.el.querySelectorAll('.kb-list')].map((x) => x.scrollTop), top = s.el.scrollTop;
     s.el.innerHTML = `<div class="sheet-title">${icon('checklist', { size: 16 })} Memoria del equipo</div>
       <div class="seg mem-tabs">${tabs.map(([k, l, n]) => `<button class="${k === tab ? 'on' : ''}" data-tab="${k}">${l}${n !== '' ? ` <span class="n">${n}</span>` : ''}</button>`).join('')}</div>
       ${body}
       <div class="sheet-buttons"><span class="grow"></span><button class="btn" data-close>Listo</button></div>`;
+    s.el.querySelectorAll('.kb-list').forEach((x, i) => { x.scrollTop = scrolls[i] ?? 0; });
+    s.el.scrollTop = top;
     const $ = (q) => s.el.querySelector(q);
     const kind = { milestones: 'milestone', decisions: 'decision', findings: 'finding', log: 'decision' }[tab];
     const send = async (op) => {
@@ -1315,7 +1401,12 @@ export function openTeamMemory(hostId, teamId, tab = undefined) {
     s.el.querySelectorAll('[data-task-drop]').forEach((b) => { b.onclick = () => task(Number(b.dataset.taskDrop), 'descartada'); });
     s.el.querySelectorAll('[data-task-reopen]').forEach((b) => { b.onclick = () => task(Number(b.dataset.taskReopen), 'reabrir'); });
     $('[data-closed]')?.addEventListener('click', () => { showClosed = !showClosed; draw(); });
-    $('[data-git-scan]')?.addEventListener('click', async () => { const r = await request(hostId, { teamGitScan: { teamId } }, 120_000); if (!r.ok) toast(r.error); else setTimeout(draw, 300); });
+    s.el.querySelectorAll('[data-owner]').forEach((b) => { b.onclick = () => { ownerFilter = b.dataset.owner; draw(); }; });
+    $('[data-ms-filter]')?.addEventListener('change', (e) => { msFilter = e.target.value; draw(); });
+    s.el.querySelectorAll('[data-card]').forEach((b) => { b.onclick = () => { if (getSelection()?.toString()) return; const id = Number(b.dataset.card); if (expandedCards.has(id)) expandedCards.delete(id); else expandedCards.add(id); draw(); }; });
+    $('.kb-gits')?.addEventListener('toggle', (e) => { gitOpen = e.target.open; });
+    $('[data-git-scan]')?.addEventListener('click', async (e) => {
+      e.preventDefault(); e.stopPropagation(); const r = await request(hostId, { teamGitScan: { teamId } }, 120_000); if (!r.ok) toast(r.error); else setTimeout(draw, 300); });
     s.el.querySelectorAll('[data-git-rm]').forEach((b) => { b.onclick = async () => {
       const g = gits[Number(b.dataset.gitRm)];
       if (!g || busy) return;
