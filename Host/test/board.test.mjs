@@ -252,6 +252,58 @@ test('the next audit is due N hours after the last one ended, not after it start
   assert.equal(started.length, 2);
 });
 
+test('a new task in a fresh session (sesion="nueva"): the agent writes its handoff note, the task waits for its new session', () => {
+  const { teams, team, lead, exec } = stand();
+  teams._deliver = Teams.prototype._deliver;
+  const rts = new Map();
+  const rt = (t) => { if (!rts.has(t.id)) rts.set(t.id, { isRunning: false, approvals: new Map(), backgroundTasks: [], context: { used: 0, window: 475000 } }); return rts.get(t.id); };
+  const started = [];
+  Object.assign(teams.host, {
+    _rt: rt, _renewLimit: () => 400_000, agents: new Map(), accountsById: new Map(), _switchSoon: () => false,
+    _startTurn: (t, text, x, meta) => { started.push({ t: t.id, label: meta?.from?.label, prompt: meta?.prompt }); rt(t).isRunning = true; },
+  });
+  const E = teams.host.threads.get('E');
+  rt(E).context.used = 320_000;
+  // The orchestrator sees how full its session is.
+  assert.match(teams._status(team, lead), /Ejecutor 1 [^|]*sesión con 320 k tokens/);
+  teams._order(team, lead, { type: 'tarea', to: 'Ejecutor 1', body: 'compón el NRO multicore', attrs: { hito: '2', sesion: 'nueva' } });
+  assert.equal(started.length, 1);
+  assert.equal(started[0].label, 'traspaso', 'first its handoff note');
+  assert.match(started[0].prompt, /tarea nueva que empiezas en limpio/);
+  assert.equal(E.queued.length, 1, 'the task waits for its new session');
+  assert.match(E.queued[0].prompt, /compón el NRO multicore/);
+  // Its note is in: a fresh session, and the task goes with it.
+  rt(E).isRunning = false;
+  E.items.push({ kind: 'user', from: { label: 'traspaso' } });
+  teams.onTurnFinished(E, { text: 'Nota: T98 publicada en d3d9a8e2; QEMU libre.', messages: ['Nota: T98 publicada en d3d9a8e2; QEMU libre.'] });
+  assert.equal(E.freshSession, true);
+  assert.equal(E.teamPrimed, false, 'its next message brings the whole team preamble');
+  assert.match(exec.handoffNote.text, /d3d9a8e2/);
+  // Without sesion="nueva", or with little context, it stays in the same session.
+  rt(E).context = { used: 30_000, window: 475000 };
+  E.queued = [];
+  teams._order(team, lead, { type: 'tarea', to: 'Ejecutor 1', body: 'sigue', attrs: { hito: '2', sesion: 'nueva' } });
+  assert.equal(started.at(-1).label, 'tarea T2', 'no handoff turn: straight to the task');
+});
+
+test("an agent that writes in the user's mailbox speaks as itself, not as the user, and is told not to", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'relevo-inbox-'));
+  const { teams, team, delivered } = stand({ projectPath: dir });
+  team.members.push({ threadId: 'E3', role: 'executor', name: 'Ejecutor 3' });
+  const inbox = path.join(dir, '.relevo', 'al-orquestador');
+  fs.mkdirSync(inbox, { recursive: true });
+  fs.writeFileSync(path.join(inbox, 'e3-t96-qemu-window.txt'), 'T96 E3: solicito coordinar la ventana QEMU');
+  fs.writeFileSync(path.join(inbox, 'revision-1300.md'), 'Prioridad: el NRO multicore antes que la nave');
+  teams.watchInbox(Date.now() + 10_000);
+  const toLead = delivered.filter((d) => d.to === 'Orquestador');
+  assert.equal(toLead.length, 2);
+  const own = toLead.find((d) => d.from.name === 'Ejecutor 3');
+  assert.match(own.text, /Lo dejó Ejecutor 3 en el buzón del usuario: es un mensaje suyo/);
+  assert.equal(toLead.find((d) => d.from.name === 'Auditor externo').from.label, 'auditoría');
+  assert.match(delivered.find((d) => d.to === 'Ejecutor 3').text, /No escribas en .relevo\/al-orquestador/);
+  assert.equal(teams._inboxAuthor(team, 'nota.md', 'Revisión: el Ejecutor 3 se ha desviado'), null, 'naming an agent in the text is not signing it');
+});
+
 test('the ledger without SQLite keeps the same board and log in a JSON file', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'relevo-ledger-'));
   for (const json of [true, false]) {

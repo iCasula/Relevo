@@ -29,9 +29,11 @@ export const ROLES = {
 };
 
 /** Bumped when the agents' instructions change: teams made before get them again. */
-const RULES_VERSION = 13;
+const RULES_VERSION = 14;
 /** How often Relevo looks at the team's branches and worktrees besides after each turn (seconds). */
 const GIT_CHECK = 300;
+/** Below this much context, a new task in a fresh session isn't worth the handoff turn: it goes as it is. */
+const RENEW_FOR_TASK_MIN = 60_000;
 /** The task a branch or worktree folder is for: t12-audio, relevo/T12, tarea-12_x → 12. */
 export const taskOfRef = (name) => Number(/(?:^|[\/_.-])t(?:area)?[-_]?(\d{1,5})(?=$|[\/_.-])/i.exec(String(name ?? ''))?.[1]) || null;
 /** The orchestrator gets a fresh session (with a brief of its own thread) past any of these. */
@@ -282,6 +284,7 @@ ${roster}
 
 Para dar órdenes, escríbelas tal cual en tu respuesta (fuera de bloques de código); Relevo las entrega:
 <relevo:tarea para="${executors[0]?.name ?? 'Ejecutor 1'}" hito="N">qué hacer, criterio de terminado, ficheros o pistas</relevo:tarea>
+  Añade sesion="nueva" cuando la tarea no necesita lo que ese ejecutor tiene en la cabeza (otro tema, o lo anterior ya cerrado y registrado): escribe su nota de traspaso y empieza la tarea en limpio. Cada comando de un agente vuelve a leer toda su sesión, así que una sesión de 300 k gasta mucha más cuota que una nueva; el estado del equipo te dice el tamaño de la de cada uno. Sin sesion="nueva" sigue en la misma, para continuar lo que tenía a medias.
 ${researcher ? `<relevo:investigar para="${executors[0]?.name ?? 'Ejecutor 1'}">qué averiguar y para qué</relevo:investigar>  (para= es opcional: a quién más le llega el informe)\n` : ''}<relevo:respuesta para="${executors[0]?.name ?? 'Ejecutor 1'}">respuesta a su duda o cómo desbloquearse</relevo:respuesta>
 <relevo:integrar tarea="12"/>  fusiona en la rama principal la rama de la tarea T12 y retira su rama y su worktree (lo hace Relevo, sin que tú toques git). Antes comprueba que el trabajo está bien.
 ${executors.some((e) => host.threads.get(e.threadId)?.worktree) ? '<relevo:integrar de="Ejecutor 2"/>  fusiona en la rama principal el worktree propio de un ejecutor que ha terminado.\n' : ''}<relevo:fin>resumen para el usuario</relevo:fin>  cuando el objetivo esté cumplido y revisado.
@@ -349,7 +352,7 @@ ${roster}
 - Si dejas algo en segundo plano (una compilación, un emulador) y terminas el turno para esperarlo, no hace falta que informes: Relevo lo sabe y el orquestador no te escribirá hasta que acabes.
 - Si te bloqueas o necesitas una decisión, termina tu respuesta con <relevo:pregunta>tu duda concreta</relevo:pregunta> y espera la respuesta.${researcher ? ` Si llevas dos intentos fallidos con el mismo problema, pregunta: el ${researcher.name} puede buscar soluciones que ya existan.` : ''}
 - Otros agentes pueden estar trabajando en el mismo proyecto: toca solo lo que te pidan.
-- No crees documentos de estado, seguimiento ni informes en el repositorio salvo que tu tarea lo pida: tu informe final llega al orquestador y Relevo lo guarda. La carpeta ${DECISIONS_DIR}/ es de Relevo: no escribas en ella (salvo tus worktrees en ${DECISIONS_DIR}/worktrees); ${DECISIONS_DIR}/${INBOX} es el buzón del usuario. Al orquestador le hablas con tu informe o con <relevo:pregunta>.
+- No crees documentos de estado, seguimiento ni informes en el repositorio salvo que tu tarea lo pida: tu informe final llega al orquestador y Relevo lo guarda. Tampoco un README ni un informe largo por tarea (docs/reports/…): la evidencia es el commit, los números de tu informe y, si hace falta, un script de prueba que se pueda repetir. La carpeta ${DECISIONS_DIR}/ es de Relevo: no escribas en ella (salvo tus worktrees en ${DECISIONS_DIR}/worktrees); ${DECISIONS_DIR}/${INBOX} es el buzón del usuario. Al orquestador le hablas con tu informe o con <relevo:pregunta>.
 - Si tu tarea lo necesita, puedes trabajar en una rama o un worktree propios: uno por tarea y con su número en el nombre (t12-audio, o con prefijo: e1/t12-audio), p. ej. \`git worktree add .relevo/worktrees/t12-audio -b t12-audio\` desde la carpeta del proyecto (.relevo no entra en git). Haz commits en ella y di en tu informe la rama y si queda lista para integrar. No la borres ni la fusiones tú salvo que te lo pidan: al cerrarse la tarea con todo integrado, Relevo retira la rama y el worktree. Nada de ramas ni worktrees sin número de tarea.
 - Cada mensaje del equipo trae al final el estado de los demás (trabajando, en segundo plano, libre, BLOQUEADO esperando al usuario, SIN CUOTA y cuándo retoma): no esperes una respuesta de quien no puede darla; dilo en tu informe.
 ${notesOf(member)}${decisionsBlock(team)}${taskLine}${carried}</relevo_equipo>
@@ -1556,17 +1559,19 @@ export class Teams {
    * the new one reads that note, the decisions, the board and your latest messages. Never while it works,
    * waits for an answer or has something running in the background.
    */
-  _maybeRefresh(team, member, t) {
+  _maybeRefresh(team, member, t, forTask = false) {
     const h = this.host;
     const r = h._rt(t);
-    if (r.isRunning || r.approvals.size || r.backgroundTasks?.length || member.noteRequested) return;
-    if ((r.context?.used ?? 0) <= h._renewLimit(r, t)) return;
+    if (r.isRunning || r.approvals.size || r.backgroundTasks?.length || member.noteRequested) return false;
+    if (!forTask && (r.context?.used ?? 0) <= h._renewLimit(r, t)) return false;
     member.noteRequested = true;
-    h._append(t, { id: h._uuid(), kind: 'notice', text: 'Contexto casi lleno: antes de renovar la sesión, el agente escribe su nota de traspaso' });
+    member.renewedForTask = !!forTask;
+    h._append(t, { id: h._uuid(), kind: 'notice', text: forTask ? 'El orquestador le da una tarea nueva en sesión nueva: antes, el agente escribe su nota de traspaso' : 'Contexto casi lleno: antes de renovar la sesión, el agente escribe su nota de traspaso' });
     h._startTurn(t, 'Relevo va a renovar tu sesión: escribe tu nota de traspaso.', false, {
       from: { name: 'Relevo', role: 'relevo', label: 'traspaso' },
-      prompt: `(Relevo va a renovar tu sesión porque el contexto está casi lleno. Tu siguiente sesión NO recordará esta conversación: recibirá las decisiones y los hitos guardados, el estado del equipo, los últimos mensajes del usuario y ESTA nota.)\nEscribe ahora tu nota de traspaso: solo texto, sin usar herramientas${member.role === 'orchestrator' ? ' ni dar órdenes' : ''}, en menos de 40 líneas:\n1) Qué está ya comprobado y no hay que repetir (con fecha, commit o fichero).\n2) Qué estás esperando y de quién (del usuario, de cada agente).\n3) Qué tienes a medias y cuál es tu siguiente paso.\n4) Avisos: trampas, rutas, comandos o acuerdos con el usuario que no estén en las decisiones.\nNo repitas las decisiones ni los hitos ya guardados.`,
+      prompt: `(Relevo va a renovar tu sesión ${forTask ? 'porque el orquestador te da una tarea nueva que empiezas en limpio' : 'porque el contexto está casi lleno'}. Tu siguiente sesión NO recordará esta conversación: recibirá las decisiones y los hitos guardados, el estado del equipo, los últimos mensajes del usuario y ESTA nota.)\nEscribe ahora tu nota de traspaso: solo texto, sin usar herramientas${member.role === 'orchestrator' ? ' ni dar órdenes' : ''}, en menos de 40 líneas:\n1) Qué está ya comprobado y no hay que repetir (con fecha, commit o fichero).\n2) Qué estás esperando y de quién (del usuario, de cada agente).\n3) Qué tienes a medias y cuál es tu siguiente paso.\n4) Avisos: trampas, rutas, comandos o acuerdos con el usuario que no estén en las decisiones.\nNo repitas las decisiones ni los hitos ya guardados.`,
     });
+    return true;
   }
 
   /** The note is written (or there is none to wait for): the session starts over. */
@@ -1582,8 +1587,10 @@ export class Teams {
     t.teamPrimed = false;
     r.sessionTokens = 0;
     r.context = null;
-    const carries = ['su nota de traspaso', 'un resumen', member.role === 'orchestrator' ? 'el estado del equipo' : 'su tarea', team.decisions?.length ? `las ${team.decisions.length} decisiones` : null, 'tus últimos mensajes'].filter(Boolean);
-    h._append(t, { id: h._uuid(), kind: 'notice', text: `Sesión renovada (contexto lleno): el siguiente mensaje lleva ${carries.slice(0, -1).join(', ')} y ${carries[carries.length - 1]}` });
+    const forTask = member.renewedForTask;
+    member.renewedForTask = false;
+    const carries = ['su nota de traspaso', 'un resumen', member.role === 'orchestrator' ? 'el estado del equipo' : forTask ? 'su tarea nueva' : 'su tarea', team.decisions?.length ? `las ${team.decisions.length} decisiones` : null, 'tus últimos mensajes'].filter(Boolean);
+    h._append(t, { id: h._uuid(), kind: 'notice', text: `Sesión renovada (${forTask ? 'tarea nueva en limpio' : 'contexto lleno'}): el siguiente mensaje lleva ${carries.slice(0, -1).join(', ')} y ${carries[carries.length - 1]}` });
     h._changed(t);
   }
 
@@ -1893,6 +1900,17 @@ export class Teams {
           fs.mkdirSync(path.join(inbox, 'entregados'), { recursive: true });
           fs.renameSync(file, path.join(inbox, 'entregados', `${new Date(now).toISOString().slice(0, 16).replace(/[:T]/g, '')}-${name}`));
           if (!text) continue;
+          // An agent of the team that writes here (signing it: «e3-…», «T96 E3: …») is not the user: its message
+          // goes to the orchestrator as its own, and it's told to use its report instead.
+          const by = this._inboxAuthor(team, name, text);
+          if (by) {
+            this.addLog(team, 'informe', text, by.name, name);
+            this._deliver(team, lead, `${clip(text, 6000)}\n\n(Lo dejó ${by.name} en el buzón del usuario: es un mensaje suyo, no del usuario ni de su auditor.)`, { threadId: by.threadId, name: by.name, role: by.role, label: 'mensaje' });
+            this._deliver(team, by, `No escribas en ${DECISIONS_DIR}/${INBOX}: es el buzón del usuario y de su auditor externo. Tu mensaje (${name}) le ha llegado al orquestador como tuyo. Para hablar con él, termina tu turno con tu informe o con <relevo:pregunta>.`, { name: 'Relevo', role: 'relevo', label: 'aviso' });
+            const lt = this._lead(team);
+            if (lt) { this.host._append(lt, { id: this.host._uuid(), kind: 'notice', text: `${by.name} ha escrito en el buzón del auditor externo (${name}): entregado como mensaje suyo` }); this.host._changed(lt); }
+            continue;
+          }
           this.addLog(team, 'auditoria', text, 'Auditor externo', name);
           this._deliver(team, lead, `${clip(text, 12_000)}\n\n(Del auditor externo del usuario. Trátalo como una indicación del usuario: contrástalo con el tablero y los hitos y corrige lo que tenga razón; si discrepas en algo importante, díselo al usuario con <relevo:pedir>.)`, { name: 'Auditor externo', role: 'auditor', label: 'auditoría' });
           const lt = this._lead(team);
@@ -1900,6 +1918,25 @@ export class Teams {
         } catch (e) { this.host.log?.(`buzón del auditor: ${e.message}`); }
       }
     }
+  }
+
+  /**
+   * The team member a mailbox file is signed by: its file name («e3-t96-qemu.txt», «ejecutor3-…») or how the text
+   * starts («T96 E3: …», «Ejecutor 3 — …»). Naming an agent further on is not signing it.
+   */
+  _inboxAuthor(team, name, text) {
+    const plain = (x) => String(x).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+    const fileTokens = plain(String(name).replace(/\.[^.]+$/, '')).split(/[^a-z0-9]+/).filter(Boolean);
+    const start = plain(String(text).trimStart().split('\n')[0]).slice(0, 80);
+    for (const m of team.members) {
+      const n = norm(m.name);
+      const num = /(\d+)$/.exec(n)?.[1];
+      const alias = [n, ...(m.role === 'executor' && num ? [`e${num}`, `ejecutor${num}`] : m.role === 'researcher' ? ['investigador'] : m.role === 'orchestrator' ? ['orquestador'] : [])];
+      const spoken = plain(m.name).replace(/[^a-z0-9]+/g, '\\s*');
+      const signs = new RegExp(`^(?:t\\d+\\s*[·:,/-]?\\s*)?(?:${[...alias, spoken].join('|')})\\s*(?:\\(t\\d+\\)\\s*)?[:·—–-]`);
+      if (fileTokens.slice(0, 2).some((tk) => alias.includes(tk)) || signs.test(start)) return m;
+    }
+    return null;
   }
 
   /** The board in one line at the end of a message to the orchestrator: whole when it changed, short if not. */
@@ -2414,7 +2451,8 @@ Conclusión: una línea: ¿el equipo avanza hacia el objetivo? ¿Qué es lo más
         // Answers saved because it hadn't asked anything go with its next task.
         const notes = to.stash?.length ? `(Notas anteriores del ${lead.name}: ${to.stash.join(' · ')})\n\n` : '';
         const task = this._newTask(team, lead, to, o);
-        const res = this._deliver(team, to, `${notes}${o.body}`, { ...from, label: o.type === 'urgente' ? 'urgente' : 'tarea', taskId: task.id, lead: this._taskHead(team, task) }, false, o.type === 'urgente');
+        const renew = /^(nueva|limpia|new|fresca)$/i.test(String(o.attrs?.sesion ?? o.attrs?.['sesión'] ?? '').trim()) && to.role !== 'orchestrator';
+        const res = this._deliver(team, to, `${notes}${o.body}`, { ...from, label: o.type === 'urgente' ? 'urgente' : 'tarea', taskId: task.id, lead: this._taskHead(team, task), ...(renew ? { renew: true } : {}) }, false, o.type === 'urgente');
         // On the board only what really went out (not what bounced off someone busy or is held in a pause).
         if (res === 'sent' || res === 'queued') { to.stash = []; this._setTask(to, 'en curso', clip(o.body.replace(/\s+/g, ' '), 140)); }
         this._taskDelivered(team, to, task, res);
@@ -2612,6 +2650,12 @@ Conclusión: una línea: ¿el equipo avanza hacia el objetivo? ¿Qué es lo más
     // Mid-turn, that is. Something left running in the background doesn't count: the agent is idle, waiting
     // for it, and can read a message (and an answer to its own question always goes).
     const midTurn = target && h._rt(target).isRunning;
+    // A new task the orchestrator gives in a fresh session (sesion="nueva"): the agent writes its handoff note
+    // first, and the task waits for its new session. Not worth it with little context; mid-turn, the task waits
+    // as pending and this happens when it's delivered.
+    if (from.renew && target && !midTurn && member.role !== 'orchestrator' && (h._rt(target).context?.used ?? 0) >= RENEW_FOR_TASK_MIN) {
+      this._maybeRefresh(team, member, target, true);
+    }
     const answer = from.label === 'respuesta' && member.awaitingAnswer;
     // Writing its handoff note for Relevo isn't work: what arrives meanwhile waits and goes to its new session.
     const handoff = member.noteRequested;
@@ -2873,6 +2917,9 @@ Conclusión: una línea: ¿el equipo avanza hacia el objetivo? ¿Qué es lo más
       state = `libre${last ? ` desde las ${at(last)}` : ''}`;
     }
     const extra = [];
+    // How full its session is (each command rereads it all: what a task in a fresh session saves).
+    const used = r.context?.used ?? 0;
+    if (m.role !== 'orchestrator' && used >= 100_000) extra.push(`sesión con ${Math.round(used / 1000)} k tokens`);
     if (r.pendingSwitch && !r.pendingSwitch.auto) extra.push(`cambiará a ${nameOf(r.pendingSwitch.accountId)} al quedar libre`);
     if (t.home) extra.push(`en un modelo de reserva hasta que vuelva la cuota de ${nameOf(t.home.accountId)}`);
     return { t, r, state: extra.length ? `${state}; ${extra.join('; ')}` : state };
