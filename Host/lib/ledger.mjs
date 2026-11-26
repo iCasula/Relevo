@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 /** A task's states: open ones need something from someone; closed ones are history. */
-export const OPEN_STATES = ['pendiente', 'en curso', 'bloqueada', 'hecha'];
+export const OPEN_STATES = ['pendiente', 'en curso', 'bloqueada', 'hecha', 'pausada'];
 export const CLOSED_STATES = ['verificada', 'descartada'];
 
 const words = (q) => String(q ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().match(/[\p{L}\p{N}_.#-]{2,}/gu) ?? [];

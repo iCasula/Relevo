@@ -18,7 +18,7 @@ import * as gitops from './gitops.mjs';
 import { elideCode, clip, threadBrief } from './handoff.mjs';
 import { isReadOnlyCommand, writesSomething, shellCommand } from './codex.mjs';
 import { workDir } from './guard.mjs';
-import { openLedger } from './ledger.mjs';
+import { openLedger, OPEN_STATES } from './ledger.mjs';
 
 const clean = (o) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined && v !== null));
 
@@ -29,7 +29,7 @@ export const ROLES = {
 };
 
 /** Bumped when the agents' instructions change: teams made before get them again. */
-const RULES_VERSION = 14;
+const RULES_VERSION = 15;
 /** How often Relevo looks at the team's branches and worktrees besides after each turn (seconds). */
 const GIT_CHECK = 300;
 /** Below this much context, a new task in a fresh session isn't worth the handoff turn: it goes as it is. */
@@ -77,7 +77,7 @@ export const PERMIT_WAIT = Number(process.env.RELEVO_PERMIT_WAIT ?? 600);
 
 // MARK: - Orders in the agents' replies
 
-const TAG = /<relevo:(tarea|urgente|investigar|respuesta|pregunta|integrar|fin|decisi[oó]n|descartar|hito|hecho|aprobar|denegar|consultar|pedir|cerrar|registro|buscar|fijar|soltar)\b([^>]*?)(?:\/>|>([\s\S]*?)<\/relevo:\1\s*>)/gi;
+const TAG = /<relevo:(tarea|urgente|investigar|respuesta|pregunta|integrar|fin|decisi[oó]n|descartar|hito|hecho|aprobar|denegar|consultar|pedir|cerrar|registro|buscar|fijar|soltar|pausar|reanudar|auditor)\b([^>]*?)(?:\/>|>([\s\S]*?)<\/relevo:\1\s*>)/gi;
 const FENCED = /```[\s\S]*?(?:```|$)/g;
 // The same as before attributes existed (the orders already marked as sent keep matching).
 const orderSig = (o) => `${o.type}|${o.to ?? ''}|${o.body}${o.attrs ? `|${JSON.stringify(o.attrs)}` : ''}`;
@@ -294,9 +294,9 @@ ${executors.some((e) => host.threads.get(e.threadId)?.worktree) ? '<relevo:integ
 <relevo:registro>un hecho comprobado, en una línea, con fecha y su prueba (commit, fichero, SHA, log)</relevo:registro>  Para resultados, pruebas en la consola, despliegues, aceptaciones de commits y verificaciones: «24-nov: NRO 09 probado en la Switch 2 por el usuario: crashea tras la cinemática de Shepard». No va al contexto de nadie, pero queda guardado y se puede buscar (también en ${DECISIONS_DIR}/registro.md). Relevo guarda además cada informe de los agentes.
 <relevo:buscar>palabras clave</relevo:buscar>  Relevo te responde con lo que encuentre en el tablero, el registro, los informes y las decisiones antiguas. Búscalo antes de repetir una prueba, reabrir un tema o pedir algo que quizá ya se hizo.
 
-Tablero: cada tarea que das queda en el tablero de Relevo con un número (T12), su responsable, su hito y su estado (pendiente, en curso, bloqueada, hecha). Cuando el agente informa «hecho», la tarea queda HECHA a la espera de que la compruebes: ciérrala con <relevo:cerrar tarea="12">cómo se ha comprobado</relevo:cerrar>, o con <relevo:cerrar tarea="12" estado="descartada">por qué ya no hace falta</relevo:cerrar> si la sustituyes o deja de servir. Cada tarea lleva hito="N" (el hito o subhito al que sirve): si no encaja en ninguno, o falta ese hito o la tarea sobra; sin hito=, Relevo la apunta al hito en curso. Al final de cada mensaje ves las tareas abiertas: no dejes abiertas las que ya no sigues, y no des una tarea que ya está abierta para otro.
+Tablero: cada tarea que das queda en el tablero de Relevo con un número (T12), su responsable, su hito y su estado (pendiente, en curso, bloqueada, hecha, pausada). Para aparcar una tarea sin cerrarla: <relevo:pausar tarea="12">por qué</relevo:pausar> (Relevo avisa a su agente de que la deje y conserve su trabajo, y su rama no se retira); para retomarla, <relevo:reanudar tarea="12">desde dónde sigue</relevo:reanudar> (se la vuelve a dar a su agente, con lo que escribas). No dejes «en curso» una tarea que nadie hace: páusala. Cuando el agente informa «hecho», la tarea queda HECHA a la espera de que la compruebes: ciérrala con <relevo:cerrar tarea="12">cómo se ha comprobado</relevo:cerrar>, o con <relevo:cerrar tarea="12" estado="descartada">por qué ya no hace falta</relevo:cerrar> si la sustituyes o deja de servir. Cada tarea lleva hito="N" (el hito o subhito al que sirve): si no encaja en ninguno, o falta ese hito o la tarea sobra; sin hito=, Relevo la apunta al hito en curso. Al final de cada mensaje ves las tareas abiertas: no dejes abiertas las que ya no sigues, y no des una tarea que ya está abierta para otro.
 Ramas y worktrees: un ejecutor puede abrir una rama o un worktree para su tarea (uno por tarea, con su número: t12-…). Relevo los ata a su tarea y, cuando la cierras, los retira si todo está integrado (en la rama principal o en una rama integration/…); si queda trabajo sin integrar te lo dice. Cierra o integra las tareas terminadas: así no se acumulan.
-Auditor: si te llega «[Auditor · auditoría]», es una revisión independiente del rumbo hecha con ojos frescos. Contrástala con el tablero y los hitos y corrige lo que tenga razón (prioridades, tareas, hitos); si discrepas en algo importante, díselo al usuario con <relevo:pedir>.
+Auditor: si te llega «[Auditor · auditoría]», es una revisión independiente del rumbo hecha con ojos frescos. Contrástala con el tablero y los hitos y corrige lo que tenga razón (prioridades, tareas, hitos); si discrepas en algo importante, díselo al usuario con <relevo:pedir>. Tú también puedes consultarle cuando dudes del rumbo o quieras una segunda opinión antes de una decisión cara: <relevo:auditor>la pregunta concreta, con lo que ya sabes</relevo:auditor>. Revisa en solo lectura (el tablero, el registro, git, los docs) y te responde «[Auditor · respuesta]». Úsalo para decisiones, no para trabajo que puede hacer un ejecutor o el investigador.
 
 <relevo:urgente para="${executors[0]?.name ?? 'Ejecutor 1'}">…</relevo:urgente>  solo si lo que está haciendo ahora es claramente erróneo o ya no sirve: interrumpe su turno.
 
@@ -1812,7 +1812,7 @@ export class Teams {
     task ??= member.taskId ? this.ledger.task(team.id, member.taskId) : null;
     const text = String(logBody ?? '').trim();
     if (text) { try { this.addLog(team, 'informe', compactReport(text), member.name, task ? `T${task.id}` : null); } catch {} }
-    if (!task || !['pendiente', 'en curso', 'bloqueada', 'hecha'].includes(task.state)) return task?.id ?? null;
+    if (!task || !['pendiente', 'en curso', 'bloqueada', 'hecha', 'pausada'].includes(task.state)) return task?.id ?? null;
     if (state && state !== task.state) {
       const result = clip(headTail(elideCode(text, 4), 600).replace(/\s+/g, ' '), 600);
       this.ledger.updateTask(team.id, task.id, { state, result });
@@ -1839,6 +1839,49 @@ export class Teams {
     return closed;
   }
 
+  /**
+   * Parks tasks without closing them: its agent hears it should leave it (keeping its work) when it was its
+   * current one, and its branch or worktree stays. Returns the ones paused.
+   */
+  pauseTasks(team, ids, why, by) {
+    const done = [];
+    for (const id of ids) {
+      const t = this.ledger.task(team.id, id);
+      if (!t || !['pendiente', 'en curso', 'bloqueada'].includes(t.state)) continue;
+      done.push(this.ledger.updateTask(team.id, id, { state: 'pausada', result: why ? `Pausada: ${clip(why.replace(/\s+/g, ' '), 400)}` : t.result }));
+      const m = team.members.find((x) => x.taskId === id);
+      if (!m) continue;
+      m.taskId = null;
+      if (by !== m.name) this._deliver(team, m, `${by === 'usuario' ? 'El usuario' : by} ha pausado T${id}${why ? `: ${why}` : ''}. Déjala donde esté sin perder nada (commitea o guarda tus cambios en su rama) y no sigas con ella hasta que te la vuelvan a dar.`, { name: 'Relevo', role: 'relevo', label: 'tarea pausada' });
+    }
+    if (done.length) {
+      this.addLog(team, 'tarea', done.map((t) => `T${t.id} pausada por ${by}: ${clip(t.text, 200)}${why ? ` — ${clip(why, 300)}` : ''}`).join('\n'), by);
+      this._boardChanged(team);
+    }
+    return done;
+  }
+
+  /** Takes paused tasks up again: back to their agent (with what the orchestrator adds), or pending for it. */
+  resumeTasks(team, ids, note, by) {
+    const done = [];
+    const lead = team.members.find((m) => m.role === 'orchestrator');
+    for (const id of ids) {
+      const t = this.ledger.task(team.id, id);
+      if (!t || t.state !== 'pausada') continue;
+      const m = findMember(team, t.owner);
+      const head = `Retoma T${id}: ${t.text}`;
+      const res = m && lead && by !== 'usuario' ? this._deliver(team, m, note ? `${head}\n\n${note}` : head, { threadId: lead.threadId, name: lead.name, role: 'orchestrator', label: 'tarea', taskId: id, lead: this._taskHead(team, t) }) : null;
+      const going = res === 'sent' || res === 'queued';
+      done.push(this.ledger.updateTask(team.id, id, { state: going ? 'en curso' : 'pendiente' }));
+      if (going) { m.taskId = id; this._setTask(m, 'en curso', clip(t.text.replace(/\s+/g, ' '), 140)); }
+    }
+    if (done.length) {
+      this.addLog(team, 'tarea', done.map((t) => `T${t.id} reanudada por ${by}${note ? ` — ${clip(note, 300)}` : ''}`).join('\n'), by);
+      this._boardChanged(team);
+    }
+    return done;
+  }
+
   /** From the apps: you close, drop or reopen a task, and the orchestrator hears it. */
   editTask(teamId, { id, state, why } = {}) {
     const team = this.byId(teamId);
@@ -1846,9 +1889,12 @@ export class Teams {
     const t = this.ledger.task(team.id, id);
     if (!t) throw new Error('Esa tarea no está en el tablero');
     if (state === 'verificada' || state === 'descartada') this.closeTasks(team, [t.id], state, why ? String(why) : 'cerrada por el usuario', 'usuario');
+    else if (state === 'reabrir' && t.state === 'pausada') this.resumeTasks(team, [t.id], why ? String(why) : '', 'usuario');
     else if (state === 'reabrir') { this.ledger.updateTask(team.id, t.id, { state: 'en curso' }); this._boardChanged(team); }
+    else if (state === 'pausada') { if (!this.pauseTasks(team, [t.id], why ? String(why) : '', 'usuario').length) throw new Error(`T${t.id} está ${t.state}: solo se pausa una tarea pendiente, en curso o bloqueada`); }
     else throw new Error('Estado desconocido');
-    team.notes = [...(team.notes ?? []), `El usuario ha ${state === 'reabrir' ? 'reabierto' : state === 'verificada' ? 'dado por comprobada' : 'descartado'} la tarea T${t.id} (${t.owner}: «${clip(t.text, 120)}»)${why ? `: ${why}` : ''}`].slice(-6);
+    const did = state === 'pausada' ? 'pausado' : state === 'reabrir' ? (t.state === 'pausada' ? 'reanudado (dásela a su agente cuando toque, o reasígnala)' : 'reabierto') : state === 'verificada' ? 'dado por comprobada' : 'descartado';
+    team.notes = [...(team.notes ?? []), `El usuario ha ${did} la tarea T${t.id} (${t.owner}: «${clip(t.text, 120)}»)${why ? `: ${why}` : ''}`].slice(-6);
     return {};
   }
 
@@ -1946,9 +1992,9 @@ export class Teams {
     const sig = open.map((t) => `${t.id}:${t.state}`).join(',');
     if (sig === team.boardSig) return `\nTablero sin cambios: ${open.length} abierta${open.length === 1 ? '' : 's'} (${open.map((t) => `T${t.id}`).join(', ')}).`;
     team.boardSig = sig;
-    const rank = { hecha: 0, bloqueada: 1, 'en curso': 2, pendiente: 3 };
+    const rank = { hecha: 0, bloqueada: 1, 'en curso': 2, pendiente: 3, pausada: 4 };
     const list = [...open].sort((a, b) => rank[a.state] - rank[b.state] || a.id - b.id);
-    const line = (t) => `T${t.id} ${t.owner} ${t.state === 'hecha' ? 'HECHA, sin cerrar' : t.state}${t.milestone ? ` #${t.milestone}` : ''} «${clip(t.text, 70)}»`;
+    const line = (t) => `T${t.id} ${t.owner} ${t.state === 'hecha' ? 'HECHA, sin cerrar' : t.state === 'pausada' ? 'PAUSADA' : t.state}${t.milestone ? ` #${t.milestone}` : ''} «${clip(t.text, 70)}»`;
     const toClose = list.filter((t) => t.state === 'hecha').length;
     return `\nTablero (${open.length} abiertas${toClose ? `; ${toClose} hecha${toClose === 1 ? '' : 's'}: compruébalas y ciérralas con <relevo:cerrar>` : ''}): ${list.slice(0, BOARD_SHOWN).map(line).join(' | ')}${list.length > BOARD_SHOWN ? ` | … y ${list.length - BOARD_SHOWN} más` : ''}`;
   }
@@ -2143,7 +2189,7 @@ export class Teams {
         once(`cerrada|${key}|${it.ahead}|${dirty}`, `T${task.id} está ${task.state}, pero su ${it.branch ? `rama ${it.branch}` : `worktree ${it.path}`} tiene ${left || 'trabajo que no sé comprobar'}: intégrala con <relevo:integrar tarea="${task.id}"/> si vale; si sobra, díselo al usuario: él la retira desde el tablero`);
       }
       // Two for one task, or more worktrees than the team has executors.
-      const open = items.filter((it) => it.task && ['pendiente', 'en curso', 'bloqueada', 'hecha'].includes(this.ledger.task(team.id, it.task)?.state));
+      const open = items.filter((it) => it.task && OPEN_STATES.includes(this.ledger.task(team.id, it.task)?.state));
       const byTask = new Map();
       for (const it of open) byTask.set(it.task, [...(byTask.get(it.task) ?? []), it]);
       for (const [tid, list] of byTask) if (list.length > 1) once(`dos|${tid}|${list.length}`, `T${tid} tiene ${list.length} ramas o worktrees (${list.map((x) => x.branch ?? x.path).join(', ')}): una por tarea; que ${this.ledger.task(team.id, tid)?.owner ?? 'su responsable'} se quede con una`);
@@ -2273,6 +2319,7 @@ export class Teams {
     if (old && this._busy(old)) throw new Error('El auditor ya está revisando');
     const t = this._auditThread(team);
     if (!t) throw new Error('No se ha podido crear el hilo del auditor');
+    t.auditAsk = null;
     team.audit.lastAt = Date.now() / 1000;
     team.audit.lastTurns = team.leadTurns ?? 0;
     this.host._startTurn(t, manual ? 'Auditoría del equipo (pedida por el usuario)' : 'Auditoría periódica del equipo', false, {
@@ -2282,6 +2329,30 @@ export class Teams {
     this.host._saveState();
     this.host._broadcastSnapshot();
     return {};
+  }
+
+  /**
+   * The orchestrator asks the auditor something (a second opinion before a costly decision): a fresh read-only
+   * session with the team's state and the question; its answer comes back to the orchestrator. While it audits or
+   * answers, the next question waits its turn. The periodic audits keep their own clock.
+   */
+  askAuditor(team, question, by) {
+    if (!team.audit?.accountId) throw new Error('el equipo no tiene auditor (el usuario lo elige en Editar equipo)');
+    const old = team.audit.threadId && this.host.threads.get(team.audit.threadId);
+    if (old && this._busy(old)) {
+      team.audit.asks = [...(team.audit.asks ?? []), { text: question, by }].slice(-3);
+      return 'queued';
+    }
+    const t = this._auditThread(team);
+    if (!t) throw new Error('no se ha podido crear el hilo del auditor');
+    t.auditAsk = { text: question, by };
+    this.host._startTurn(t, `Consulta de ${by} al auditor`, false, {
+      from: { name: by, role: 'orchestrator', label: 'consulta' },
+      prompt: this._auditPrompt(team, t.auditAsk),
+    });
+    this.host._saveState();
+    this.host._broadcastSnapshot();
+    return 'sent';
   }
 
   /** Due audits: N hours after the last one ended (or started, if it's still running), and only if the team has done something since. */
@@ -2297,7 +2368,7 @@ export class Teams {
     }
   }
 
-  _auditPrompt(team) {
+  _auditPrompt(team, ask = null) {
     const h = this.host;
     const project = h.projects().find((p) => p.id === team.projectId);
     const lead = team.members.find((m) => m.role === 'orchestrator');
@@ -2319,7 +2390,11 @@ ${milestonesBlock(team)}${decisionsBlock(team)}
 ${this.boardText(team, 15)}${reports.length ? `Último informe de cada agente:\n${reports.join('\n')}\n` : ''}${this.logText(team, 20)}${lead ? userSaidBlock(h, lead) : ''}${previous ? `\nTu auditoría anterior (${new Date(previous.ts * 1000).toLocaleString('es-ES', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}): comprueba qué se ha hecho de lo que proponías.\n${clip(previous.text, 3000)}\n` : ''}${git ? `\nGit en la carpeta del proyecto:\n${git}\n` : ''}
 Contrasta lo que dicen los informes con el repositorio (git log, docs/, PROGRESS.md, docs/reviews/, ${DECISIONS_DIR}/registro.md): no te fíes solo de lo que te cuentan.
 
-Tu respuesta es un único mensaje (unos 3.000-5.000 caracteres, sin tablas), para el orquestador:
+${ask ? `${ask.by} (el orquestador) te consulta:
+«${ask.text}»
+
+Responde a eso en un único mensaje (unos 1.000-3.000 caracteres, sin tablas), para el orquestador: primero tu respuesta en una línea («Respuesta: …»), después la evidencia que la apoya (commits, ficheros, registro, resultados) y qué harías. Si ves algo más urgente que lo que pregunta, dilo al final en una línea. No hace falta una auditoría completa.
+` : `Tu respuesta es un único mensaje (unos 3.000-5.000 caracteres, sin tablas), para el orquestador:
 Conclusión: una línea: ¿el equipo avanza hacia el objetivo? ¿Qué es lo más importante ahora?
 1. Avance real desde la auditoría anterior, con evidencia (commits, ficheros, resultados comprobados).
 2. Desvíos: tareas o líneas de trabajo que no sirven al hito en curso, repetidas, o abandonadas a medias; tareas del tablero que deberían cerrarse.
@@ -2327,7 +2402,7 @@ Conclusión: una línea: ¿el equipo avanza hacia el objetivo? ¿Qué es lo más
 4. Prioridades: de 3 a 5 acciones concretas, en orden, con quién debería hacerlas y cómo se comprueba cada una.
 5. Hitos: si conviene dividir, reordenar o cerrar alguno, propónlo.
 6. Orden: documentos de estado o seguimiento duplicados o desfasados, worktrees y ramas abandonados o ya integrados: qué se puede consolidar o limpiar (propónlo; no borres nada).
-</relevo_auditoria>`;
+`}</relevo_auditoria>`;
   }
 
   /**
@@ -2360,14 +2435,31 @@ Conclusión: una línea: ¿el equipo avanza hacia el objetivo? ¿Qué es lo más
     const team = this.byId(t.auditFor);
     if (!team) return;
     const h = this.host;
-    // The next one counts from now: an audit that ran late doesn't make another one due at once.
-    if (team.audit) { team.audit.lastAt = Date.now() / 1000; team.audit.lastTurns = team.leadTurns ?? 0; }
+    const ask = t.auditAsk;
+    t.auditAsk = null;
+    // The next one counts from now: an audit that ran late doesn't make another one due at once (an answer to
+    // the orchestrator's question doesn't move the periodic audits).
+    if (team.audit && !ask) { team.audit.lastAt = Date.now() / 1000; team.audit.lastTurns = team.leadTurns ?? 0; }
+    // The next question waiting for it, once this one is in.
+    const next = () => {
+      const q = team.audit?.asks?.shift();
+      if (q) setTimeout(() => { try { this.askAuditor(team, q.text, q.by); } catch (e) { h.log?.(`consulta al auditor: ${e.message}`); } }, 0);
+    };
     const report = withoutOrders(researchReport(messages)).trim() || String(t.auditPlan ?? '').trim();
     t.auditPlan = null;
     const lead = team.members.find((m) => m.role === 'orchestrator');
     const leadThread = this._lead(team);
     if (!report) {
-      if (leadThread) { h._append(leadThread, { id: h._uuid(), kind: 'notice', text: `La auditoría no ha terminado bien${errors.length ? `: ${clip(errors.at(-1), 200)}` : ''}` }); h._changed(leadThread); }
+      if (leadThread) { h._append(leadThread, { id: h._uuid(), kind: 'notice', text: `${ask ? 'La consulta al auditor' : 'La auditoría'} no ha terminado bien${errors.length ? `: ${clip(errors.at(-1), 200)}` : ''}` }); h._changed(leadThread); }
+      next();
+      return;
+    }
+    if (ask) {
+      this.addLog(team, 'auditoria', `Consulta de ${ask.by}: «${clip(ask.text, 400)}»\n\n${report}`, 'Auditor');
+      if (lead) this._deliver(team, lead, clip(report, 7000), { threadId: t.id, name: 'Auditor', role: 'auditor', label: 'respuesta' });
+      next();
+      h._saveState();
+      h._broadcastSnapshot();
       return;
     }
     this.addLog(team, 'auditoria', report, 'Auditor');
@@ -2376,6 +2468,7 @@ Conclusión: una línea: ¿el equipo avanza hacia el objetivo? ¿Qué es lo más
       this._deliver(team, lead, `${clip(report, 7000)}\n\n(Revisión independiente del rumbo; la tienes también con <relevo:buscar>auditoría</relevo:buscar>. Contrástala con el tablero y los hitos: corrige prioridades, tareas e hitos en lo que tenga razón; si discrepas en algo importante, díselo al usuario con <relevo:pedir>.)`, { threadId: t.id, name: 'Auditor', role: 'auditor', label: 'auditoría' });
     }
     if (leadThread) this._attention(leadThread, 'auditoria', `Auditoría: ${conclusion}`);
+    next();
     h._saveState();
     h._broadcastSnapshot();
   }
@@ -2442,6 +2535,8 @@ Conclusión: una línea: ¿el equipo avanza hacia el objetivo? ¿Qué es lo más
     const researcher = team.members.find((m) => m.role === 'researcher');
     const complain = (text) => this._deliver(team, lead, text, { name: 'Relevo', role: 'relevo', label: 'aviso' });
     const from = { threadId: lead.threadId, name: lead.name, role: 'orchestrator' };
+    // A task or question addressed to the auditor («para="Auditor"») is a question for it.
+    if (o.to && norm(o.to).startsWith('auditor') && ['tarea', 'urgente', 'investigar', 'pregunta', 'respuesta'].includes(o.type) && o.body) o = { ...o, type: 'auditor', to: null };
     switch (o.type) {
       case 'tarea':
       case 'urgente': {
@@ -2608,6 +2703,27 @@ Conclusión: una línea: ¿el equipo avanza hacia el objetivo? ¿Qué es lo más
         if (closed.length) { h._append(leadThread, { id: h._uuid(), kind: 'notice', text: `${closed.map((t) => `T${t.id}`).join(', ')} ${drop ? 'descartada' : 'verificada'}${closed.length > 1 ? 's' : ''}${why ? `: ${clip(why, 160)}` : ''}` }); h._changed(leadThread); }
         const missing = ids.filter((id) => !closed.some((t) => t.id === id) && !this.ledger.task(team.id, id));
         if (missing.length) complain(`No hay ninguna tarea ${missing.map((id) => `T${id}`).join(', ')} en el tablero.`);
+        return;
+      }
+      case 'pausar':
+      case 'reanudar': {
+        const ref = o.attrs?.tarea ?? o.attrs?.id ?? (ONLY_IDS.test(o.body) ? o.body : o.to);
+        const ids = [...new Set(String(ref ?? '').match(/\d+/g)?.map(Number) ?? [])];
+        if (!ids.length) { complain(`Di qué tarea ${o.type === 'pausar' ? 'pausas' : 'reanudas'}: <relevo:${o.type} tarea="12">${o.type === 'pausar' ? 'por qué' : 'desde dónde sigue'}</relevo:${o.type}>.`); return; }
+        const why = ONLY_IDS.test(o.body) ? '' : o.body.trim();
+        const done = o.type === 'pausar' ? this.pauseTasks(team, ids, why, lead.name) : this.resumeTasks(team, ids, why, lead.name);
+        if (done.length) { h._append(leadThread, { id: h._uuid(), kind: 'notice', text: `${done.map((t) => `T${t.id}`).join(', ')} ${o.type === 'pausar' ? 'pausada' : 'reanudada'}${done.length > 1 ? 's' : ''}${why ? `: ${clip(why.replace(/\s+/g, ' '), 160)}` : ''}` }); h._changed(leadThread); }
+        const missing = ids.filter((id) => !done.some((t) => t.id === id));
+        if (missing.length) complain(missing.map((id) => { const t = this.ledger.task(team.id, id); return !t ? `No hay ninguna tarea T${id} en el tablero.` : `T${id} está ${t.state}: ${o.type === 'pausar' ? 'solo se pausa una tarea pendiente, en curso o bloqueada' : 'solo se reanuda una tarea pausada'}.`; }).join(' '));
+        return;
+      }
+      case 'auditor': {
+        if (!o.body) return;
+        try {
+          this.askAuditor(team, o.body, lead.name);
+          h._append(leadThread, { id: h._uuid(), kind: 'notice', text: `Consulta al auditor: ${clip(o.body.replace(/\s+/g, ' '), 160)}` });
+          h._changed(leadThread);
+        } catch (e) { complain(`No se ha podido consultar al auditor: ${e.message}.`); }
         return;
       }
       case 'registro': {

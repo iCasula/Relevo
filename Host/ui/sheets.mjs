@@ -1283,7 +1283,7 @@ export function openTeamMemory(hostId, teamId, tab = undefined) {
     ].filter(([k]) => (full || k === 'decisions') && (boards || !['board', 'log', 'audits'].includes(k)));
     if (!tabs.some(([k]) => k === tab)) tab = tabs[0][0];
     let body = '';
-    const STATE = { pendiente: 'Pendiente', 'en curso': 'En curso', bloqueada: 'Bloqueada', hecha: 'Hecha · por comprobar', verificada: 'Comprobada', descartada: 'Descartada' };
+    const STATE = { pendiente: 'Pendiente', 'en curso': 'En curso', bloqueada: 'Bloqueada', pausada: 'Pausada', hecha: 'Hecha · por comprobar', verificada: 'Comprobada', descartada: 'Descartada' };
     const taskRow = (t, open) => `<div class="decision task-row st-${esc(t.state.replace(' ', '-'))}"><span class="d-id">T${t.id}</span><div class="grow"><div class="d-text selectable">${esc(t.text)}</div>${t.result ? `<div class="f-sum selectable">${esc(t.result)}</div>` : ''}<div class="caption"><span class="task-state">${esc(STATE[t.state] ?? t.state)}</span> · ${esc(t.owner)}${t.milestone ? ` · hito #${t.milestone}` : ''} · ${esc(when(t.updated))}</div>${gits.filter((g) => g.task === t.id).map(gitRow).join('')}</div>${open
       ? `<button class="tb-btn" data-task-ok="${t.id}" title="Darla por comprobada y cerrarla (el orquestador se entera)">${icon('checkmark.circle', { size: 14 })}</button><button class="tb-btn" data-task-drop="${t.id}" title="Descartarla: ya no hace falta (el orquestador se entera)">${icon('xmark.circle.fill', { size: 13 })}</button>`
       : `<button class="tb-btn" data-task-reopen="${t.id}" title="Reabrirla">${icon('arrow.uturn.backward', { size: 12 })}</button>`}</div>`;
@@ -1300,11 +1300,12 @@ export function openTeamMemory(hostId, teamId, tab = undefined) {
         ['pendiente', 'Pendiente', 'Esperan a que su agente termine lo que hace'],
         ['en curso', 'En curso', 'Su agente trabaja en ellas'],
         ['bloqueada', 'Bloqueada', 'Esperan una respuesta'],
+        ['pausada', 'Pausada', 'Aparcadas sin cerrar: su agente las dejó y su rama se conserva'],
         ['hecha', 'Por comprobar', 'Hechas: el orquestador las comprueba y las cierra'],
         ['cerrada', 'Cerradas', 'Comprobadas o descartadas, las últimas'],
       ];
       const card = (t) => {
-        const open = ['pendiente', 'en curso', 'bloqueada', 'hecha'].includes(t.state);
+        const open = ['pendiente', 'en curso', 'bloqueada', 'hecha', 'pausada'].includes(t.state);
         const big = expandedCards.has(t.id);
         const g = gits.filter((x) => x.task === t.id);
         return `<div class="kb-card st-${esc(t.state.replace(' ', '-'))}${big ? ' big' : ''}">
@@ -1313,7 +1314,7 @@ export function openTeamMemory(hostId, teamId, tab = undefined) {
           ${t.result ? `<div class="kb-result${big ? '' : ' clamp'}">${t.state === 'descartada' ? 'Descartada: ' : '→ '}${esc(t.result)}</div>` : ''}
           ${g.length ? `<div class="kb-git">${g.map(gitRow).join('')}</div>` : ''}
           <div class="kb-actions">${open
-            ? `${t.state === 'hecha' ? `<button class="btn small" data-task-ok="${t.id}" title="Darla por comprobada y cerrarla (el orquestador se entera)">${icon('checkmark.circle', { size: 12 })} Comprobada</button>` : `<button class="tb-btn" data-task-ok="${t.id}" title="Darla por comprobada y cerrarla (el orquestador se entera)">${icon('checkmark.circle', { size: 13 })}</button>`}<button class="tb-btn" data-task-drop="${t.id}" title="Descartarla: ya no hace falta (el orquestador se entera)">${icon('xmark.circle', { size: 13 })}</button>`
+            ? `${t.state === 'hecha' ? `<button class="btn small" data-task-ok="${t.id}" title="Darla por comprobada y cerrarla (el orquestador se entera)">${icon('checkmark.circle', { size: 12 })} Comprobada</button>` : `<button class="tb-btn" data-task-ok="${t.id}" title="Darla por comprobada y cerrarla (el orquestador se entera)">${icon('checkmark.circle', { size: 13 })}</button>`}${['pendiente', 'en curso', 'bloqueada'].includes(t.state) ? `<button class="tb-btn" data-task-pause="${t.id}" title="Pausarla: su agente la deja sin perder nada y no sigue hasta que la reanudes (el orquestador se entera)">${icon('pause.circle', { size: 13 })}</button>` : ''}${t.state === 'pausada' ? `<button class="btn small" data-task-resume="${t.id}" title="Reanudarla: vuelve a pendiente y el orquestador se la da a su agente cuando toque">${icon('play.circle', { size: 12 })} Reanudar</button>` : ''}<button class="tb-btn" data-task-drop="${t.id}" title="Descartarla: ya no hace falta (el orquestador se entera)">${icon('xmark.circle', { size: 13 })}</button>`
             : `<span class="caption">${t.state === 'verificada' ? 'Comprobada' : 'Descartada'}</span><button class="tb-btn" data-task-reopen="${t.id}" title="Reabrirla">${icon('arrow.uturn.backward', { size: 12 })}</button>`}</div>
         </div>`;
       };
@@ -1338,7 +1339,7 @@ export function openTeamMemory(hostId, teamId, tab = undefined) {
       const KIND = { registro: 'Registro', informe: 'Informe', decision: 'Decisión antigua', auditoria: 'Auditoría', tarea: 'Tablero' };
       body = `<div class="caption" style="margin-bottom:6px">Lo comprobado y lo hecho (resultados, despliegues, commits aceptados), los informes de cada agente y las decisiones que salieron de la lista. No va al contexto de nadie: el orquestador lo busca cuando lo necesita.</div>
         <div class="team-line"><input class="field-input grow" data-q placeholder="Buscar en el tablero, el registro, los informes y las decisiones antiguas" value="${esc(query)}"><button class="btn" data-search>${searching ? '<span class="spinner"></span>' : icon('magnifyingglass', { size: 12 })} Buscar</button>${results ? '<button class="btn" data-clear>Recientes</button>' : ''}</div>
-        <div class="decisions" style="margin-top:8px">${list.length ? list.map((x) => (x.task ? taskRow(x.task, ['pendiente', 'en curso', 'bloqueada', 'hecha'].includes(x.task.state))
+        <div class="decisions" style="margin-top:8px">${list.length ? list.map((x) => (x.task ? taskRow(x.task, ['pendiente', 'en curso', 'bloqueada', 'hecha', 'pausada'].includes(x.task.state))
           : `<div class="decision"><span class="d-id">${esc(KIND[x.kind] ?? x.kind)}${x.kind === 'decision' && x.ref ? ` #${esc(x.ref)}` : ''}</span><div class="grow"><div class="f-sum selectable" style="color:var(--text);max-height:180px">${esc(x.text)}</div><div class="caption">${esc(x.by ?? '')}${x.ref && x.kind !== 'decision' ? ` · ${esc(x.ref)}` : ''} · ${esc(when(x.ts))}</div></div>${x.kind === 'decision' && x.ref ? `<button class="tb-btn" data-pin="${esc(x.ref)}" title="Recuperarla y fijarla en la lista de decisiones">${icon('pin', { size: 13 })}</button>` : ''}</div>`)).join('')
           : `<div class="caption" style="padding:10px 2px">${results ? 'Nada encontrado.' : 'Aún no hay nada en el registro.'}</div>`}</div>`;
     } else if (tab === 'audits') {
@@ -1400,6 +1401,8 @@ export function openTeamMemory(hostId, teamId, tab = undefined) {
     s.el.querySelectorAll('[data-task-ok]').forEach((b) => { b.onclick = () => task(Number(b.dataset.taskOk), 'verificada'); });
     s.el.querySelectorAll('[data-task-drop]').forEach((b) => { b.onclick = () => task(Number(b.dataset.taskDrop), 'descartada'); });
     s.el.querySelectorAll('[data-task-reopen]').forEach((b) => { b.onclick = () => task(Number(b.dataset.taskReopen), 'reabrir'); });
+    s.el.querySelectorAll('[data-task-pause]').forEach((b) => { b.onclick = () => task(Number(b.dataset.taskPause), 'pausada'); });
+    s.el.querySelectorAll('[data-task-resume]').forEach((b) => { b.onclick = () => task(Number(b.dataset.taskResume), 'reabrir'); });
     $('[data-closed]')?.addEventListener('click', () => { showClosed = !showClosed; draw(); });
     s.el.querySelectorAll('[data-owner]').forEach((b) => { b.onclick = () => { ownerFilter = b.dataset.owner; draw(); }; });
     $('[data-ms-filter]')?.addEventListener('change', (e) => { msFilter = e.target.value; draw(); });

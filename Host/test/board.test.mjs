@@ -348,3 +348,74 @@ test('an outside auditor: the board as a file to read, a folder to write to the 
   assert.match(teams.searchText(team, 'conseguido'), /Hito #2 conseguido/);
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test('a task paused (by the orchestrator or by you) stays on the board, its agent leaves it; resumed, it goes back to it', () => {
+  const { teams, team, delivered, lead, exec } = stand();
+  teams._order(team, lead, { type: 'tarea', to: 'Ejecutor 1', body: 'GC de entradas activas' });
+  assert.equal(exec.taskId, 1);
+  teams._order(team, lead, { type: 'pausar', to: null, body: 'primero la memoria', attrs: { tarea: '1' } });
+  const t = teams.ledger.task('T1', 1);
+  assert.equal(t.state, 'pausada');
+  assert.match(t.result, /^Pausada: primero la memoria/);
+  assert.equal(exec.taskId, null, 'its agent is free');
+  assert.match(delivered.at(-1).text, /Orquestador ha pausado T1: primero la memoria\. Déjala donde esté sin perder nada/);
+  assert.equal(teams.ledger.tasks('T1').length, 1, 'still open, on the board');
+  assert.match(teams._boardLine(team), /T1 Ejecutor 1 PAUSADA/);
+  // A closed one can't be paused; the orchestrator hears why.
+  teams._order(team, lead, { type: 'pausar', to: null, body: '7', attrs: { tarea: '7' } });
+  assert.match(delivered.at(-1).text, /No hay ninguna tarea T7/);
+  // Resumed with where to go on: back to its agent, in progress.
+  teams._order(team, lead, { type: 'reanudar', to: null, body: 'sigue desde 2a63ad55', attrs: { tarea: '1' } });
+  assert.equal(teams.ledger.task('T1', 1).state, 'en curso');
+  assert.equal(exec.taskId, 1);
+  assert.match(delivered.at(-1).text, /^Retoma T1: GC de entradas activas\n\nsigue desde 2a63ad55/);
+  assert.equal(delivered.at(-1).from.taskId, 1);
+  // From the apps: you pause it, you resume it (pending: the orchestrator gives it when it fits).
+  teams.editTask('T1', { id: 1, state: 'pausada' });
+  assert.equal(teams.ledger.task('T1', 1).state, 'pausada');
+  assert.match(delivered.at(-1).text, /^El usuario ha pausado T1/);
+  assert.match(team.notes.at(-1), /El usuario ha pausado la tarea T1/);
+  const n = delivered.length;
+  teams.editTask('T1', { id: 1, state: 'reabrir' });
+  assert.equal(teams.ledger.task('T1', 1).state, 'pendiente');
+  assert.equal(delivered.length, n, 'nothing sent behind the orchestrator');
+  assert.match(team.notes.at(-1), /El usuario ha reanudado .* la tarea T1/);
+  assert.equal(parseOrders('<relevo:pausar tarea="12">x</relevo:pausar>')[0].type, 'pausar');
+});
+
+test('the orchestrator asks the auditor: a read-only session with the question, the answer back to it; the periodic clock untouched', async () => {
+  const { teams, team, delivered, lead, notices } = stand();
+  const started = [];
+  const A = { id: 'A', title: 'x', queued: [], items: [] };
+  let busy = false;
+  Object.assign(teams.host, {
+    accountsById: new Map([['ACC', { id: 'ACC', name: 'Claude' }]]), _modelName: (a, m) => m,
+    createThread: () => { teams.host.threads.set('A', A); return A; }, agents: new Map(),
+    _startTurn: (t, text, x, meta) => started.push({ t, text, prompt: meta.prompt, from: meta.from }), _push() {},
+  });
+  teams._busy = () => busy;
+  // Without an auditor: told so.
+  teams._order(team, lead, { type: 'auditor', to: null, body: '¿Seguimos con el GC?' });
+  assert.match(delivered.at(-1).text, /No se ha podido consultar al auditor: el equipo no tiene auditor/);
+  team.leadTurns = 10;
+  teams.setAudit(team, { accountId: 'acc', model: 'opus', every: 4 });
+  const clock = team.audit.lastAt;
+  teams._order(team, lead, { type: 'tarea', to: 'Auditor', body: '¿Vale la pena otro NRO de memoria o desglosamos antes?' });
+  assert.equal(started.length, 1, 'para="Auditor" is a question for it');
+  assert.equal(A.mode, 'plan');
+  assert.match(started[0].prompt, /Orquestador \(el orquestador\) te consulta:\n«¿Vale la pena otro NRO/);
+  assert.doesNotMatch(started[0].prompt, /6\. Orden:/, 'no full audit asked');
+  assert.match(notices.at(-1), /^Consulta al auditor:/);
+  // Another question while it answers: it waits its turn.
+  busy = true;
+  teams._order(team, lead, { type: 'auditor', to: null, body: 'Y otra cosa' });
+  assert.equal(started.length, 1);
+  busy = false;
+  teams.onAuditFinished(A, { messages: ['Respuesta: desglosad antes.\nEvidencia: …'] });
+  assert.equal(delivered.at(-1).from.label, 'respuesta');
+  assert.match(delivered.at(-1).text, /^Respuesta: desglosad antes/);
+  assert.equal(team.audit.lastAt, clock, 'the periodic audits keep their clock');
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(started.length, 2, 'the waiting question goes next');
+  assert.match(started[1].prompt, /«Y otra cosa»/);
+});

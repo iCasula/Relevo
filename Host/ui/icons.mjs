@@ -76,6 +76,8 @@ const P = {
   'person.2.crop.square.stack': '<rect x="4" y="6" width="16" height="15" rx="3"/><path d="M7 3h10"/><circle cx="9.5" cy="12" r="2"/><circle cx="14.5" cy="12" r="2"/><path d="M6.5 18.5a3 3 0 0 1 6 0M11.5 18.5a3 3 0 0 1 6 0"/>',
   'iphone.gen3': '<rect x="6.5" y="2.5" width="11" height="19" rx="2.5"/><path d="M10.5 5h3"/>',
   'pause.circle': '<circle cx="12" cy="12" r="9.5"/><path d="M10 8.5v7M14 8.5v7"/>',
+  'play.circle': '<circle cx="12" cy="12" r="9.5"/><path d="M10 8.5v7l5.5-3.5Z"/>',
+  'eye': '<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="3"/>',
   'creditcard.trianglebadge.exclamationmark': '<rect x="2.5" y="5" width="19" height="13" rx="2"/><path d="M2.5 9.5h19M15 21h6M18 14v4"/>',
   'point.topleft.down.to.point.bottomright.curvepath': '<circle cx="5" cy="5" r="2"/><circle cx="19" cy="19" r="2"/><path d="M5 7c0 8 14 2 14 10"/>',
   'arrow.triangle.2.circlepath': '<path d="M4 12a8 8 0 0 1 13.7-5.6L20 8.5M20 4v4.5h-4.5M20 12a8 8 0 0 1-13.7 5.6L4 15.5M4 20v-4.5h4.5"/>',

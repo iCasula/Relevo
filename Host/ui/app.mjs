@@ -432,6 +432,7 @@ const ROLE = {
   researcher: { label: 'Investigador', short: 'Inv.', icon: 'globe' },
   relevo: { label: 'Relevo', short: 'Relevo', icon: 'info.circle' },
   team: { label: 'Equipo', short: 'Equipo', icon: 'person.3.sequence' },
+  auditor: { label: 'Auditor', short: 'Aud.', icon: 'eye' },
 };
 const teamOf = (hostId, teamId) => snap(hostId)?.hostTeams?.find((x) => x.id === teamId) ?? null;
 
@@ -675,18 +676,21 @@ const ORDER = {
   pedir: ['Te pide', 'hand.raised.fill'],
   cerrar: ['Cerrar', 'checkmark.circle', true], registro: ['Registro', 'doc.text', true], buscar: ['Buscar', 'magnifyingglass', true],
   fijar: ['Fijar', 'pin.fill', true], soltar: ['Soltar', 'pin', true],
+  pausar: ['Pausar', 'pause.circle', true], reanudar: ['Reanudar', 'play.circle', true], auditor: ['Al auditor', 'eye'],
 };
 /** The task, milestone or decision an order is about, for its folded row: «Cerrar T81», «Hito · del #7». */
 function orderLabel(x) {
   const [label] = ORDER[x.type] ?? [x.type];
   if (x.type === 'cerrar') return `${/descart/i.test(x.estado ?? '') ? 'Descartar' : 'Cerrar'}${x.tarea ? ` T${x.tarea.replace(/^T/i, '')}` : ''}`;
   if (x.type === 'integrar' && x.tarea) return `Integrar T${x.tarea.replace(/^T/i, '')}`;
+  if ((x.type === 'pausar' || x.type === 'reanudar') && x.tarea) return `${label} T${x.tarea.replace(/^T/i, '')}`;
   if (x.type === 'hito' && x.padre) return `Subhito del #${x.padre}`;
   return `${label}${x.to ? ` → ${x.to}` : ''}${x.type === 'tarea' && x.hito ? ` · #${x.hito}` : ''}`;
 }
 /** The role of whoever an order goes to: from the team when the name is known, else from the name or the kind. */
 function recipientRole(o, roles) {
   const to = o.to?.toLowerCase() ?? '';
+  if (o.type === 'auditor' || /^auditor/.test(to)) return 'auditor';
   return roles?.get(to) ?? (/investig/.test(to) || o.type === 'investigar' ? 'researcher' : /orquest/.test(to) || !to ? 'orchestrator' : 'executor');
 }
 const teamRoles = (hostId) => {
@@ -694,7 +698,7 @@ const teamRoles = (hostId) => {
   const team = id && teamOf(hostId, id);
   return team ? new Map(team.members.map((m) => [m.name.toLowerCase(), m.role])) : null;
 };
-const ORDER_TAG = /<relevo:(tarea|urgente|investigar|respuesta|pregunta|integrar|fin|decisi[oó]n|descartar|hito|hecho|aprobar|denegar|consultar|pedir|cerrar|registro|buscar|fijar|soltar)\b([^>]*?)(?:\/>|>([\s\S]*?)<\/relevo:\1\s*>)/gi;
+const ORDER_TAG = /<relevo:(tarea|urgente|investigar|respuesta|pregunta|integrar|fin|decisi[oó]n|descartar|hito|hecho|aprobar|denegar|consultar|pedir|cerrar|registro|buscar|fijar|soltar|pausar|reanudar|auditor)\b([^>]*?)(?:\/>|>([\s\S]*?)<\/relevo:\1\s*>)/gi;
 const ORDER_TO = /\b(?:para|de)\s*=\s*(?:["“']([^"”']+)["”']|([^\s"”'>/]+))/i;
 
 /** The reply cut into prose and orders, in order; tags inside code blocks stay text (as the host reads them). */
