@@ -48,6 +48,9 @@ const NOTE_MAX = 6_000, NOTE_TTL = 24 * 3600;
 /** Decisions the team keeps (the oldest go first past this). */
 const DECISIONS_MAX = 25; // besides the pinned ones
 const PINNED_MAX = 12;
+const PIN_ORDER = new Set(['fijar', 'soltar']);
+/** «#655, 658 y 659» → [655, 658, 659]. */
+const decisionIds = (s) => [...new Set(String(s ?? '').match(/\d+/g)?.map(Number) ?? [])];
 /** Open tasks listed at the end of each message to the orchestrator (when the board changed). */
 const BOARD_SHOWN = 12;
 /** Where the team's decisions are written in full, inside the project (kept out of git). */
@@ -477,7 +480,7 @@ export class Teams {
 
   /** Pins (or unpins) decisions by number; a pinned one never leaves the list. An old one comes back from the ledger. */
   pinDecisions(team, which, on) {
-    const ids = [...new Set(String(which ?? '').match(/\d+/g)?.map(Number) ?? [])];
+    const ids = decisionIds(which);
     team.decisions ??= [];
     const changed = [];
     for (const id of ids) {
@@ -1152,14 +1155,32 @@ export class Teams {
     const list = items?.length
       ? items.flatMap((it) => parseOrders(it.text).map((o) => ({ o, it })))
       : orders.map((o) => ({ o, it: null }));
+    const pins = new Map(); // per message: the decisions its new fijar/soltar orders touch
     for (const { o, it } of list) {
       const sig = orderSig(o);
       if (it?.orderSigs?.includes(sig)) continue;
       if (it) it.orderSigs = [...(it.orderSigs ?? []), sig];
       if (r.sentOrders.has(sig)) continue;
       r.sentOrders.add(sig);
+      if (PIN_ORDER.has(o.type)) {
+        const touched = pins.get(it) ?? new Set();
+        for (const id of decisionIds(o.body || o.to)) touched.add(id);
+        pins.set(it, touched);
+        continue;
+      }
       const res = this._order(team, member, o);
       if (res) sent.push(res);
+    }
+    // Fixed and released in one message (even back and forth): what it says last about each one is what counts.
+    for (const [it, touched] of pins) {
+      const last = new Map();
+      for (const o of it ? parseOrders(it.text) : orders) {
+        if (PIN_ORDER.has(o.type)) for (const id of decisionIds(o.body || o.to)) last.set(id, o.type);
+      }
+      for (const type of ['soltar', 'fijar']) {
+        const ids = [...touched].filter((id) => last.get(id) === type);
+        if (ids.length) this._order(team, member, { type, body: ids.join(',') });
+      }
     }
     for (const it of items ?? []) it.teamDone = true;
     return sent;
@@ -2739,10 +2760,17 @@ Conclusión: una línea: ¿el equipo avanza hacia el objetivo? ¿Qué es lo más
       }
       case 'fijar':
       case 'soltar': {
+        // One already as asked (fixed twice, released when it wasn't) is fine: nothing to say.
         const on = o.type === 'fijar';
-        const changed = this.pinDecisions(team, o.body || o.to, on);
+        const ids = decisionIds(o.body || o.to);
+        const changed = this.pinDecisions(team, ids.join(','), on);
         if (changed.length) { h._append(leadThread, { id: h._uuid(), kind: 'notice', text: `Decisión ${on ? 'fijada' : 'soltada'}: ${changed.map((d) => `#${d.id}`).join(', ')}` }); h._changed(leadThread); }
-        else if (on) complain(`No encuentro la decisión ${o.body || o.to} (ni en las antiguas)${(team.decisions ?? []).filter((d) => d.pinned).length >= PINNED_MAX ? `, o ya hay ${PINNED_MAX} fijadas: suelta alguna` : ''}.`);
+        if (!on) return;
+        const tag = (list) => list.map((id) => `#${id}`).join(', ');
+        const missing = ids.filter((id) => !(team.decisions ?? []).some((d) => d.id === id));
+        const left = ids.filter((id) => (team.decisions ?? []).some((d) => d.id === id && !d.pinned));
+        if (missing.length) complain(`No existe ${missing.length > 1 ? 'ninguna decisión' : 'la decisión'} ${tag(missing)} (ni en las antiguas). Las fijadas siguen como estaban.`);
+        if (left.length) complain(`No he fijado ${tag(left)}: ya hay ${PINNED_MAX} fijadas. Suelta alguna primero.`);
         return;
       }
       case 'fin': {

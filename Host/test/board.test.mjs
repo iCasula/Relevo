@@ -419,3 +419,30 @@ test('the orchestrator asks the auditor: a read-only session with the question, 
   assert.equal(started.length, 2, 'the waiting question goes next');
   assert.match(started[1].prompt, /«Y otra cosa»/);
 });
+
+test('fixing one already fixed says nothing; only a decision that doesn\'t exist is reported; in one message the last word counts', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'relevo-board-'));
+  const { teams, team, lead, delivered } = stand({ projectPath: dir });
+  for (let i = 1; i <= 5; i++) teams.addDecision(team, `Decisión de rumbo ${i}`, 'Orquestador');
+  const pinned = () => team.decisions.filter((d) => d.pinned).map((d) => d.id);
+  teams._order(team, lead, { type: 'fijar', to: null, body: '3' });
+  const before = delivered.length;
+  teams._order(team, lead, { type: 'fijar', to: null, body: '3, 4' });
+  teams._order(team, lead, { type: 'soltar', to: null, body: '5' });
+  assert.deepEqual(pinned(), [3, 4]);
+  assert.equal(delivered.length, before, 'no warning for one already fixed or released');
+  teams._order(team, lead, { type: 'fijar', to: null, body: '3 y 99' });
+  assert.equal(delivered.length, before + 1);
+  assert.match(delivered.at(-1).text, /No existe la decisión #99/);
+  assert.doesNotMatch(delivered.at(-1).text, /#3/);
+  // A message that fixes and releases the same ones over and over (a model in a loop): what it says last wins.
+  const loop = `Recojo la sonda.\n${'<relevo:fijar>2</relevo:fijar><relevo:soltar>2</relevo:soltar>'.repeat(40)}<relevo:soltar>3</relevo:soltar><relevo:fijar>3</relevo:fijar><relevo:soltar>4</relevo:soltar>`;
+  const thread = teams.host.threads.get('L');
+  const item = { id: 'm', kind: 'assistant', text: loop };
+  const notices = [];
+  teams.host._append = (th, it) => notices.push(it.text);
+  teams._dispatch(team, lead, thread, parseOrders(loop), [item]);
+  assert.deepEqual(pinned(), [3]);
+  assert.deepEqual(notices, ['Decisión soltada: #4'], 'one notice, not one per tag');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
