@@ -624,7 +624,8 @@ function groupHTML(row) {
   const runningNow = tools.some((t) => t.toolState === 'running');
   const open = app.expandedItems.has(row.key);
   const summary = `${tools.length === 1 ? '1 acción' : `${tools.length} acciones`} · ${names.slice(0, 4).join(', ')}${names.length > 4 ? '…' : ''}`;
-  return `<button class="tool-group" data-toggle-item="${esc(row.key)}" title="${open ? 'Ocultar estas acciones' : 'Ver estas acciones'}">${runningNow ? '<span class="spinner"></span>' : icon('wrench.and.screwdriver', { size: 11 })}${esc(summary)}${failed ? `<span class="fails">${icon('xmark.circle.fill', { size: 10 })}${failed}</span>` : ''}${icon(open ? 'chevron.down' : 'chevron.right', { size: 9 })}</button>`;
+  const last = [...row.group].reverse().find((i) => i.date)?.date;
+  return `<button class="tool-group" data-toggle-item="${esc(row.key)}" title="${open ? 'Ocultar estas acciones' : 'Ver estas acciones'}">${runningNow ? '<span class="spinner"></span>' : icon('wrench.and.screwdriver', { size: 11 })}${esc(summary)}${failed ? `<span class="fails">${icon('xmark.circle.fill', { size: 10 })}${failed}</span>` : ''}${last ? `<span class="when-at" title="${esc(`Última: ${fullDate(last)}`)}">${esc(clock(last))}</span>` : ''}${icon(open ? 'chevron.down' : 'chevron.right', { size: 9 })}</button>`;
 }
 
 function itemHTML(hostId, it, header) {
@@ -638,7 +639,9 @@ function itemHTML(hostId, it, header) {
       if (to) return agentRowHTML(hostId, it, to, true);
       const acct = accountOf(hostId, it.accountId);
       const author = header && acct ? `<div class="author">${badge(acct, 14)}<b>${esc(acct.name)}</b><span class="m">${esc(modelName(acct, it.model))}</span>${timeHTML(it.date)}</div>` : '';
-      return `${author}${replyHTML(it.text, it.id, teamRoles(hostId))}${imagesHTML(hostId, it.text, it.id)}`;
+      // Every message carries its time (the first of a turn in its header): you can tell an agent that's stuck.
+      const when = !author && it.date ? `<div class="msg-when">${timeHTML(it.date)}</div>` : '';
+      return `${author}${replyHTML(it.text, it.id, teamRoles(hostId))}${imagesHTML(hostId, it.text, it.id)}${when}`;
     }
     case 'reasoning':
       return `<div><button class="toggle-row" data-toggle-item="${esc(it.id)}">${icon('brain', { size: 11 })}Razonamiento${icon(open ? 'chevron.down' : 'chevron.right', { size: 9 })}</button>${open ? `<div class="reasoning-body">${esc(it.text)}</div>` : ''}</div>`;

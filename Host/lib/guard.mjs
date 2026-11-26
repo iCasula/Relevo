@@ -107,6 +107,9 @@ export function normalize(p, platform = process.platform) {
   let s = String(p ?? '').trim().replace(/^["']|["']$/g, '');
   if (!s) return '';
   if (s.startsWith('~')) s = path.join(os.homedir(), s.slice(1));
+  // A WSL distro's files seen from Windows (\\wsl.localhost\Ubuntu\home\x, \\wsl$\Ubuntu\home\x) are its /home/x.
+  const unc = /^[\\/]{2}wsl(?:\.localhost|\$)[\\/]+[^\\/]+(?:[\\/](.*))?$/i.exec(s);
+  if (unc) s = `/${(unc[1] ?? '').replace(/\\/g, '/')}`;
   // WSL's /mnt/v/x, and on Windows Git Bash's /v/x: both are V:\x.
   const wsl = /^\/mnt\/([a-zA-Z])(?:\/(.*))?$/.exec(s) ?? (platform === 'win32' ? /^\/([a-zA-Z])(?:\/(.*))?$/.exec(s) : null);
   if (wsl) s = `${wsl[1].toUpperCase()}:\\${(wsl[2] ?? '').replace(/\//g, '\\')}`;
@@ -114,6 +117,7 @@ export function normalize(p, platform = process.platform) {
   if (windows) {
     s = s.replace(/\//g, '\\').replace(/\\+$/, '');
     if (/^[A-Za-z]:$/.test(s)) s += '\\';
+    if (!s) s = '\\'; // «/» (a distro's root) stays a root, never «nothing»
     return s.toLowerCase();
   }
   return path.posix.normalize(s).replace(/\/+$/, '') || '/';
@@ -232,6 +236,7 @@ export function checkCommand(command, { roots = [], cwd = null, platform = proce
 }
 
 const FILE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
+const READ_TOOLS = new Set(['Read', 'Glob', 'Grep', 'LS', 'NotebookRead']);
 
 /**
  * A permission request from any agent: why it must wait for you, or null if it can go on its own.
@@ -252,7 +257,7 @@ export function checkRequest(req, { roots, cwd, platform = process.platform } = 
   if (command) { const v = checkCommand(command, { roots, cwd, platform }); if (v) return v; }
   if (file && (FILE_TOOLS.has(req.toolName) || req.toolName === 'fileChange' || !command)) {
     const abs = /^(?:[A-Za-z]:[\\/]|\/|~)/.test(file) ? file : cwd ? resolveFrom(cwd, file) : file;
-    if (!inside(abs, roots, platform)) return { reason: `escribe fuera de la carpeta del proyecto (${file})` };
+    if (!inside(abs, roots, platform)) return { reason: `${READ_TOOLS.has(req.toolName) ? 'lee' : 'escribe'} fuera de la carpeta del proyecto (${file})` };
   }
   if (req.grantRoot && !inside(req.grantRoot, roots, platform)) return { reason: `quiere escribir fuera de la carpeta del proyecto (${req.grantRoot})` };
   // Agents that only describe what they want (Antigravity, some ACP ones): the text is checked as a command.

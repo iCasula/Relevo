@@ -168,3 +168,13 @@ test("the user's mailbox to the orchestrator: an agent may read it, not write in
   assert.equal(checkRequest({ toolName: 'Bash', input: { command: 'ls /p/.relevo/al-orquestador' } }, { roots, cwd: '/p', platform: 'linux' }), null);
   assert.equal(checkRequest({ toolName: 'Write', input: { file_path: '/p/docs/x.md' } }, { roots, cwd: '/p', platform: 'linux' }), null);
 });
+
+test("a WSL distro's files seen from Windows count as its Linux paths (a team's workDirs /home/x)", () => {
+  const ctx = { ...W, roots: [...W.roots, '/home/icasula'] };
+  const req = (toolName, file_path) => checkRequest({ toolName, input: { file_path } }, ctx);
+  assert.equal(req('Write', '\\\\wsl.localhost\\Ubuntu\\home\\icasula\\e1-t257\\a.c'), null);
+  assert.equal(req('Edit', '\\\\wsl$\\Ubuntu\\home\\icasula\\x.py'), null);
+  assert.match(req('Write', '\\\\wsl.localhost\\Ubuntu\\etc\\passwd').reason, /^escribe fuera/);
+  assert.match(req('Read', '\\\\wsl.localhost\\Ubuntu\\etc\\hosts').reason, /^lee fuera/);
+  assert.notEqual(normalize('\\\\wsl.localhost\\Ubuntu', 'win32'), '');
+});

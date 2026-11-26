@@ -176,6 +176,8 @@ code, pre, .mono { font-family: var(--mono); }
 .author .m { color: var(--secondary); }
 .when-at { color: var(--tertiary, var(--secondary)); font-size: 10px; font-variant-numeric: tabular-nums; margin-left: 2px; }
 .from-head .when-at { font-size: 11px; }
+.msg-when { margin-top: -2px; }
+.msg-when .when-at { margin-left: 0; }
 .toggle-row { display: inline-flex; align-items: center; gap: 5px; background: none; border: 0; padding: 0; color: var(--secondary); font-size: 10px; }
 .reasoning-body { margin-top: 6px; padding-left: 10px; border-left: 2px solid var(--hairline); color: var(--secondary); font-size: 12px; white-space: pre-wrap; }
 .tool { border-radius: 10px; background: var(--subtle); border: 1px solid var(--hairline); overflow: hidden; }
