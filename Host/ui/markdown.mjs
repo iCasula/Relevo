@@ -14,7 +14,8 @@ export function inline(text) {
   s = esc(s);
   s = s.replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (m, label, url) => {
     const raw = url.replaceAll('&amp;', '&');
-    return SAFE_URL.test(raw) ? `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>` : m;
+    // A file (`file:///V:/a.png`, `out/a.png`) can't be opened from here: its name, with the path on hover.
+    return SAFE_URL.test(raw) ? `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>` : `<span class="file-ref" title="${url}">${label}</span>`;
   });
   s = s.replace(/(^|[\s(])(https?:\/\/[^\s<)]+[^\s<).,;:!?'"])/g, '$1<a href="$2" target="_blank" rel="noopener noreferrer">$2</a>');
   s = s.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>').replace(/(^|\W)__([^_\n]+)__(?!\w)/g, '$1<strong>$2</strong>');

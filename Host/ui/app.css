@@ -256,6 +256,7 @@ button.working { width: 100%; background: none; border: 0; text-align: left; cur
 .md ul > li::marker { color: var(--secondary); }
 .md ol > li::marker { color: var(--secondary); font-variant-numeric: tabular-nums; }
 .md code { font: 12px var(--mono); }
+.file-ref { text-decoration: underline dotted; text-underline-offset: 2px; cursor: help; }
 .md blockquote { color: var(--secondary); padding-left: 12px; border-left: 3px solid var(--tertiary); }
 .md hr { border: 0; border-top: 1px solid var(--separator); margin: 4px 0; }
 .md pre.code { border-radius: 10px; background: var(--fill-quaternary); border: 1px solid var(--quaternary); margin: 0; padding: 30px 10px 10px; font: 12px/1.45 var(--mono); overflow-x: auto; white-space: pre; position: relative; scrollbar-width: none; }

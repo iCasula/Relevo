@@ -821,9 +821,21 @@ function questionHTML(it) {
 }
 
 // Image strip (ImageStrip): thumbnails 150 tall of the images a message names.
+const IMAGE_EXT = /\.(?:png|jpe?g|gif|webp|bmp|tiff?|heic|heif)$/i;
 const IMAGE_PATH = /(?:^|[\s(`'"*])((?:[A-Za-z]:[\\/]|~?\/|\.{1,2}[\\/])?[\w.\-\\/]*[\w-]\.(?:png|jpe?g|gif|webp|bmp|tiff?|heic|heif))(?=$|[\s)\]`'".,;:*])/gim;
+// Link targets that are files: [a.png](file:///V:/out/a.png), [a.png](file:////wsl.localhost/Ubuntu/…/a.png).
+const FILE_LINK = /\]\((file:\/\/[^)\s]+)\)/gi;
+/** The path a `file://` link points to, as the host names it: `V:/x.png`, `//server/share/x.png`, `/home/x.png`. */
+function fileLinkPath(link) {
+  let p = link.replace(/^file:\/\//i, '');
+  if (!p.startsWith('/')) p = `//${p}`; // file://server/share/x: a network path
+  p = p.replace(/^\/([A-Za-z]:[\\/])/, '$1');
+  try { p = decodeURI(p); } catch {}
+  return p;
+}
 function imagesHTML(hostId, text, id) {
-  const paths = [...new Set([...String(text ?? '').matchAll(IMAGE_PATH)].map((m) => m[1]))].filter((p) => !app.hiddenImages.has(`${id}|${p}`)).slice(0, 12);
+  const linked = [...String(text ?? '').matchAll(FILE_LINK)].map((m) => fileLinkPath(m[1])).filter((p) => IMAGE_EXT.test(p));
+  const paths = [...new Set([...linked, ...[...String(text ?? '').matchAll(IMAGE_PATH)].map((m) => m[1])])].filter((p) => !app.hiddenImages.has(`${id}|${p}`)).slice(0, 12);
   if (!paths.length) return '';
   return `<div class="thumbs">${paths.map((p) => `<span class="thumb-wrap"><button class="thumb" data-image="${esc(p)}" title="${esc(p.split(/[\\/]/).pop())}"><span class="frame"><span class="spinner"></span></span><span class="fname">${esc(p.split(/[\\/]/).pop())}</span></button>`
     + `<button class="thumb-x" data-hide-image="${esc(`${id}|${p}`)}" title="Quitar la vista previa">${icon('xmark', { size: 9 })}</button></span>`).join('')}</div>`;

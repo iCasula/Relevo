@@ -48,11 +48,22 @@ export const isImagePath = (p) => IMAGE.test(String(p ?? ''));
  */
 export function readThreadImage(thread, requested) {
   if (!isImagePath(requested)) throw new Error('Solo se pueden ver imágenes');
-  const mentioned = thread.items.some((i) => (i.text ?? '').includes(requested) || (i.output ?? '').includes(requested) || (i.title ?? '').includes(requested));
+  const forms = [...new Set([requested, encodeURI(requested)])]; // a `file://` link names it percent-encoded
+  const mentioned = thread.items.some((i) => forms.some((f) => (i.text ?? '').includes(f) || (i.output ?? '').includes(f) || (i.title ?? '').includes(f)));
   if (!mentioned) throw new Error('Esa imagen no aparece en este hilo');
-  const file = path.isAbsolute(requested) ? requested : path.resolve(thread.projectPath, requested);
+  const file = imageFile(requested, thread.projectPath);
   const st = fs.statSync(file);
   if (!st.isFile()) throw new Error('No es un fichero');
   if (st.size > MAX_IMAGE) throw new Error('La imagen es demasiado grande (más de 12 MB)');
   return fs.readFileSync(file);
+}
+
+/**
+ * Where a requested image is on disk. On Windows a `file:///V:/x.png` link comes from the iPhone as
+ * `/V:/x.png` (the URL's path): that is the drive V:, not a folder on the current drive.
+ */
+export function imageFile(requested, projectPath, win = isWindows) {
+  const p = win ? requested.replace(/^[\\/]([A-Za-z]:[\\/])/, '$1') : requested;
+  const P = win ? path.win32 : path;
+  return P.isAbsolute(p) ? p : P.resolve(projectPath, p);
 }
