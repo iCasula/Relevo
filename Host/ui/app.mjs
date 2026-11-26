@@ -735,11 +735,24 @@ function folded(text) {
 }
 
 /** An agent's reply with each order folded to one line (tap to read the whole order). */
+/** As the host's ORDER_FLOOD: more orders of one kind in a message is a loop. */
+const ORDER_FLOOD = 20;
 function replyHTML(text, id, roles) {
   const segs = orderSegments(text);
   if (!segs) return `<div class="md">${markdown(text)}</div>`;
+  // An order repeated over and over (a model stuck in a loop): one line saying so, not hundreds of cards.
+  const count = new Map();
+  for (const x of segs) if (x.type) count.set(x.type, (count.get(x.type) ?? 0) + 1);
+  const flooded = new Set([...count].filter(([, n]) => n > ORDER_FLOOD).map(([type]) => type));
+  const shown = new Set();
   return `<div class="reply">${segs.map((x, i) => {
-    if (!x.type) return `<div class="md">${markdown(x.text)}</div>`;
+    if (!x.type) return flooded.size && !x.text.trim() ? '' : `<div class="md">${markdown(x.text)}</div>`;
+    if (flooded.has(x.type)) {
+      if (shown.has(x.type)) return '';
+      shown.add(x.type);
+      const [label] = ORDER[x.type] ?? [x.type];
+      return `<div class="order memo loop"><div class="order-head">${icon('exclamationmark.triangle', { size: 12, cls: 'sym' })}<b>${esc(label)}</b><span class="pv">repetida ${count.get(x.type)} veces en bucle · Relevo no la hizo</span></div></div>`;
+    }
     const key = `${id}#order${i}`;
     // What it asks you is for you to read: always open, in its own colour.
     const ask = x.type === 'pedir';

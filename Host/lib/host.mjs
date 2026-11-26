@@ -19,7 +19,7 @@ import { usageReport } from './usage.mjs';
 import { LoginSession } from './login.mjs';
 import { quickCompletion, cleanTitle } from './quick.mjs';
 import { buildAccount, API_PRESETS, ACP_PRESETS, TYPES } from './accounts.mjs';
-import { Teams, fallbackOf, REFRESH } from './team.mjs';
+import { Teams, fallbackOf, REFRESH, orderFlood } from './team.mjs';
 import { checkRequest, guardRoots } from './guard.mjs';
 import { APNs, validKey } from './apns.mjs';
 import { diffSnapshot } from '../ui/state.mjs';
@@ -1216,6 +1216,25 @@ export class Host {
 
   _touch(t, item) { this._rt(t).dirty.add(item.id); }
 
+  /**
+   * A team agent's message stuck in a loop (the same order hundreds of times: «buscar 1, 2, 3…»): it's cut where the
+   * loop starts and the agent stopped there; the turn ends as usual, so what it said before still goes out.
+   */
+  _cutLoop(t, it) {
+    if (!t.team || it.text.length - (it.loopChecked ?? 0) < 1500) return;
+    it.loopChecked = it.text.length;
+    const flood = orderFlood(it.text);
+    if (!flood.length) return;
+    const first = flood.reduce((a, b) => (b.at < a.at ? b : a));
+    it.loopCut = { type: first.type, n: first.n };
+    it.text = it.text.slice(0, first.at).trimEnd();
+    const r = this._rt(t);
+    r.statusLine = 'Relevo corta un mensaje en bucle…';
+    this.log(`«${t.title}» repetía <relevo:${first.type}> en bucle (${first.n}): mensaje cortado`);
+    this._append(t, { id: uuid(), kind: 'notice', text: `Relevo cortó este mensaje: repetía «${first.type}» en bucle (${first.n} veces). Lo anterior sí cuenta.` });
+    this.agents.get(t.id)?.interrupt();
+  }
+
   send(t, text) {
     if (!text?.trim()) return;
     this.teams.userSpoke(t);
@@ -1530,8 +1549,8 @@ export class Host {
     s.on('models', (models) => { account.models = models; this._saveState(); this._broadcastSnapshot(); });
     s.on('status', (text) => { r.statusLine = text; this._changed(t, false); });
     const read = () => { r.carry = null; }; // the agent is answering: it got what this turn carried
-    s.on('textDelta', (key, text) => { read(); r.waitingTimer = false; const it = item(`a:${key}`, assistant); it.text += text; this._touch(t, it); this._changed(t, false); });
-    s.on('textFinal', (key, text) => { read(); const it = item(`a:${key}`, assistant); it.text = text; this._touch(t, it); this._changed(t, false); });
+    s.on('textDelta', (key, text) => { read(); r.waitingTimer = false; const it = item(`a:${key}`, assistant); if (it.loopCut) return; it.text += text; this._cutLoop(t, it); this._touch(t, it); this._changed(t, false); });
+    s.on('textFinal', (key, text) => { read(); const it = item(`a:${key}`, assistant); if (it.loopCut) return; it.text = text; this._cutLoop(t, it); this._touch(t, it); this._changed(t, false); });
     s.on('reasoningDelta', (key, text) => {
       read();
       const it = item(`r:${key}`, () => ({ id: uuid(), kind: 'reasoning', text: '' }));

@@ -435,8 +435,8 @@ test('fixing one already fixed says nothing; only a decision that doesn\'t exist
   assert.equal(delivered.length, before + 1);
   assert.match(delivered.at(-1).text, /No existe la decisión #99/);
   assert.doesNotMatch(delivered.at(-1).text, /#3/);
-  // A message that fixes and releases the same ones over and over (a model in a loop): what it says last wins.
-  const loop = `Recojo la sonda.\n${'<relevo:fijar>2</relevo:fijar><relevo:soltar>2</relevo:soltar>'.repeat(40)}<relevo:soltar>3</relevo:soltar><relevo:fijar>3</relevo:fijar><relevo:soltar>4</relevo:soltar>`;
+  // A message that fixes and releases the same ones back and forth: what it says last wins.
+  const loop = `Recojo la sonda.\n${'<relevo:fijar>2</relevo:fijar><relevo:soltar>2</relevo:soltar>'.repeat(6)}<relevo:soltar>3</relevo:soltar><relevo:fijar>3</relevo:fijar><relevo:soltar>4</relevo:soltar>`;
   const thread = teams.host.threads.get('L');
   const item = { id: 'm', kind: 'assistant', text: loop };
   const notices = [];
@@ -445,4 +445,47 @@ test('fixing one already fixed says nothing; only a decision that doesn\'t exist
   assert.deepEqual(pinned(), [3]);
   assert.deepEqual(notices, ['Decisión soltada: #4'], 'one notice, not one per tag');
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('a message stuck in a loop: the repeated order goes nowhere, the rest does, and the orchestrator is told once', async () => {
+  const { orderFlood, ORDER_FLOOD } = await import('../lib/team.mjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'relevo-board-'));
+  const { teams, team, lead, delivered, notices } = stand({ projectPath: dir });
+  const head = 'Leído el informe. <relevo:tarea para="Ejecutor 1">Recoge la sonda t339.</relevo:tarea> Y busco antes una cosa: <relevo:buscar>sonda t339</relevo:buscar>\n\n';
+  const loop = Array.from({ length: 60 }, (_, i) => `<relevo:buscar>${i + 1}</relevo:buscar>`).join('\n\n');
+  assert.deepEqual(orderFlood(head), []);
+  const [flood] = orderFlood(head + loop);
+  assert.equal(flood.type, 'buscar');
+  assert.equal(flood.n, 61);
+  assert.ok(flood.at > head.indexOf('</relevo:tarea>'), 'the loop starts after the task');
+  assert.equal(orderFlood(Array.from({ length: ORDER_FLOOD }, (_, i) => `<relevo:cerrar tarea="${i}">ok</relevo:cerrar>`).join('')).length, 0, 'closing 20 tasks is not a loop');
+  const item = { id: 'm', kind: 'assistant', text: head + loop };
+  teams._dispatch(team, lead, teams.host.threads.get('L'), parseOrders(item.text), [item]);
+  const toExec = delivered.filter((d) => d.to === 'Ejecutor 1');
+  assert.equal(toExec.length, 1, 'the task still goes');
+  const warnings = delivered.filter((d) => d.to === 'Orquestador' && d.from?.label === 'aviso');
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0].text, /bucle repitiendo <relevo:buscar> 61 veces/);
+  assert.equal(delivered.filter((d) => d.from?.label === 'búsqueda').length, 0, 'no search at all');
+  assert.ok(notices.some((n) => /Mensaje en bucle: «buscar» 61 veces/.test(n)));
+  teams._dispatch(team, lead, teams.host.threads.get('L'), parseOrders(item.text), [item]);
+  assert.equal(delivered.filter((d) => d.from?.label === 'aviso').length, 1, 'told once');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('the host cuts a team message where its loop starts and stops the agent', async () => {
+  const { Host } = await import('../lib/host.mjs');
+  let interrupted = 0;
+  const appended = [];
+  const fake = { _rt: () => ({}), log() {}, _append: (t, it) => appended.push(it.text), agents: new Map([['L', { interrupt: () => interrupted++ }]]) };
+  const t = { id: 'L', title: 'Orquestador', team: { id: 'T1', role: 'orchestrator' } };
+  const it = { text: 'Recojo con E4 la sonda. <relevo:tarea para="Ejecutor 4">Recoge el run.</relevo:tarea>\n\n' };
+  for (let i = 0; i < 30 && !it.loopCut; i++) { it.text += '<relevo:fijar>661</relevo:fijar>\n\n<relevo:soltar>661</relevo:soltar>\n\n'.repeat(3); Host.prototype._cutLoop.call(fake, t, it); }
+  assert.ok(it.loopCut, 'cut');
+  assert.equal(it.text, 'Recojo con E4 la sonda. <relevo:tarea para="Ejecutor 4">Recoge el run.</relevo:tarea>');
+  assert.equal(interrupted, 1);
+  assert.match(appended[0], /Relevo cortó este mensaje: repetía «fijar» en bucle/);
+  const solo = { text: 'x'.repeat(5000) };
+  Host.prototype._cutLoop.call(fake, { id: 'S', title: 'Hilo suelto' }, solo);
+  assert.equal(solo.loopCut, undefined, 'only team threads');
 });

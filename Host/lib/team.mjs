@@ -49,6 +49,26 @@ const NOTE_MAX = 6_000, NOTE_TTL = 24 * 3600;
 const DECISIONS_MAX = 25; // besides the pinned ones
 const PINNED_MAX = 12;
 const PIN_ORDER = new Set(['fijar', 'soltar']);
+/** More orders of one kind than this in one message is a model stuck in a loop, not a plan. */
+export const ORDER_FLOOD = 20;
+/**
+ * The kinds of order a message repeats over and over (a model stuck in a loop: «buscar 1, 2, 3…», «fijar 661,
+ * soltar 661…»), with how many times and where the first one starts; [] when it's a normal message.
+ */
+export function orderFlood(text, max = ORDER_FLOOD) {
+  const seen = new Map();
+  for (const m of String(text ?? '').matchAll(/<relevo:([a-zA-ZñÑóÓ]+)\b/g)) {
+    const type = m[1].toLowerCase().replace('ó', 'o');
+    if (!seen.has(type)) seen.set(type, []);
+    seen.get(type).push(m.index);
+  }
+  return [...seen].filter(([, at]) => at.length > max).map(([type, at]) => {
+    // Where the loop starts: back from the end while they come one after another (not a single one said before).
+    let i = at.length - 1;
+    while (i > 0 && at[i] - at[i - 1] < 400) i--;
+    return { type, n: at.length, at: at[i] };
+  });
+}
 /** «#655, 658 y 659» → [655, 658, 659]. */
 const decisionIds = (s) => [...new Set(String(s ?? '').match(/\d+/g)?.map(Number) ?? [])];
 /** Open tasks listed at the end of each message to the orchestrator (when the board changed). */
@@ -1156,12 +1176,27 @@ export class Teams {
       ? items.flatMap((it) => parseOrders(it.text).map((o) => ({ o, it })))
       : orders.map((o) => ({ o, it: null }));
     const pins = new Map(); // per message: the decisions its new fijar/soltar orders touch
+    // A message stuck in a loop: the kind it repeats goes nowhere (the rest of what it says does), and it's told once.
+    const floods = new Map();
+    const floodOf = (it) => {
+      if (!floods.has(it)) floods.set(it, new Set(orderFlood(it ? it.text : orders.map((o) => `<relevo:${o.type}>`).join('')).map((f) => f.type)));
+      return floods.get(it);
+    };
+    for (const it of items ?? []) {
+      const flood = it.loopCut ? [it.loopCut] : orderFlood(it.text);
+      if (!flood.length || it.loopWarned) continue;
+      it.loopWarned = true;
+      const what = flood.map((f) => `<relevo:${f.type}> ${f.n} veces`).join(' y ');
+      this._deliver(team, member, `Tu último mensaje se quedó en bucle repitiendo ${what}${it.loopCut ? ', y Relevo lo cortó ahí' : ''}. Las repetidas no las he hecho; lo demás que decías sí ha salido. Si necesitas alguna, pídela una sola vez.`, { name: 'Relevo', role: 'relevo', label: 'aviso' });
+      this.host._append(thread, { id: this.host._uuid(), kind: 'notice', text: `Mensaje en bucle: ${what.replace(/<relevo:(\w+)>/g, '«$1»')}, sin hacer. Se lo he dicho al ${member.name}.` });
+    }
     for (const { o, it } of list) {
       const sig = orderSig(o);
       if (it?.orderSigs?.includes(sig)) continue;
       if (it) it.orderSigs = [...(it.orderSigs ?? []), sig];
       if (r.sentOrders.has(sig)) continue;
       r.sentOrders.add(sig);
+      if (floodOf(it).has(o.type)) continue;
       if (PIN_ORDER.has(o.type)) {
         const touched = pins.get(it) ?? new Set();
         for (const id of decisionIds(o.body || o.to)) touched.add(id);
