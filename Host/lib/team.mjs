@@ -319,7 +319,7 @@ ${executors.some((e) => host.threads.get(e.threadId)?.worktree) ? '<relevo:integ
 
 Tablero: cada tarea que das queda en el tablero de Relevo con un número (T12), su responsable, su hito y su estado (pendiente, en curso, bloqueada, hecha, pausada). Para aparcar una tarea sin cerrarla: <relevo:pausar tarea="12">por qué</relevo:pausar> (Relevo avisa a su agente de que la deje y conserve su trabajo, y su rama no se retira); para retomarla, <relevo:reanudar tarea="12">desde dónde sigue</relevo:reanudar> (se la vuelve a dar a su agente, con lo que escribas). No dejes «en curso» una tarea que nadie hace: páusala. Cuando el agente informa «hecho», la tarea queda HECHA a la espera de que la compruebes: ciérrala con <relevo:cerrar tarea="12">cómo se ha comprobado</relevo:cerrar>, o con <relevo:cerrar tarea="12" estado="descartada">por qué ya no hace falta</relevo:cerrar> si la sustituyes o deja de servir. Cada tarea lleva hito="N" (el hito o subhito al que sirve): si no encaja en ninguno, o falta ese hito o la tarea sobra; sin hito=, Relevo la apunta al hito en curso. Al final de cada mensaje ves las tareas abiertas: no dejes abiertas las que ya no sigues, y no des una tarea que ya está abierta para otro.
 Ramas y worktrees: un ejecutor puede abrir una rama o un worktree para su tarea (uno por tarea, con su número: t12-…). Relevo los ata a su tarea y, cuando la cierras, los retira si todo está integrado (en la rama principal o en una rama integration/…); si queda trabajo sin integrar te lo dice. Cierra o integra las tareas terminadas: así no se acumulan.
-Auditor: si te llega «[Auditor · auditoría]», es una revisión independiente del rumbo hecha con ojos frescos. Contrástala con el tablero y los hitos y corrige lo que tenga razón (prioridades, tareas, hitos); si discrepas en algo importante, díselo al usuario con <relevo:pedir>. Tú también puedes consultarle cuando dudes del rumbo o quieras una segunda opinión antes de una decisión cara: <relevo:auditor>la pregunta concreta, con lo que ya sabes</relevo:auditor>. Revisa en solo lectura (el tablero, el registro, git, los docs) y te responde «[Auditor · respuesta]». Úsalo para decisiones, no para trabajo que puede hacer un ejecutor o el investigador.
+Auditor: si te llega «[Auditor · auditoría]», es una revisión independiente del rumbo hecha con ojos frescos. Contrástala con el tablero y los hitos y corrige lo que tenga razón (prioridades, tareas, hitos); si discrepas en algo importante, díselo al usuario con <relevo:pedir>.${team.audit?.accountId && team.audit.orchestratorAsks ? ' Tú también puedes consultarle cuando dudes del rumbo o quieras una segunda opinión antes de una decisión cara: <relevo:auditor>la pregunta concreta, con lo que ya sabes</relevo:auditor>. Revisa en solo lectura (el tablero, el registro, git, los docs) y te responde «[Auditor · respuesta]». Úsalo para decisiones, no para trabajo que puede hacer un ejecutor o el investigador.' : ''}
 
 <relevo:urgente para="${executors[0]?.name ?? 'Ejecutor 1'}">…</relevo:urgente>  solo si lo que está haciendo ahora es claramente erróneo o ya no sirve: interrumpe su turno.
 
@@ -1455,7 +1455,7 @@ export class Teams {
     try { this.addLog(team, 'registro', text, 'Relevo'); } catch {}
     const lead = this._lead(team);
     if (lead) h._push?.(lead, list.some((m) => !m.parent) ? 'Hito conseguido' : 'Subhito conseguido', clip(text, 200), 'hito');
-    if (!team.audit?.accountId || team.audit.onMilestone === false) return;
+    if (!team.audit?.accountId || !team.audit.onMilestone) return;
     const t = team.audit.threadId && h.threads.get(team.audit.threadId);
     if (t && this._busy(t)) return;
     try { this.runAudit(team.id); } catch (e) { h.log?.(`auditoría al cerrar un hito: ${e.message}`); }
@@ -2335,7 +2335,8 @@ export class Teams {
    * The auditor: every few hours (or when you ask), a model with fresh eyes and read-only access reviews whether
    * the team is moving towards the goal — the board, the milestones, the decisions, the log, git and the docs —
    * and the orchestrator gets its review. What you've been doing by hand with an outside AI.
-   * audit: { accountId, model, effort, every (hours, 0 = only when asked) }
+   * audit: { accountId, model, effort, every (hours, 0 = only when you ask), onMilestone, orchestratorAsks }
+   * It never runs on its own beyond what you chose: on a milestone and the orchestrator's questions are opt-in.
    */
   setAudit(team, audit) {
     if (!audit || !audit.accountId) { if (team.audit) team.audit = { ...team.audit, every: 0, accountId: null }; return 'La auditoría periódica está desactivada'; }
@@ -2343,8 +2344,18 @@ export class Teams {
     if (!a) throw new Error('La cuenta del auditor no existe');
     const every = Math.max(0, Math.min(48, Number(audit.every) || 0));
     const prev = team.audit ?? {};
-    team.audit = { ...prev, accountId: a.id, model: audit.model || 'default', effort: audit.effort || null, every, lastAt: prev.lastAt ?? Date.now() / 1000, lastTurns: prev.lastTurns ?? team.leadTurns ?? 0 };
-    return every ? `Un auditor (${a.name} · ${this.host._modelName(a, team.audit.model)}) revisará el rumbo del equipo cada ${every} h y te enviará su revisión` : null;
+    const flag = (v, was) => (typeof v === 'boolean' ? v : was === true);
+    const onMilestone = flag(audit.onMilestone, prev.onMilestone);
+    const orchestratorAsks = flag(audit.orchestratorAsks, prev.orchestratorAsks);
+    const askChanged = orchestratorAsks !== (prev.orchestratorAsks === true);
+    team.audit = { ...prev, accountId: a.id, model: audit.model || 'default', effort: audit.effort || null, every, onMilestone, orchestratorAsks, lastAt: prev.lastAt ?? Date.now() / 1000, lastTurns: prev.lastTurns ?? team.leadTurns ?? 0 };
+    if (!orchestratorAsks) delete team.audit.asks;
+    const when = [every ? `cada ${every} h` : null, onMilestone ? 'al conseguirse un hito' : null].filter(Boolean);
+    const said = [
+      when.length ? `Un auditor (${a.name} · ${this.host._modelName(a, team.audit.model)}) revisará el rumbo del equipo ${when.join(' y ')} y te enviará su revisión` : null,
+      askChanged ? (orchestratorAsks ? 'Ya puedes consultar al auditor con <relevo:auditor>la pregunta</relevo:auditor> (solo para decisiones caras o dudas de rumbo)' : 'El usuario ya no deja consultar al auditor: no uses <relevo:auditor>; si necesitas una segunda opinión, pídesela al usuario con <relevo:pedir>') : null,
+    ].filter(Boolean);
+    return said.length ? said.join('. ') : null;
   }
 
   /** The auditor's thread (made the first time): read-only, outside the team, a fresh session for every audit. */
@@ -2394,6 +2405,7 @@ export class Teams {
    */
   askAuditor(team, question, by) {
     if (!team.audit?.accountId) throw new Error('el equipo no tiene auditor (el usuario lo elige en Editar equipo)');
+    if (!team.audit.orchestratorAsks) throw new Error('el usuario no deja consultar al auditor; si necesitas una segunda opinión, pídesela a él con <relevo:pedir>');
     const old = team.audit.threadId && this.host.threads.get(team.audit.threadId);
     if (old && this._busy(old)) {
       team.audit.asks = [...(team.audit.asks ?? []), { text: question, by }].slice(-3);

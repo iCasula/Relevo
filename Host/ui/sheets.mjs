@@ -1033,6 +1033,11 @@ export function openNewTeam(hostId, projectId, goal = '', { threadId = null } = 
 }
 
 /** Edits a team as it is: goal, each member's subscription, model and instructions; add or remove members. */
+
+/** The auditor's settings as the edit sheet keeps them (and compares them, to send only what changed). */
+const auditState = (team) => ({ accountId: team.audit?.accountId ?? '', model: team.audit?.model ?? 'default', effort: team.audit?.effort ?? '', every: team.audit?.every ?? 0, onMilestone: !!team.audit?.onMilestone, orchestratorAsks: !!team.audit?.orchestratorAsks });
+/** When the auditor reviews, in a few words. */
+const auditWhen = (a) => [a.every ? `cada ${a.every} h` : 'cuando lo pidas', a.onMilestone ? 'en cada hito' : null, a.orchestratorAsks ? 'y le consulta el orquestador' : null].filter(Boolean).join(', ').replace(', y', ' y');
 export function openTeamEditor(hostId, teamId) {
   const team = snap(hostId)?.hostTeams?.find((x) => x.id === teamId);
   if (!team) { toast('Equipo desconocido'); return; }
@@ -1043,7 +1048,7 @@ export function openTeamEditor(hostId, teamId) {
     goal: team.goal,
     members: team.members.map((m) => ({ ...m, accountId: m.accountId ?? usable[0]?.id, model: m.model ?? 'default', effort: m.effort ?? '', daybreak: !!m.daybreak, notes: m.notes ?? '', fallback: m.fallback ?? '', remove: false })),
     workDirs: (team.workDirs ?? []).join('\n'),
-    audit: { accountId: team.audit?.accountId ?? '', model: team.audit?.model ?? 'default', effort: team.audit?.effort ?? '', every: team.audit?.every ?? 0 },
+    audit: auditState(team),
     adds: [], // { role, accountId, model, notes }
     budget: { usd: team.budget?.usd ?? '', action: team.budget?.action ?? 'pause' },
     guard: team.guard !== false,
@@ -1108,17 +1113,19 @@ export function openTeamEditor(hostId, teamId) {
   const auditCard = () => {
     const a = st.audit.accountId ? accountOf(hostId, st.audit.accountId) : null;
     const open = st.open.has('audit');
-    const sum = a ? `${a.name} · ${modelOf(a, st.audit.model)?.name ?? st.audit.model}${st.audit.effort ? ` · ${effortName(st.audit.effort)}` : ''} · ${st.audit.every ? `cada ${st.audit.every} h` : 'solo a mano'}` : 'Sin auditor';
+    const sum = a ? `${a.name} · ${modelOf(a, st.audit.model)?.name ?? st.audit.model}${st.audit.effort ? ` · ${effortName(st.audit.effort)}` : ''} · ${auditWhen(st.audit)}` : 'Sin auditor';
     return `<div class="te-card${open ? ' open' : ''}">
       <button class="te-head" data-open="audit"><span class="role-chip r-researcher">${icon('checklist', { size: 11 })} Auditor</span><b>Revisión del rumbo</b><span class="te-sum">${esc(sum)}</span>${icon(open ? 'chevron.down' : 'chevron.right', { size: 10, cls: 'te-chev' })}</button>
       ${open ? `<div class="te-body">
-        <div class="caption">Un modelo con ojos frescos y solo lectura revisa si el equipo avanza hacia el objetivo y le pasa al orquestador prioridades y desvíos. Mejor de otra familia que el orquestador. Solo audita si el equipo ha trabajado desde la última vez, y también al conseguirse un hito.</div>
+        <div class="caption">Un modelo con ojos frescos y solo lectura revisa si el equipo avanza hacia el objetivo y le pasa al orquestador prioridades y desvíos. Mejor de otra familia que el orquestador. Solo audita cuando tú se lo pides (Auditar ahora, en Auditorías) o cuando lo eliges aquí; las revisiones periódicas, solo si el equipo ha trabajado desde la última.</div>
         <div class="te-grid">
           ${field('Suscripción', `<select class="field" data-audit-acc><option value="">Sin auditor</option>${usable.map((x) => `<option value="${esc(x.id)}"${x.id === st.audit.accountId ? ' selected' : ''}>${esc(x.name)}</option>`).join('')}</select>`)}
           ${a ? field('Modelo', `<select class="field" data-audit-model>${visibleModels(a).map((m) => `<option value="${esc(m.id)}"${m.id === st.audit.model ? ' selected' : ''}>${esc(m.name)}</option>`).join('')}</select>`) : ''}
           ${a && efforts ? field('Esfuerzo', effortSelect(hostId, st.audit.accountId, st.audit.model, st.audit.effort, 'data-audit-effort', 'Esfuerzo del auditor') || '<span class="caption">Este modelo no tiene niveles</span>') : ''}
-          ${a ? field('Cada cuánto', `<select class="field" data-audit-every>${[[0, 'Solo a mano'], [2, 'Cada 2 h'], [3, 'Cada 3 h'], [4, 'Cada 4 h'], [6, 'Cada 6 h'], [8, 'Cada 8 h'], [12, 'Cada 12 h'], [24, 'Cada 24 h']].map(([v, l]) => `<option value="${v}"${v === Number(st.audit.every) ? ' selected' : ''}>${l}</option>`).join('')}</select>`) : ''}
+          ${a ? field('Cuándo', `<select class="field" data-audit-every>${[[0, 'Solo cuando lo pida'], [1, 'Cada 1 h'], [2, 'Cada 2 h'], [3, 'Cada 3 h'], [4, 'Cada 4 h'], [6, 'Cada 6 h'], [8, 'Cada 8 h'], [12, 'Cada 12 h'], [24, 'Cada 24 h']].map(([v, l]) => `<option value="${v}"${v === Number(st.audit.every) ? ' selected' : ''}>${l}</option>`).join('')}</select>`) : ''}
         </div>
+        ${a && has(hostId, 'teamAuditModes') ? `<label class="te-check"><input type="checkbox" class="check" data-audit-milestone${st.audit.onMilestone ? ' checked' : ''}><span><b>También al conseguirse un hito</b> · una revisión cada vez que el orquestador cierra un hito.</span></label>
+        <label class="te-check"><input type="checkbox" class="check" data-audit-asks${st.audit.orchestratorAsks ? ' checked' : ''}><span><b>El orquestador puede consultarle</b> · le pregunta antes de decisiones caras o cuando duda del rumbo. Cada consulta es una sesión nueva del auditor y gasta de su cuenta.</span></label>` : ''}
       </div>` : ''}
     </div>`;
   };
@@ -1162,6 +1169,8 @@ export function openTeamEditor(hostId, teamId) {
     $('[data-audit-model]')?.addEventListener('change', (e) => { st.audit.model = e.target.value; if (!(modelOf(accountOf(hostId, st.audit.accountId), st.audit.model)?.efforts ?? []).includes(st.audit.effort)) st.audit.effort = ''; keep(); draw(); });
     $('[data-audit-effort]')?.addEventListener('change', (e) => { st.audit.effort = e.target.value; keep(); draw(); });
     $('[data-audit-every]')?.addEventListener('change', (e) => { st.audit.every = Number(e.target.value); keep(); draw(); });
+    $('[data-audit-milestone]')?.addEventListener('change', (e) => { st.audit.onMilestone = e.target.checked; keep(); draw(); });
+    $('[data-audit-asks]')?.addEventListener('change', (e) => { st.audit.orchestratorAsks = e.target.checked; keep(); draw(); });
     s.el.querySelectorAll('[data-fb-effort]').forEach((el) => { el.onchange = () => { const r = target(el.dataset.fbEffort); const [acc, model] = String(r.fallback).split('|'); r.fallback = el.value ? `${acc}|${model}|${el.value}` : `${acc}|${model}`; }; });
     s.el.querySelectorAll('[data-notes]').forEach((el) => { el.oninput = () => { target(el.dataset.notes).notes = el.value; }; });
     s.el.querySelectorAll('[data-fb]').forEach((el) => { el.onchange = () => { target(el.dataset.fb).fallback = el.value; keep(); draw(); }; });
@@ -1186,7 +1195,7 @@ export function openTeamEditor(hostId, teamId) {
       const changes = {
         goal: st.goal.trim() !== team.goal ? st.goal.trim() : undefined,
         members: st.members.filter((m, i) => !m.remove && JSON.stringify({ threadId: m.threadId, accountId: m.accountId, model: m.model, effort: m.effort, daybreak: m.daybreak, notes: m.notes, fallback: m.fallback, name: m.name }) !== JSON.stringify(before[i])).map(({ threadId, accountId, model, effort, daybreak, notes, fallback, name }) => ({ threadId, accountId, model, effort: efforts ? effort || null : undefined, daybreak: daybreaks ? !!daybreak && modelOf(accountOf(hostId, accountId), model)?.daybreak !== false : undefined, notes, fallback, name: canRename ? name : undefined })),
-        audit: has(hostId, 'teamAudit') && JSON.stringify(st.audit) !== JSON.stringify({ accountId: team.audit?.accountId ?? '', model: team.audit?.model ?? 'default', effort: team.audit?.effort ?? '', every: team.audit?.every ?? 0 }) ? (st.audit.accountId ? { ...st.audit, effort: st.audit.effort || null } : null) : undefined,
+        audit: has(hostId, 'teamAudit') && JSON.stringify(st.audit) !== JSON.stringify(auditState(team)) ? (st.audit.accountId ? { ...st.audit, effort: st.audit.effort || null } : null) : undefined,
         workDirs: has(hostId, 'teamWorkDirs') && st.workDirs.trim() !== (team.workDirs ?? []).join('\n') ? st.workDirs.split('\n').map((x) => x.trim()).filter(Boolean) : undefined,
         remove: st.members.filter((m) => m.remove).map((m) => m.threadId),
         add: { executors: st.adds.filter((a) => a.role === 'executor'), researcher: st.adds.find((a) => a.role === 'researcher') ?? null },
@@ -1345,7 +1354,7 @@ export function openTeamMemory(hostId, teamId, tab = undefined) {
     } else if (tab === 'audits') {
       const a = team.audit;
       const acc = a && accountOf(hostId, a.accountId);
-      body = `<div class="caption" style="margin-bottom:6px">Un modelo con ojos frescos y solo lectura revisa si el equipo avanza hacia el objetivo (tablero, hitos, decisiones, registro, git y documentos) y le pasa su revisión al orquestador; también audita al conseguirse un hito. Un auditor externo puede escribirle dejando un fichero en <code>.relevo/al-orquestador/</code> del proyecto, y leer el tablero en <code>.relevo/tablero.md</code>. ${a ? `Auditor: ${esc(acc?.name ?? '?')} · ${esc(modelOf(acc, a.model)?.name ?? a.model)}${a.every ? `, cada ${a.every} h` : ', solo cuando lo pidas'}.` : 'Elige su modelo y cada cuánto en Editar equipo.'}</div>
+      body = `<div class="caption" style="margin-bottom:6px">Un modelo con ojos frescos y solo lectura revisa si el equipo avanza hacia el objetivo (tablero, hitos, decisiones, registro, git y documentos) y le pasa su revisión al orquestador. Un auditor externo puede escribirle dejando un fichero en <code>.relevo/al-orquestador/</code> del proyecto, y leer el tablero en <code>.relevo/tablero.md</code>. ${a ? `Auditor: ${esc(acc?.name ?? '?')} · ${esc(modelOf(acc, a.model)?.name ?? a.model)}: audita ${esc(auditWhen(a))}.` : 'Elige su modelo y cuándo audita en Editar equipo.'}</div>
         <div class="team-line"><button class="btn primary" data-audit${a && !a.running ? '' : ' disabled'}>${a?.running ? '<span class="spinner"></span> Auditando…' : 'Auditar ahora'}</button>${a?.threadId ? `<button class="btn" data-audit-thread>Ver el hilo del auditor</button>` : ''}</div>
         <div class="decisions" style="margin-top:8px">${board.audits.length ? board.audits.map((x, i) => `<details class="decision audit"${i === 0 ? ' open' : ''}><summary><b>${esc(when(x.ts))}</b> · ${esc(((/^\s*[*_#>\- ]*conclusi[oó]n:?\**\s*(.+)$/im.exec(x.text) ?? [])[1] ?? x.text.split('\n')[0]).slice(0, 200))}</summary><div class="f-sum selectable" style="color:var(--text);max-height:none;white-space:pre-wrap">${esc(x.text)}</div></details>`).join('')
           : '<div class="caption" style="padding:10px 2px">Aún no hay auditorías.</div>'}</div>`;

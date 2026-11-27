@@ -398,7 +398,12 @@ test('the orchestrator asks the auditor: a read-only session with the question, 
   teams._order(team, lead, { type: 'auditor', to: null, body: '¿Seguimos con el GC?' });
   assert.match(delivered.at(-1).text, /No se ha podido consultar al auditor: el equipo no tiene auditor/);
   team.leadTurns = 10;
+  // An auditor you haven't let it consult: told to ask you instead, no session.
   teams.setAudit(team, { accountId: 'acc', model: 'opus', every: 4 });
+  teams._order(team, lead, { type: 'auditor', to: null, body: '¿Seguimos con el GC?' });
+  assert.match(delivered.at(-1).text, /el usuario no deja consultar al auditor.*<relevo:pedir>/);
+  assert.equal(started.length, 0);
+  assert.match(teams.setAudit(team, { accountId: 'acc', model: 'opus', every: 4, orchestratorAsks: true }), /Ya puedes consultar al auditor/);
   const clock = team.audit.lastAt;
   teams._order(team, lead, { type: 'tarea', to: 'Auditor', body: '¿Vale la pena otro NRO de memoria o desglosamos antes?' });
   assert.equal(started.length, 1, 'para="Auditor" is a question for it');
@@ -488,4 +493,40 @@ test('the host cuts a team message where its loop starts and stops the agent', a
   const solo = { text: 'x'.repeat(5000) };
   Host.prototype._cutLoop.call(fake, { id: 'S', title: 'Hilo suelto' }, solo);
   assert.equal(solo.loopCut, undefined, 'only team threads');
+});
+
+test('the auditor runs only when you chose: on demand, every N hours, on a milestone if you ticked it', () => {
+  const { teams, team } = stand();
+  const started = [];
+  const A = { id: 'A', title: 'x', queued: [], items: [] };
+  Object.assign(teams.host, {
+    accountsById: new Map([['ACC', { id: 'ACC', name: 'Claude' }]]), _modelName: (a, m) => m,
+    createThread: () => { teams.host.threads.set('A', A); return A; }, agents: new Map(),
+    _startTurn: (t, text) => started.push(text), _push() {}, _saveState() {}, _broadcastSnapshot() {},
+  });
+  teams._busy = () => false;
+  team.leadTurns = 10;
+  // On demand: nothing on its own, neither with time nor on a milestone; your button does run it.
+  assert.equal(teams.setAudit(team, { accountId: 'acc', model: 'opus', every: 0 }), null);
+  assert.deepEqual([team.audit.onMilestone, team.audit.orchestratorAsks], [false, false]);
+  team.leadTurns = 50;
+  teams.watchAudits(team.audit.lastAt + 100 * 3600);
+  teams.setMilestones(team, '2', true);
+  assert.equal(started.length, 0);
+  teams.runAudit(team.id, true);
+  assert.deepEqual(started, ['Auditoría del equipo (pedida por el usuario)']);
+  // An auditor set up before this (no flags): no audit on a milestone either.
+  delete team.audit.onMilestone;
+  teams._milestoneReached(team, [{ id: 3, text: 'x' }]);
+  assert.equal(started.length, 1);
+  // Every N hours; changing only the schedule keeps the other choices.
+  assert.match(teams.setAudit(team, { accountId: 'acc', model: 'opus', every: 2, onMilestone: true }), /cada 2 h y al conseguirse un hito/);
+  assert.equal(teams.setAudit(team, { accountId: 'acc', model: 'opus', every: 6 }).includes('al conseguirse un hito'), true);
+  assert.equal(team.audit.onMilestone, true);
+  team.leadTurns = 60;
+  teams.watchAudits(team.audit.lastAt + 7 * 3600);
+  assert.equal(started.at(-1), 'Auditoría periódica del equipo');
+  team.leadTurns = 70;
+  teams._milestoneReached(team, [{ id: 4, text: 'y' }]);
+  assert.equal(started.length, 3, 'on a milestone, now that you ticked it');
 });

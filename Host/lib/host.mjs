@@ -70,7 +70,7 @@ export function modelScore(m, tier) {
   return 60;
 }
 /** What this host does beyond the shared protocol; clients show those controls only when listed. */
-export const HOST_FEATURES = ['askUser', 'effortSwitch', 'teamWorkDirs', 'daybreak', 'teamBoard', 'teamAudit', 'teamParked', 'teamGit', 'teams', 'projects', 'threads', 'git', 'images', 'usage', 'login', 'settings', 'limitPlans', 'history', 'titles', 'accounts',
+export const HOST_FEATURES = ['askUser', 'effortSwitch', 'teamWorkDirs', 'daybreak', 'teamBoard', 'teamAudit', 'teamAuditModes', 'teamParked', 'teamGit', 'teams', 'projects', 'threads', 'git', 'images', 'usage', 'login', 'settings', 'limitPlans', 'history', 'titles', 'accounts',
   'turns', 'worktrees', 'pullRequests', 'suggest', 'quickActions', 'attachments', 'teamRename', 'teamDecisions', 'teamMemory', 'smartFallback', 'teamBudget', 'teamHeld', 'guard', 'push', 'waitHere', 'leadApproves', 'renewSessions', 'earlySwitch', 'renewPerAgent'];
 /**
  * A long session rereads its whole context every turn (most of what a subscription spends): past this many tokens
@@ -2227,7 +2227,7 @@ export class Host {
       hostTeams: this.teams.list.map((x) => ({ id: x.id, projectId: x.projectId, goal: x.goal, status: x.status, auto: x.auto, held: x.held.length, decisions: (x.decisions ?? []).map((d) => clean({ id: d.id, text: d.text, by: d.by, at: d.at, pinned: d.pinned || undefined })),
         milestones: (x.milestones ?? []).map((m) => clean({ id: m.id, text: m.text, done: m.done, at: m.at, doneAt: m.doneAt, parent: m.parent })),
         board: this.teams.boardFor(x),
-        audit: x.audit?.accountId ? clean({ accountId: x.audit.accountId, model: x.audit.model, effort: x.audit.effort, every: x.audit.every, lastAt: x.audit.lastAt, threadId: x.audit.threadId, running: (() => { const at = x.audit.threadId && this.threads.get(x.audit.threadId); return at ? this._rt(at).isRunning || undefined : undefined; })() }) : undefined,
+        audit: x.audit?.accountId ? clean({ accountId: x.audit.accountId, model: x.audit.model, effort: x.audit.effort, every: x.audit.every, onMilestone: x.audit.onMilestone || undefined, orchestratorAsks: x.audit.orchestratorAsks || undefined, lastAt: x.audit.lastAt, threadId: x.audit.threadId, running: (() => { const at = x.audit.threadId && this.threads.get(x.audit.threadId); return at ? this._rt(at).isRunning || undefined : undefined; })() }) : undefined,
         findings: (x.findings ?? []).map((f) => ({ id: f.id, topic: f.topic, summary: f.summary, links: f.links ?? [], by: f.by, at: f.at })),
         budget: x.budget ?? undefined,
         guard: x.members.every((m) => { const t = this.threads.get(m.threadId); return !t || this._guarded(t); }),
